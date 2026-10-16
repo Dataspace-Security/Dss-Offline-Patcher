@@ -1,0 +1,709 @@
+
+
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" dir="ltr" html lang="en">
+<head id="Head1"><meta charset="utf-8" /><meta http-equiv="X-UA-Compatible" content="IE=7" /><link rel="stylesheet" type="text/css" href="Style/catalog.css" /><title>
+	Microsoft Update Catalog
+</title><script type="text/javascript">
+	function supressError(message, url, line)
+	{
+	  var re = /^function\s*([^(]*)\s*\(([^)]*)\)/;
+	  var matches = null;
+	  if (arguments.caller != null) {
+	    matches = re.exec(arguments.caller.callee);
+	  }
+	  var argArray = new Array();
+	  var fName = 'unknown';
+	  if(matches)
+	  {
+	    if(matches[1] && matches[1].toString().length > 0)
+	       fName = matches[1].toString();
+	    if(matches[2] && matches[2].toString().length > 0)
+	    {
+	       var cleanMatches = new String(matches[2]).replace(/\s*/g,'');
+	       argArray = cleanMatches.split(',');
+	    }
+	  }
+	  var args = (argArray.length>0)?'':'none';
+	  for(var i=0; i<argArray.length; i++)
+	  {
+	    args += ((args=='')?'':', ') + argArray[i] + '(' + typeof(arguments.caller[i]) + '):';
+	    args += arguments.caller[i];
+	  }
+	  if(typeof(logger) != typeof(undefined) && logger != null)
+	    logger.log(logger.logLevelFatal, 'JavaScript Error: MESSAGE='+ message + '. URL=' + url + '. LINE='+ line + '. FUNCTION_NAME=' + fName +'. ARGUMENTS=' + args);
+	  else if(typeof(console) != typeof(undefined) && console != null)
+	    console.log('JavaScript Error: MESSAGE='+ message + '. URL=' + url + '. LINE='+ line + '. FUNCTION_NAME=' + fName +'. ARGUMENTS=' + args);
+	  var location = window.location.href.toLowerCase();
+	  if(location.indexOf('ErrorInline.aspx'.toLowerCase()) == -1)
+	    window.location.href = 'ErrorInline.aspx'  + '?id=' + Microsoft.UpdateServices.Catalog.Constants.ErrorScriptError;
+	  return true;
+	}
+	window.onerror = supressError;
+</script></head>
+<body class="mainBody" id="ltr">
+    <form method="post" action="./ScopedViewInline.aspx?updateid=ac395651-eed0-47e7-a5cf-bd9ceccd6299" id="scopedViewInline">
+<div class="aspNetHidden">
+<input type="hidden" name="__EVENTTARGET" id="__EVENTTARGET" value="" />
+<input type="hidden" name="__EVENTARGUMENT" id="__EVENTARGUMENT" value="" />
+<input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="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" />
+</div>
+
+<script type="text/javascript">
+//<![CDATA[
+var theForm = document.forms['scopedViewInline'];
+if (!theForm) {
+    theForm = document.scopedViewInline;
+}
+function __doPostBack(eventTarget, eventArgument) {
+    if (!theForm.onsubmit || (theForm.onsubmit() != false)) {
+        theForm.__EVENTTARGET.value = eventTarget;
+        theForm.__EVENTARGUMENT.value = eventArgument;
+        theForm.submit();
+    }
+}
+//]]>
+</script>
+
+
+<script src="/WebResource.axd?d=pynGkmcFUV13He1Qd6_TZOLZS4GFtyaaQeGKxGNeXLHFIoqjffscZ5Dbvzn7RoBYlYIT6BIsPvdF-VmWJYEotw2&amp;t=639242231464565748" type="text/javascript"></script>
+
+
+<script src="/ScriptResource.axd?d=uHIkleVeDJf4xS50Krz-yDk3KMF6Vlj9VzS2RP8t0XQutDaDaqP_-Fxix9OA8RkFcQe1U7UlMz2Ui1t4HVNsrkiUfTKl0t5VfnYNodUxzCROpfURweiB8HjBquwsBecmHqqdR60B8aQWNMw3KMJLFN8TrGytAsFWwVsNEzxC2r01&amp;t=ffffffffbec1863d" type="text/javascript"></script>
+<script src="/ScriptResource.axd?d=Jw6tUGWnA15YEa3ai3FadFSq_nTk2hfVah4sa4rIOJeScIk59wic0H9dX4rFx1NuxRPRxPPhCTsZhfyPCSjZl7Ps6biPot8YLTD1H6-I-Lwq1uRl_eihYQw_hKc3npS_AcC_c2ieWC1AzBlHg-KBofxEItKuz2Quhb8BvC0TKm81&amp;t=ffffffffbec1863d" type="text/javascript"></script>
+<script src="SiteConstants.aspx?6" type="text/javascript"></script>
+<script src="Script/CommonTypes.js?6" type="text/javascript"></script>
+<script src="Script/DownloadBasket.js?6" type="text/javascript"></script>
+<script src="Script/MasterComponents.js?6" type="text/javascript"></script>
+<script src="Script/ScopedView.js?6" type="text/javascript"></script>
+<script src="Script/HelperMethods.js?6" type="text/javascript"></script>
+<div class="aspNetHidden">
+
+	<input type="hidden" name="__VIEWSTATEGENERATOR" id="__VIEWSTATEGENERATOR" value="015E8938" />
+</div>
+        <script type="text/javascript" language="javascript">
+        function pageLoad()
+        {           
+            pageLoadHelper("true");
+        }
+        </script>
+
+        <div class="inlinePadding">
+            <div id="scopedViewHeaderTitleBox" class="dialogHeader" role="banner">
+                <span id="scopedViewHeaderTitleResource">Update Details</span>
+            </div>
+            
+ <div id="contentSection" role="contentinfo">
+       <script type="text/javascript">
+//<![CDATA[
+Sys.WebForms.PageRequestManager._initialize('ScopedViewHandler$scriptManager', 'scopedViewInline', [], [], [], 90, '');
+//]]>
+</script>
+
+    
+    <script type="text/javascript" language="javascript">
+        var scopedViewComponent;
+        var binarySize = new Array();
+
+        ///<summary>
+        ///     This function is called automatically by ASP.NET AJAX framework when the page finishes loading
+        ///</summary>
+        function pageLoadHelper(details)
+        {           
+           var downloadButton = $get('downloadButton'); 
+           var uId = 'ac395651-eed0-47e7-a5cf-bd9ceccd6299';
+           var addToBasketLabel = 'Add to Basket';
+           var removeFromBasketLabel = 'Remove from Basket';
+           var sizeContainer = $get('ScopedViewHandler$size'.replace(/\$/g, '_'));
+           var updateBasketLabel = 'Update Basket';           
+           if(details != "true")
+           {
+                // Get the MasterPageContext object
+                var masterPageContext = createMasterPageComponents(true);
+                if(masterPageContext == null)
+                {
+                    return;
+                }
+                
+                if(typeof(downloadButton) != typeof(Microsoft.UpdateServices.Catalog.Constants.UndefinedValue)
+                    && downloadButton != null)
+                {
+                    downloadButton.value = 'Download Now';
+                    $addHandler(downloadButton, "click", function () { 
+                        //pass in the updateid, size and languages info as language info is needed to know what binaries to downlaod and 
+                        //language info and size info is needed to add the update back to basket if the update is failed or cancled in download process
+                        var updateIDLang = uId 
+                        //if all the check box is present then the language selection is present
+                        var allCheckbox = $get('allLan')    
+                        if(typeof(allCheckbox) != typeof(Microsoft.UpdateServices.Catalog.Constants.UndefinedValue) && allCheckbox != null)
+                        {
+                            updateIDLang += Microsoft.UpdateServices.Catalog.Constants.UpdateInfoSeparator+  scopedViewComponent.getTotalSize() +  scopedViewComponent.getLangSelected(); 
+                        }
+                        //serialize the update selection so on the server this can be de-serialized uing Jason
+                        var serializedUpdateInfo = Sys.Serialization.JavaScriptSerializer.serialize([new Microsoft.UpdateServices.Catalog.Update(updateIDLang)]);
+                        masterPageContext.get_basketForm().updateIDs.value = serializedUpdateInfo;
+                            
+                        var qs = new Microsoft.UpdateServices.Catalog.QueryString(window.location.search);
+                        var downloadDialog = window.open(Microsoft.UpdateServices.Catalog.Constants.PageDownloadDialog + qs.appendErrorsQS("?scopedview=true"),
+                                                Microsoft.UpdateServices.Catalog.Constants.EmptyString,
+                                                'height=460,width=640,status=no,toolbar=no,menubar=no,location=no,scrollbars=yes,resizable=1 ');
+                        if(downloadDialog == null)
+                        {
+                            popupInfo.style.display = "block";
+                        }
+                    });
+                    downloadButton.style.display = "inline";           
+                }
+           }
+           //get all the language elements and attach event to them and build an array to pass to js
+            var inputElments = languageBox.getElementsByTagName("input");
+            var languageCheckboxes = new Array();            
+            for(i=0; i<inputElments.length; i++ )
+            {
+                if(inputElments[i].type == "checkbox" && inputElments[i].id != "allLan")
+                { 
+                    languageCheckboxes.push(inputElments[i]);              
+                    attachEventToCheckbox(inputElments[i]); 
+                }
+            }
+            //add event handler to all language checkbox  
+            var allCheckbox = $get('allLan')
+            if (typeof(allCheckbox) != typeof(Microsoft.UpdateServices.Catalog.Constants.UndefinedValue) && allCheckbox != null) {
+                $addHandler(allCheckbox, "click", function () { scopedViewComponent.allLanguageSelected(); }); 
+            }
+
+            scopedViewComponent = new Microsoft.UpdateServices.Catalog.UI.ScopedView(
+                                            $get('contentSection'), 
+                                            uId, 
+                                            addToBasketLabel, 
+                                            removeFromBasketLabel,
+                                            $get('overView'),
+                                            $get('overviewBox'),
+                                            $get('packageDetails'),
+                                            $get('packageBox'),
+                                            $get('installDetails'),
+                                            $get('installBox'),
+                                            $get('languageSelection'),
+                                            $get('languageBox'),
+                                            languageCheckboxes,
+                                            "",
+                                            sizeContainer,
+                                            updateBasketLabel,
+                                            allCheckbox,
+                                            downloadButton,
+                                            binarySize //array of binary size per locale
+                                            );       
+
+            $addHandler($get('overView'), 'keydown', TextBox_OnKeyDownOverview);
+            $addHandler($get('languageSelection'), 'keydown', TextBox_OnKeyDownLanguage);
+            $addHandler($get('packageDetails'), 'keydown', TextBox_OnKeyDownPackage);
+            $addHandler($get('installDetails'), 'keydown', TextBox_OnKeyDownDetails);
+
+            $get('overView').setAttribute("aria-selected", "true");
+            $get('languageSelection').setAttribute("aria-selected", "false");
+            $get('installDetails').setAttribute("aria-selected", "false");
+            $get('packageDetails').setAttribute("aria-selected", "false");
+
+            $addHandler(overView, "click", function () { scopedViewComponent.switchTab(1); });
+            $addHandler(packageDetails, "click", function () { scopedViewComponent.switchTab(2); });
+            $addHandler(installDetails, "click", function () { scopedViewComponent.switchTab(3); });
+            $addHandler(languageSelection, "click", function () { scopedViewComponent.switchTab(4); });
+            $addHandler(window, "focus", function () { 
+                if (typeof(scopedViewComponent) != typeof(Microsoft.UpdateServices.Catalog.Constants.UndefinedValue)) {
+                    scopedViewComponent.updateLabels("true");
+                }
+            });
+        }
+        
+        function attachEventToCheckbox(languageCheckbox) {
+            $addHandler(languageCheckbox, "click", function () { scopedViewComponent.manageBasketButton(); });
+        }
+
+
+        function TextBox_OnKeyDownOverview(e)
+        {
+            if (e.keyCode == 39)
+            {
+                $get('languageSelection').focus();
+            }
+        }
+
+        function TextBox_OnKeyDownLanguage(e)
+        {
+            if (e.keyCode == 39)
+            {
+                $get('packageDetails').focus();
+            }
+
+            if (e.keyCode == 37)
+            {
+                $get('overView').focus();
+
+            }
+        }
+
+        function TextBox_OnKeyDownPackage(e)
+        {
+            if (e.keyCode == 39)
+            {
+                $get('installDetails').focus();
+            }
+
+            if (e.keyCode == 37)
+            {
+                $get('languageSelection').focus();
+            }
+        }
+
+        function TextBox_OnKeyDownDetails(e)
+        {
+            if (e.keyCode == 37)
+            {
+                $get('packageDetails').focus();
+            }
+        }
+
+        function copyUpdateidToClipboard() {
+            copyTextToClipboard("ac395651-eed0-47e7-a5cf-bd9ceccd6299");
+        }
+
+        
+
+    </script>
+    <div class="textBottomSpacer labelTitle" id="titleDiv">
+        <span id="ScopedViewHandler_titleText">2026-10 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5126657)</span>
+    </div>
+    <div id="dateDiv" class="textBottomSpacer">
+        <span id="ScopedViewHandler_labelLastModified_Separator" class="labelTitle">Last Modified:</span>
+        <span id="ScopedViewHandler_date">10/13/2026</span>
+    </div>
+    <div id="sizeDiv" class="textBottomSpacer">
+        <span class="labelTitle">Size:</span>
+        <span id="ScopedViewHandler_size">1179.1 MB</span>
+    </div>
+    <div id="updateIdDiv" class="textBottomSpacer">
+        <span class="labelTitle">UpdateID:</span>
+        <span id="ScopedViewHandler_UpdateID">ac395651-eed0-47e7-a5cf-bd9ceccd6299</span>
+        <input id="downloadSettingsUpdateidButton" class="flatBlueButtonDownloadFittext focus-only" type="button" value="Copy" onclick="copyUpdateidToClipboard()">
+        <div id="liveRegion" aria-live="polite" aria-atomic="true" style="position: absolute; left: -9999px;"></div>
+    </div>
+    <div id="buttonsDiv">
+        <input id="downloadButton" class="flatBlueButton buttonPadding" type="button" style="display: none;" />
+    </div>
+</div>
+<div id="popupInfo" class="poupInfoDiv">
+    <table cellpadding="0" cellspacing="0" border="0">
+        <tr>
+            <td valign="top">
+                <img src="Images/decor_BigInformation.gif" />
+            </td>
+            <td class="poupInfoText">
+                <span id="ScopedViewHandler_textPopupBlocked">If you have a pop-up blocker enabled, the Download window might not open. To open the Download window, configure your pop-blocker to allow pop-ups for this Web site.</span>
+            </td>
+        </tr>
+    </table>
+</div>
+<div id="tabSection" role="tablist">
+    <div class="textLeftPadding textTopPadding">
+        <span id="ScopedViewHandler_labelDetails_Separator">Details:</span>
+    </div>
+    <div id="tabContainer">
+        <a href="#Overview" id="overView" aria-selected="false" role="tab" class="tab tabActive" tabindex="1" ><span id="ScopedViewHandler_labelOverview">Overview</span></a>
+        <a href="#LanguageSelection"  id="languageSelection"  aria-selected="false" role="tab" class="tab tabInactive" tabindex="11"><span id="ScopedViewHandler_labelLangSelection">Language Selection</span></a>
+        <a href="#PackageDetails"  id="packageDetails"  aria-selected="false" role="tab" class="tab tabInactive" tabindex="21"><span id="ScopedViewHandler_labelPkgDetails">Package Details</span></a>
+        <a href="#InstallDetails"  id="installDetails"   aria-selected="false" role="tab" class="tab tabInactive" tabindex="31"><span id="ScopedViewHandler_labelInstallDetails">Install Resources</span></a>        
+    </div>
+</div>
+<div id="tabBody" role="main">
+    <div id="overviewBox">
+        <div id="overviewContentBody" class="tabBodyContentBox">
+            <table cellpadding="0" cellspacing="0" border="0" width="95%">
+                <tr>
+                    <td id="overviewLeftBox">
+                        <div id="descDiv" class="textDoubleSpacer">
+                            <span id="ScopedViewHandler_labelDescription_Separator" class="labelTitle">Description:</span>
+                            <span id="ScopedViewHandler_desc">A security issue has been identified in a Microsoft software product that could affect your system. You can help protect your system by installing this update from Microsoft. For a complete listing of the issues that are included in this update, see the associated Microsoft Knowledge Base article. After you install this update, you may have to restart your system.</span>
+                        </div>
+                        
+                        <div id="archDiv">
+                            <span id="ScopedViewHandler_labelArchitecture_Separator" class="labelTitle">Architecture:</span>
+                            
+                                    AMD64
+                                
+                        </div>
+                        <div id="classificationDiv">
+                            <span id="ScopedViewHandler_labelClassification_Separator" class="labelTitle">Classification:</span>
+                            
+                                    Security Updates
+                                
+                        </div>                        
+                        <div id="productsDiv">
+                            <span id="ScopedViewHandler_labelSupportedProducts_Separator" class="labelTitle">Supported products:</span>
+                            
+                                    Windows 10, version 1903 and later
+                                
+                        </div>
+                        <div id="languagesDiv">
+                            <span id="ScopedViewHandler_labelSupportedLanguages_Separator" class="labelTitle">Supported languages:</span>
+                            
+                                    all
+                                
+                        </div>
+                    </td>
+                    <td id="overviewRightBox">
+                        <div id="ScopedViewHandler_SoftwareInfo">
+                            <div id="securityBullitenDiv">
+                                <span id="ScopedViewHandler_labelSecurityBulliten_Separator" class="labelTitle">MSRC Number:</span>
+                                
+                                        n/a
+                                    
+                            </div>
+                            <div id="msrcSeverityDiv">
+                                <span id="ScopedViewHandler_labelMSRCSeverity_Separator" class="labelTitle">MSRC severity:</span>
+                                <span id="ScopedViewHandler_msrcSeverity">Critical</span>
+                            </div>
+                            <div id="kbDiv" class="textDoubleSpacer">
+                                <span id="ScopedViewHandler_labelKBArticle_Separator" class="labelTitle">KB article numbers:</span>
+                                
+                                        5126657
+                                    
+                            </div>
+                        </div>
+                        
+                        <div id="moreInfoDiv" class="textDoubleSpacer">
+                            <span id="ScopedViewHandler_labelMoreInfo_Separator" class="labelTitle">More information:</span>
+                            
+                                    <div>
+                                        <a target="catalogNew" tabindex="2" href="https://support.microsoft.com/help/5126657" class ="contentTextItemSpacerNoBreakLink">
+                                            https://support.microsoft.com/help/5126657
+                                        </a>
+                                    </div>
+                                
+                        </div>
+                        <div id="suportUrlDiv" class="textDoubleSpacer">
+                            <span id="ScopedViewHandler_labelSupportUrl_Separator" class="labelTitle">Support Url:</span>
+                            
+                                    <div>
+                                        <a target="catalogNew" tabindex="3" href="https://support.microsoft.com/help/5126657" class = "contentTextItemSpacerNoBreakLink">
+                                            https://support.microsoft.com/help/5126657
+                                        </a>
+                                    </div>
+                                
+                        </div>
+                    </td>
+                </tr>
+            </table>
+        </div>
+    </div>
+    <div id="packageBox" style="display: none">
+        <div id="ScopedViewHandler_softwarePackage">           
+            <div class="tabBodyContentBox tabBodyContentBox">
+                <span id="ScopedViewHandler_labelSupersedingUpdates_Separator" class="labelTitle">This update has been replaced by the following updates:</span>
+                    
+                <div id="supersededbyInfo">
+                    n/a
+                </div>
+                <span id="ScopedViewHandler_labelSupersededUpdates_Separator" class="labelTitle">This update replaces the following updates:</span>
+                <div id="supersedesInfo">
+                    
+                            <div style="padding-bottom: 0.3em;">
+                                2026-08 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5120249)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2026-06 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5094127)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2026-04 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5082200)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2026-03 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5078885)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2026-07 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5099539)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2026-09 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5122878)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2026-02 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5075912)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2026-05 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5087544)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2026-01 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5073724)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2025-11 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5068781)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2025-08 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5063709)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2025-09 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5065429)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2025-10 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5066791)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2025-07 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5062554)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2025-12 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5071546)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2022-10 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5020435)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2023-03 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5023773)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2024-01 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5034203)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2023-05 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5026435)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2023-04 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5025297)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2023-08 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5029331)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2024-03 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5035941)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2023-09 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5030300)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2023-10 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5031445)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2023-11 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5032278)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2022-12 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5021233)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2024-02 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5034843)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2022-11 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5020030)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2023-01 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5019275)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2022-10 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5020953)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2023-07 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5028244)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2023-06 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5027293)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2023-02 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5022906)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2022-10 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5018482)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2024-05 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5037849)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2024-06 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5039299)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2024-04 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5036979)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2024-08 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5041582)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2024-09 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5043131)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2024-07 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5040525)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2024-11 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5046714)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2025-01 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5050081)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2025-02 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5052077)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2024-10 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5045594)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2025-03 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5053643)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2025-04 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5055612)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2025-05 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5058481)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2025-05 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5061979)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2025-05 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5061768)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2025-06 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5061087)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2025-06 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5063159)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2025-07 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5062649)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2025-08 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5063842)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2025-08 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5066188)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2025-09 Cumulative Update Preview for Windows 10 Version 22H2 for x64-based Systems (KB5066198)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2025-12 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5074976)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2026-01 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5078129)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2026-01 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5077796)
+                            </div>
+                        
+                            <div style="padding-bottom: 0.3em;">
+                                2026-09 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5129236)
+                            </div>
+                        
+                </div>
+            </div>
+        </div>
+        
+    </div>
+    <div id="languageBox" style="display: none">
+        <div id="ScopedViewHandler_Div2">
+            <div id ="languageContentBody" class="tabBodyContentBox boxTitleContainer">
+                
+                <span id="ScopedViewHandler_OneLanguage" style="display:block;">There are no additional languages to select</span>
+            </div>
+        </div>
+    </div>
+    <div id="installBox" style="display: none">       
+        <div class="tabBodyContentBox" TABINDEX="1">
+            <div id="rebootBehaviorDiv">
+                <span id="ScopedViewHandler_labelRebooBehavior_Separator" class="labelTitle">Restart behavior:</span>
+                <span id="ScopedViewHandler_rebootBehavior">Can request restart</span>
+            </div>
+            <div id="userInputDiv">
+                <span id="ScopedViewHandler_labelRequiresInput_Separator" class="labelTitle">May request user input:</span>
+                <span id="ScopedViewHandler_userInput">No</span>
+            </div>
+            <div id="installationImpactDiv">
+                <span id="ScopedViewHandler_labelInstallationImpact_Separator" class="labelTitle">Must be installed exclusively:</span>
+                <span id="ScopedViewHandler_installationImpact"></span>
+            </div>
+            <div id="connectivityDiv">
+                <span id="ScopedViewHandler_labelInstallRequiresConnectivity_Separator" class="labelTitle">Requires network connectivity:</span>
+                <span id="ScopedViewHandler_connectivity">No</span>
+            </div>            
+            <div id="uninstallNotesDiv">                
+                <span id="ScopedViewHandler_labelUninstallNotes_Separator" class="labelTitle">Uninstall Notes:</span>
+                
+                        <div>
+                            This software update can be removed by selecting View installed updates in the Programs and Features Control Panel.
+                        </div>
+                    
+            </div>
+             <div id="uninstallStepsDiv">                
+                <span id="ScopedViewHandler_labelUninstallSteps_Separator" class="labelTitle">Uninstall Steps:</span>
+                
+                        <div>
+                            n/a
+                        </div>
+                    
+            </div>
+        </div>
+    </div>
+</div>
+<span id="addToBasketButtonText" class="notVisible">
+    Add to Basket
+</span><span id="removeFromBasketButtonText" class="notVisible">
+    Remove from Basket
+ </span><span id="updateBasketButtonText" class="notVisible">
+    Update Basket
+</span>
+
+            <div class="inlineCloseButtonCenter textAlignCenter">
+                <a href="#Close" id="close" role="button" onclick="window.close()" class="flatBlueButtonClose flatBlueButtonGeneric" ><span id="labelOverview">Close</span></a>
+            </div>
+        </div>
+    </form>
+</body>
+</html>

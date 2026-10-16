@@ -1,0 +1,11 @@
+bin/
+demo/
+*.pmb
+.pmctl-state.json
+agent-state/
+/dist/
+# stray build outputs (use make build → bin/)
+/pmserver
+/pmctl
+/pmagent
+*.exe

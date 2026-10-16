@@ -1,0 +1,40 @@
+{
+  "listen": "0.0.0.0:8443",
+  "data_dir": "/var/lib/offpatch-server",
+  "pki_dir": "/etc/offpatch-server/pki",
+  "trusted_keys": [{"public_key_file": "/etc/offpatch-server/bundle.pub", "sources": ["acq-zone-1"]}],
+  "root_public_key_file": "/etc/offpatch-server/root.pub",
+
+  "oidc": {
+    "issuer": "https://adfs.corp.internal/adfs",
+    "client_id": "offpatch-console",
+    "redirect_url": "https://pm.corp.internal:8443/auth/callback",
+    "groups_claim": "groups",
+    "role_groups": {"admin": ["PM-Admins"], "approver": ["PM-Approvers"], "operator": ["PM-Operators"], "viewer": ["PM-Viewers"]},
+    "ca_cert_file": "/etc/offpatch-server/corp-ca.pem"
+  },
+  "require_mfa": true,
+  "session_ttl": "8h",
+  "allow_static_tokens": true,
+  "admin_tokens": [{"user": "breakglass", "role": "admin", "token_sha256": "0000000000000000000000000000000000000000000000000000000000000000"}],
+
+  "approval_policy": {"critical": 2, "important": 2},
+  "separation_of_duties": true,
+  "patch_deadlines": {"critical": "168h", "important": "720h", "moderate": "1440h", "low": "2160h"},
+
+  "audit_export_dir": "/mnt/audit-worm/offpatch",
+  "audit_checkpoint_interval": "1h",
+  "audit_retention": "26280h",
+
+  "notify": {"smtp": {"addr": "smtp-relay.corp.internal:25", "from": "offpatch@corp.internal", "to": ["patch-team@corp.internal"]}, "min_severity": "warning"},
+  "metrics_token": "REPLACE_with_random_secret",
+
+  "intake_max_bundles_per_hour": 20,
+  "intake_max_bytes_per_hour": 53687091200,
+  "scan_command": ["/usr/bin/clamscan", "--no-summary"],
+  "download_rate_kbps": 0,
+  "site_download_kbps": {"branch-office-1": 20000},
+  "checkin_interval_seconds": 60,
+  "offline_after": "30m",
+  "stale_inventory_after": "24h"
+}

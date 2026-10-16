@@ -1,0 +1,39 @@
+# systemd unit for the offpatch management server.
+#   useradd --system --home /var/lib/offpatch-server --shell /usr/sbin/nologin offpatch
+#   install -m 0755 pmserver /usr/local/bin/pmserver
+#   install -d -o offpatch -m 0700 /var/lib/offpatch-server /etc/offpatch-server
+#   cp pmserver.json /etc/offpatch-server/ && chown offpatch /etc/offpatch-server/pmserver.json && chmod 0600 ...
+#   systemctl enable --now pmserver
+[Unit]
+Description=offpatch management server (isolated zone)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=offpatch
+Group=offpatch
+ExecStart=/usr/local/bin/pmserver -config /etc/offpatch-server/pmserver.json
+Restart=on-failure
+RestartSec=5
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+# Writable: data dir (inbox, repository, db), PKI, and the audit export mount.
+ReadWritePaths=/var/lib/offpatch-server /etc/offpatch-server
+# ReadWritePaths=/mnt/audit-worm   # if audit_export_dir is set
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

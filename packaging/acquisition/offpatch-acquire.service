@@ -1,0 +1,22 @@
+# Runs one unattended acquisition pass (see offpatch-acquire.timer).
+#   install -m 0644 offpatch-acquire.service offpatch-acquire.timer /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now offpatch-acquire.timer
+[Unit]
+Description=offpatch unattended patch acquisition (connected zone)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=offpatch-acq
+ExecStart=/usr/local/bin/pmctl auto -config /etc/offpatch-acq/acquire.json
+# Exit 2 = partial (failed items are retried next run); treat as success for
+# the unit but keep it visible in the journal. Exit 1 = failure → OnFailure.
+SuccessExitStatus=2
+TimeoutStartSec=4h
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/offpatch-acq /mnt/diode-out
+# OnFailure=notify-ops@%n.service

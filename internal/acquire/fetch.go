@@ -1,0 +1,368 @@
+package acquire
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
+
+	"offpatch/internal/manifest"
+)
+
+var (
+	kbArgRe   = regexp.MustCompile(`^KB\d{4,10}$`)
+	productRe = regexp.MustCompile(`^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}$`)
+)
+
+// FetchKBOptions drives FetchKB (pmctl fetch).
+type FetchKBOptions struct {
+	KB          string // KB5044273
+	Product     string // e.g. "Windows 10 Version 22H2"
+	Arch        string // x64|x86|arm64
+	Match       string // optional extra title substring to disambiguate rows
+	FileMatch   string // optional substring to pick one of several files
+	MinBuild    int
+	MaxBuild    int
+	Severity    string // explicit; wins over MSRC/catalog
+	MSRCMonth   string // e.g. 2026-Oct; look severity up in MSRC
+	ProductCode string // required only if the catalog file is an .msi
+	PackageID   string // default <KB>-<arch>
+	OutDir      string
+	SpecPath    string
+	Progress    func(done, total int64)
+}
+
+// FetchResult reports what FetchKB/FetchURL did.
+type FetchResult struct {
+	Entry    SpecEntry
+	Download *DownloadResult
+	Update   *Update // catalog row (FetchKB only)
+	Replaced bool    // an existing spec entry with this package_id was replaced
+	Warnings []string
+}
+
+// FetchKB searches the catalog for o.KB, picks the single row for
+// product+arch, downloads and verifies the file, and upserts a spec entry.
+func FetchKB(ctx context.Context, cat *Catalog, ms *MSRC, o FetchKBOptions) (*FetchResult, error) {
+	o.KB = strings.ToUpper(strings.TrimSpace(o.KB))
+	o.Arch = strings.ToLower(strings.TrimSpace(o.Arch))
+	if !kbArgRe.MatchString(o.KB) {
+		return nil, fmt.Errorf("-kb must look like KB5044273 (got %q)", o.KB)
+	}
+	if strings.TrimSpace(o.Product) == "" {
+		return nil, errors.New("-product is required (e.g. \"Windows 10 Version 22H2\")")
+	}
+	if _, ok := archPatterns[o.Arch]; !ok {
+		return nil, fmt.Errorf("-arch must be x64, x86 or arm64 (got %q)", o.Arch)
+	}
+	if o.Severity != "" && NormalizeSeverity(o.Severity) != strings.ToLower(o.Severity) {
+		return nil, fmt.Errorf("-severity must be critical|important|moderate|low (got %q)", o.Severity)
+	}
+	o.Severity = strings.ToLower(o.Severity)
+	if o.MSRCMonth != "" && !ValidMonth(o.MSRCMonth) {
+		return nil, fmt.Errorf("-msrc-month must look like 2026-Oct (got %q)", o.MSRCMonth)
+	}
+	if o.OutDir == "" || o.SpecPath == "" {
+		return nil, errors.New("-out and -spec are required")
+	}
+	if o.MaxBuild != 0 && o.MaxBuild < o.MinBuild {
+		return nil, errors.New("-max-build must be >= -min-build")
+	}
+	if o.PackageID == "" {
+		o.PackageID = o.KB + "-" + o.Arch
+	}
+	res := &FetchResult{}
+	warn := func(f string, a ...any) { res.Warnings = append(res.Warnings, fmt.Sprintf(f, a...)) }
+
+	sr, err := cat.Search(ctx, o.KB)
+	if err != nil {
+		return nil, fmt.Errorf("catalog search: %w", err)
+	}
+	if len(sr.Updates) == 0 {
+		return nil, fmt.Errorf("catalog has no results for %s", o.KB)
+	}
+	upd, err := PickUpdate(sr.Updates, PickOptions{KB: o.KB, Product: o.Product, Arch: o.Arch, Match: o.Match})
+	if err != nil {
+		return nil, err
+	}
+	res.Update = &upd
+
+	files, err := cat.DownloadLinks(ctx, upd.ID)
+	if err != nil {
+		return nil, fmt.Errorf("catalog download links: %w", err)
+	}
+	file, err := pickFile(files, o.KB, o.FileMatch)
+	if err != nil {
+		return nil, err
+	}
+	if file.SHA1 == "" && file.SHA256 == "" {
+		return nil, fmt.Errorf("catalog gave no hash for %s; refusing an unverifiable download (use fetch-url with a vendor-published SHA-256)", file.FileName)
+	}
+	kind, err := kindFromName(file.FileName)
+	if err != nil {
+		return nil, err
+	}
+	if kind == "msi" && !productRe.MatchString(o.ProductCode) {
+		return nil, fmt.Errorf("%s is an .msi: -product-code {GUID} is required", file.FileName)
+	}
+	rel, err := upd.ReleaseDate()
+	if err != nil {
+		return nil, err
+	}
+
+	// Details: supersedence and the catalog's MSRC severity (advisory).
+	var det *Details
+	if d, err := cat.Details(ctx, upd.ID); err != nil {
+		warn("catalog details unavailable (supersedes left empty): %v", err)
+	} else {
+		det = d
+	}
+
+	sev := o.Severity
+	var msrcSup []string
+	if o.MSRCMonth != "" {
+		list, err := ms.Month(ctx, o.MSRCMonth)
+		if err != nil {
+			return nil, fmt.Errorf("msrc %s: %w", o.MSRCMonth, err)
+		}
+		if su, ok := FindKB(list, o.KB); ok {
+			msrcSup = su.Supersedes
+			scoped, ok := su.ForProduct(o.Product, o.Arch)
+			if !ok {
+				warn("MSRC %s lists %s but not for product %q; using its overall severity", o.MSRCMonth, o.KB, o.Product)
+				scoped = su
+			}
+			if sev == "" && scoped.Severity != "" {
+				sev = scoped.Severity
+			}
+		} else {
+			warn("%s not found in MSRC %s release", o.KB, o.MSRCMonth)
+		}
+	}
+	if sev == "" && det != nil && det.MSRCSeverity != "" {
+		sev = det.MSRCSeverity
+		warn("severity %q taken from the catalog's MSRC severity field; pass -severity or -msrc-month to set it explicitly", sev)
+	}
+	if sev == "" {
+		sev = "important"
+		warn("no severity known for %s; defaulting to \"important\" (pass -severity or -msrc-month)", o.KB)
+	}
+
+	sup := []string{}
+	if det != nil {
+		sup = append(sup, det.Supersedes...)
+	}
+	if len(sup) == 0 && len(msrcSup) > 0 {
+		sup = append(sup, msrcSup...)
+	}
+	sup = filterKBs(sup, o.KB)
+
+	size := int64(0)
+	if len(files) == 1 {
+		size = upd.SizeBytes
+	}
+	dl, err := Download(ctx, cat.HTTP, DownloadRequest{
+		URL: file.URL, DestDir: o.OutDir, FileName: file.FileName,
+		SHA1: file.SHA1, SHA256: file.SHA256, Size: size, Progress: o.Progress,
+	})
+	if err != nil {
+		return nil, err
+	}
+	res.Download = dl
+	verified := []string{}
+	if file.SHA1 != "" {
+		verified = append(verified, "sha1(catalog)")
+	}
+	if file.SHA256 != "" {
+		verified = append(verified, "sha256(catalog)")
+	}
+	if size > 0 {
+		verified = append(verified, "size(catalog)")
+	}
+
+	path, err := RelPath(o.SpecPath, dl.Path)
+	if err != nil {
+		return nil, err
+	}
+	e := SpecEntry{
+		PackageID:     o.PackageID,
+		Title:         upd.Title,
+		Vendor:        "Microsoft",
+		Kind:          kind,
+		Version:       upd.Version,
+		KB:            o.KB,
+		Severity:      sev,
+		ReleaseDate:   rel,
+		Supersedes:    sup,
+		Applicability: manifest.Applicability{OS: "windows", Arch: o.Arch, MinBuild: o.MinBuild, MaxBuild: o.MaxBuild},
+		SourceURL:     file.URL,
+		Path:          path,
+		Acquired: &Provenance{
+			At: time.Now().UTC().Format(time.RFC3339), Method: "catalog", CatalogUpdateID: upd.ID,
+			SHA1: dl.SHA1, SHA256: dl.SHA256, Size: dl.Size, Verified: strings.Join(verified, "+"),
+		},
+	}
+	if kind == "msi" {
+		e.ProductCode = o.ProductCode
+	}
+	if err := ValidateEntry(e, dl.Size, dl.SHA256); err != nil {
+		return nil, err
+	}
+	replaced, err := UpsertSpec(o.SpecPath, e)
+	if err != nil {
+		return nil, err
+	}
+	res.Entry, res.Replaced = e, replaced
+	return res, nil
+}
+
+func pickFile(files []DownloadFile, kb, fileMatch string) (DownloadFile, error) {
+	if len(files) == 1 && fileMatch == "" {
+		return files[0], nil
+	}
+	needle := strings.ToLower(fileMatch)
+	if needle == "" {
+		needle = strings.ToLower(kb) // e.g. "kb5044273" in windows10.0-kb5044273-x64_<sha1>.msu
+	}
+	var hits []DownloadFile
+	for _, f := range files {
+		if strings.Contains(strings.ToLower(f.FileName), needle) {
+			hits = append(hits, f)
+		}
+	}
+	if len(hits) == 1 {
+		return hits[0], nil
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "update has %d files and %d match %q; choose one with -file:", len(files), len(hits), needle)
+	for _, f := range files {
+		fmt.Fprintf(&b, "\n  %s", f.FileName)
+	}
+	b.WriteString("\n(prerequisite files such as checkpoint cumulative updates must be fetched as separate packages)")
+	return DownloadFile{}, errors.New(b.String())
+}
+
+func filterKBs(in []string, own string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, s := range in {
+		s = strings.ToUpper(strings.TrimSpace(s))
+		if !kbArgRe.MatchString(s) || s == own || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+// FetchURLOptions drives FetchURL (pmctl fetch-url) for third-party vendors.
+type FetchURLOptions struct {
+	URL         string // https only
+	SHA256      string // required: obtained by the operator from the vendor
+	FileName    string // default: last URL path segment
+	PackageID   string
+	Title       string
+	Vendor      string
+	Kind        string // msi|msu (default from extension)
+	KB          string
+	ProductCode string
+	PackageName string // deb/rpm package or macOS pkg receipt id
+	OS          string // windows|linux|macos (default from kind)
+	Version     string
+	Severity    string
+	ReleaseDate string // YYYY-MM-DD, default today (UTC)
+	Supersedes  []string
+	Arch        string // default any
+	MinBuild    int
+	MaxBuild    int
+	OutDir      string
+	SpecPath    string
+	HTTP        *http.Client
+	Progress    func(done, total int64)
+}
+
+// FetchURL downloads a vendor file over HTTPS, requires it to match the
+// operator-supplied SHA-256, and upserts a spec entry.
+func FetchURL(ctx context.Context, o FetchURLOptions) (*FetchResult, error) {
+	u, err := url.Parse(o.URL)
+	if err != nil || u.Host == "" {
+		return nil, fmt.Errorf("-url invalid: %q", o.URL)
+	}
+	if u.Scheme != "https" {
+		return nil, errors.New("-url must be https://")
+	}
+	o.SHA256 = strings.ToLower(strings.TrimSpace(o.SHA256))
+	if !hex64Re.MatchString(o.SHA256) {
+		return nil, errors.New("-sha256 is required: 64 hex chars published by the vendor")
+	}
+	if o.OutDir == "" || o.SpecPath == "" {
+		return nil, errors.New("-out and -spec are required")
+	}
+	if o.FileName == "" {
+		o.FileName = pathBase(u.Path)
+	}
+	if !safeNameRe.MatchString(o.FileName) {
+		return nil, fmt.Errorf("file name %q from URL is not [A-Za-z0-9._-]; pass -file", o.FileName)
+	}
+	if o.Kind == "" {
+		if o.Kind, err = kindFromName(o.FileName); err != nil {
+			return nil, err
+		}
+	}
+	if o.Arch == "" {
+		o.Arch = "any"
+	}
+	if o.ReleaseDate == "" {
+		o.ReleaseDate = time.Now().UTC().Format("2006-01-02")
+	} else if _, err := time.Parse("2006-01-02", o.ReleaseDate); err != nil {
+		return nil, fmt.Errorf("-release-date must be YYYY-MM-DD (got %q)", o.ReleaseDate)
+	}
+	o.KB = strings.ToUpper(strings.TrimSpace(o.KB))
+	if o.Vendor == "" {
+		return nil, errors.New("-vendor is required")
+	}
+	if o.PackageID == "" || o.Title == "" || o.Severity == "" {
+		return nil, errors.New("-package-id, -title and -severity are required")
+	}
+	o.Severity = strings.ToLower(o.Severity)
+
+	path, err := RelPath(o.SpecPath, filepath.Join(o.OutDir, o.FileName))
+	if err != nil {
+		return nil, err
+	}
+	e := SpecEntry{
+		PackageID: o.PackageID, Title: o.Title, Vendor: o.Vendor, Kind: o.Kind, Version: o.Version,
+		KB: o.KB, ProductCode: o.ProductCode, PackageName: o.PackageName, Severity: o.Severity, ReleaseDate: o.ReleaseDate,
+		Supersedes:    filterKBs(o.Supersedes, o.KB),
+		Applicability: manifest.Applicability{OS: osForKind(o.Kind, o.OS), Arch: o.Arch, MinBuild: o.MinBuild, MaxBuild: o.MaxBuild},
+		SourceURL:     o.URL, Path: path,
+	}
+	// Validate metadata before spending bandwidth.
+	if err := ValidateEntry(e, 1, o.SHA256); err != nil {
+		return nil, err
+	}
+	dl, err := Download(ctx, o.HTTP, DownloadRequest{
+		URL: o.URL, DestDir: o.OutDir, FileName: o.FileName, SHA256: o.SHA256, Progress: o.Progress,
+	})
+	if err != nil {
+		return nil, err
+	}
+	e.Acquired = &Provenance{
+		At: time.Now().UTC().Format(time.RFC3339), Method: "url",
+		SHA1: dl.SHA1, SHA256: dl.SHA256, Size: dl.Size, Verified: "sha256(operator)",
+	}
+	if err := ValidateEntry(e, dl.Size, dl.SHA256); err != nil {
+		return nil, err
+	}
+	replaced, err := UpsertSpec(o.SpecPath, e)
+	if err != nil {
+		return nil, err
+	}
+	return &FetchResult{Entry: e, Download: dl, Replaced: replaced}, nil
+}

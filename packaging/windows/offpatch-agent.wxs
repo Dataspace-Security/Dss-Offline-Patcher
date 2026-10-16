@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  offpatch endpoint agent MSI (WiX Toolset v4/v5).
+
+  Build (on Windows, see build-msi.ps1):
+    wix build offpatch-agent.wxs -ext WixToolset.Util.wixext -arch x64 ^
+        -d Version=0.1.0 -d SourceDir=..\..\bin\windows -d ConfigDir=.\config -o offpatch-agent.msi
+
+  ConfigDir must contain bundle.pub (required), and optionally ca.pem (HTTPS
+  servers, recommended) and root.pub (key rotation). These files are baked into
+  the MSI, so build one MSI per environment (they are public keys, not secrets).
+
+  Silent install with enrollment (GPO / SCCM / Intune):
+    msiexec /i offpatch-agent.msi SERVER=https://pm.corp.internal:8443 TOKEN=enr_... /qn /l*v install.log
+  TOKEN is a (multi-use) enrollment token from the console. It is marked
+  hidden so it does not appear in MSI logs. Without TOKEN the agent is
+  installed but not enrolled (enroll later with pmagent.exe enroll).
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Package Name="offpatch Endpoint Agent"
+           Manufacturer="offpatch"
+           Version="$(var.Version)"
+           UpgradeCode="5A1F3C77-6C2B-4E1F-9D0B-0F4A2E8C3B11"
+           Scope="perMachine"
+           InstallerVersion="500">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer offpatch agent is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="SERVER" Secure="yes" />
+    <Property Id="TOKEN" Secure="yes" Hidden="yes" />
+    <Property Id="MSIUSEREALADMINDETECTION" Value="1" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="offpatch">
+        <Component Id="AgentExe" Guid="*">
+          <File Id="pmagent.exe" Source="$(var.SourceDir)\pmagent.exe" KeyPath="yes" />
+          <!-- The service runs "pmagent.exe -state-dir ..." and detects the SCM itself. -->
+          <ServiceInstall Id="AgentService"
+                          Name="offpatch-agent"
+                          DisplayName="offpatch Endpoint Agent"
+                          Description="Installs approved updates from the internal offpatch server. No internet access."
+                          Type="ownProcess" Start="auto" ErrorControl="normal" Account="LocalSystem"
+                          Arguments="-state-dir &quot;[CommonAppDataFolder]offpatch&quot;">
+            <!-- Restart on failure: also how a signed agent self-upgrade takes
+                 effect (the agent exits non-zero after swapping its binary). -->
+            <util:ServiceConfig FirstFailureActionType="restart" SecondFailureActionType="restart"
+                                ThirdFailureActionType="restart" RestartServiceDelayInSeconds="15"
+                                ResetPeriodInDays="1" />
+          </ServiceInstall>
+          <ServiceControl Id="AgentServiceControl" Name="offpatch-agent" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+        </Component>
+        <Component Id="BundleKey" Guid="*">
+          <File Id="bundle.pub" Source="$(var.ConfigDir)\bundle.pub" KeyPath="yes" />
+        </Component>
+        <?if $(var.HasCA) = 1 ?>
+        <Component Id="CACert" Guid="*">
+          <File Id="ca.pem" Source="$(var.ConfigDir)\ca.pem" KeyPath="yes" />
+        </Component>
+        <?endif?>
+        <?if $(var.HasRoot) = 1 ?>
+        <Component Id="RootKey" Guid="*">
+          <File Id="root.pub" Source="$(var.ConfigDir)\root.pub" KeyPath="yes" />
+        </Component>
+        <?endif?>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="STATEDIR" Name="offpatch">
+        <Component Id="StateDir" Guid="*">
+          <CreateFolder>
+            <!-- Agent state (device key, certificate) readable by SYSTEM and Administrators only. -->
+            <Permission User="SYSTEM" GenericAll="yes" />
+            <Permission User="Administrators" GenericAll="yes" />
+          </CreateFolder>
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="offpatch agent" Level="1">
+      <ComponentRef Id="AgentExe" />
+      <ComponentRef Id="BundleKey" />
+      <ComponentRef Id="StateDir" />
+      <?if $(var.HasCA) = 1 ?>
+      <ComponentRef Id="CACert" />
+      <?endif?>
+      <?if $(var.HasRoot) = 1 ?>
+      <ComponentRef Id="RootKey" />
+      <?endif?>
+    </Feature>
+
+    <!-- Enroll before the service starts, only on first install with a token,
+         and only if the device is not already enrolled. -->
+    <SetProperty Id="EnrollAgent" Sequence="execute" Before="EnrollAgent"
+                 Value="&quot;[INSTALLFOLDER]pmagent.exe&quot; enroll -server &quot;[SERVER]&quot; -token &quot;[TOKEN]&quot; -pubkey &quot;[INSTALLFOLDER]bundle.pub&quot; $(var.CAArg) $(var.RootArg) -state-dir &quot;[CommonAppDataFolder]offpatch&quot;"
+                 Condition="NOT Installed AND TOKEN AND SERVER" />
+    <CustomAction Id="EnrollAgent" DllEntry="WixQuietExec64" BinaryRef="Wix4UtilCA_X64"
+                  Execute="deferred" Impersonate="no" Return="check" HideTarget="yes" />
+    <!-- Run recovery actions also on non-crash failures (needed for self-upgrade restarts). -->
+    <SetProperty Id="SetFailureFlag" Sequence="execute" Before="SetFailureFlag"
+                 Value="&quot;[SystemFolder]sc.exe&quot; failureflag offpatch-agent 1" />
+    <CustomAction Id="SetFailureFlag" DllEntry="WixQuietExec64" BinaryRef="Wix4UtilCA_X64"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="EnrollAgent" Before="StartServices" Condition="NOT Installed AND TOKEN AND SERVER" />
+      <Custom Action="SetFailureFlag" After="InstallServices" Condition="NOT REMOVE=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

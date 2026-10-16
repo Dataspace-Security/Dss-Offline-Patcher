@@ -1,0 +1,453 @@
+{
+  "DocumentTitle": {
+    "Value": "October 2026 Security Updates"
+  },
+  "DocumentType": {
+    "Value": "Security Update"
+  },
+  "DocumentTracking": {
+    "Identification": {
+      "ID": {
+        "Value": "2026-Oct"
+      },
+      "Alias": {
+        "Value": "2026-Oct"
+      }
+    },
+    "CurrentReleaseDate": "2026-10-16T07:00:00"
+  },
+  "ProductTree": {
+    "FullProductName": [
+      {
+        "ProductID": "0",
+        "CPE": "cpe:2.3:a:microsoft:microsoft_edge_(chromium-based):*:*:*:*:*:*:*:*",
+        "Value": "Microsoft Edge (Chromium-based)"
+      },
+      {
+        "ProductID": "11929",
+        "CPE": "cpe:2.3:o:microsoft:windows_10_21H2:*:*:*:*:*:*:x86:*",
+        "Value": "Windows 10 Version 21H2 for 32-bit Systems"
+      },
+      {
+        "ProductID": "12097",
+        "CPE": "cpe:2.3:o:microsoft:windows_10_22H2:*:*:*:*:*:*:x64:*",
+        "Value": "Windows 10 Version 22H2 for x64-based Systems"
+      },
+      {
+        "ProductID": "12098",
+        "CPE": "cpe:2.3:o:microsoft:windows_10_22H2:*:*:*:*:*:*:arm64:*",
+        "Value": "Windows 10 Version 22H2 for ARM64-based Systems"
+      },
+      {
+        "ProductID": "12099",
+        "CPE": "cpe:2.3:o:microsoft:windows_10_22H2:*:*:*:*:*:*:x86:*",
+        "Value": "Windows 10 Version 22H2 for 32-bit Systems"
+      }
+    ]
+  },
+  "Vulnerability": [
+    {
+      "Title": {
+        "Value": "Windows Client License Service Elevation of Privilege Vulnerability"
+      },
+      "CVE": "CVE-2026-100201",
+      "Threats": [
+        {
+          "Description": {
+            "Value": "Elevation of Privilege"
+          },
+          "ProductID": [
+            "11929"
+          ],
+          "Type": 0,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false
+        },
+        {
+          "Description": {
+            "Value": "Elevation of Privilege"
+          },
+          "ProductID": [
+            "12099"
+          ],
+          "Type": 0,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false
+        },
+        {
+          "Description": {
+            "Value": "Elevation of Privilege"
+          },
+          "ProductID": [
+            "12098"
+          ],
+          "Type": 0,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false
+        },
+        {
+          "Description": {
+            "Value": "Elevation of Privilege"
+          },
+          "ProductID": [
+            "12097"
+          ],
+          "Type": 0,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false
+        },
+        {
+          "Description": {
+            "Value": "Important"
+          },
+          "ProductID": [
+            "11929"
+          ],
+          "Type": 3,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false
+        },
+        {
+          "Description": {
+            "Value": "Important"
+          },
+          "ProductID": [
+            "12099"
+          ],
+          "Type": 3,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false
+        },
+        {
+          "Description": {
+            "Value": "Important"
+          },
+          "ProductID": [
+            "12098"
+          ],
+          "Type": 3,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false
+        },
+        {
+          "Description": {
+            "Value": "Important"
+          },
+          "ProductID": [
+            "12097"
+          ],
+          "Type": 3,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false
+        }
+      ],
+      "Remediations": [
+        {
+          "Description": {
+            "Value": "5126657"
+          },
+          "URL": "https://catalog.update.microsoft.com/v7/site/Search.aspx?q=KB5126657",
+          "Supercedence": "5122878",
+          "ProductID": [
+            "11929"
+          ],
+          "Type": 2,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false,
+          "RestartRequired": {
+            "Value": "Yes"
+          },
+          "SubType": "Security Update",
+          "FixedBuild": "10.0.19044.7807"
+        },
+        {
+          "URL": "https://support.microsoft.com/help/5126657",
+          "ProductID": [
+            "11929"
+          ],
+          "Type": 3,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false,
+          "SubType": "5126657"
+        },
+        {
+          "Description": {
+            "Value": "5126657"
+          },
+          "URL": "https://support.microsoft.com/help/5126657",
+          "ProductID": [
+            "11929",
+            "12099",
+            "12098",
+            "12097"
+          ],
+          "Type": 6,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false
+        },
+        {
+          "Description": {
+            "Value": "5126657"
+          },
+          "URL": "https://catalog.update.microsoft.com/v7/site/Search.aspx?q=KB5126657",
+          "Supercedence": "5122878",
+          "ProductID": [
+            "12099",
+            "12098",
+            "12097"
+          ],
+          "Type": 2,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false,
+          "RestartRequired": {
+            "Value": "Yes"
+          },
+          "SubType": "Security Update",
+          "FixedBuild": "10.0.19045.7807"
+        },
+        {
+          "URL": "https://support.microsoft.com/help/5126657",
+          "ProductID": [
+            "12099",
+            "12098",
+            "12097"
+          ],
+          "Type": 3,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false,
+          "SubType": "5126657"
+        }
+      ]
+    },
+    {
+      "Title": {
+        "Value": "Windows Message Queuing Queue Manager Remote Code Execution Vulnerability"
+      },
+      "CVE": "CVE-2026-100202",
+      "Threats": [
+        {
+          "Description": {
+            "Value": "Remote Code Execution"
+          },
+          "ProductID": [
+            "11929"
+          ],
+          "Type": 0,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false
+        },
+        {
+          "Description": {
+            "Value": "Remote Code Execution"
+          },
+          "ProductID": [
+            "12099"
+          ],
+          "Type": 0,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false
+        },
+        {
+          "Description": {
+            "Value": "Remote Code Execution"
+          },
+          "ProductID": [
+            "12098"
+          ],
+          "Type": 0,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false
+        },
+        {
+          "Description": {
+            "Value": "Remote Code Execution"
+          },
+          "ProductID": [
+            "12097"
+          ],
+          "Type": 0,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false
+        },
+        {
+          "Description": {
+            "Value": "Critical"
+          },
+          "ProductID": [
+            "11929"
+          ],
+          "Type": 3,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false
+        },
+        {
+          "Description": {
+            "Value": "Critical"
+          },
+          "ProductID": [
+            "12099"
+          ],
+          "Type": 3,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false
+        },
+        {
+          "Description": {
+            "Value": "Critical"
+          },
+          "ProductID": [
+            "12098"
+          ],
+          "Type": 3,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false
+        },
+        {
+          "Description": {
+            "Value": "Critical"
+          },
+          "ProductID": [
+            "12097"
+          ],
+          "Type": 3,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false
+        }
+      ],
+      "Remediations": [
+        {
+          "Description": {
+            "Value": "5126657"
+          },
+          "URL": "https://catalog.update.microsoft.com/v7/site/Search.aspx?q=KB5126657",
+          "Supercedence": "5122878",
+          "ProductID": [
+            "11929"
+          ],
+          "Type": 2,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false,
+          "RestartRequired": {
+            "Value": "Yes"
+          },
+          "SubType": "Security Update",
+          "FixedBuild": "10.0.19044.7807"
+        },
+        {
+          "URL": "https://support.microsoft.com/help/5126657",
+          "ProductID": [
+            "11929"
+          ],
+          "Type": 3,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false,
+          "SubType": "5126657"
+        },
+        {
+          "Description": {
+            "Value": "5126657"
+          },
+          "URL": "https://support.microsoft.com/help/5126657",
+          "ProductID": [
+            "11929",
+            "12099",
+            "12098",
+            "12097"
+          ],
+          "Type": 6,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false
+        },
+        {
+          "Description": {
+            "Value": "5126657"
+          },
+          "URL": "https://catalog.update.microsoft.com/v7/site/Search.aspx?q=KB5126657",
+          "Supercedence": "5122878",
+          "ProductID": [
+            "12099",
+            "12098",
+            "12097"
+          ],
+          "Type": 2,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false,
+          "RestartRequired": {
+            "Value": "Yes"
+          },
+          "SubType": "Security Update",
+          "FixedBuild": "10.0.19045.7807"
+        },
+        {
+          "URL": "https://support.microsoft.com/help/5126657",
+          "ProductID": [
+            "12099",
+            "12098",
+            "12097"
+          ],
+          "Type": 3,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false,
+          "SubType": "5126657"
+        }
+      ]
+    },
+    {
+      "Title": {
+        "Value": "Chromium CVE-2026-106180: Observable discrepancy"
+      },
+      "CVE": "CVE-2026-106180",
+      "Threats": [
+        {
+          "Description": {},
+          "ProductID": [
+            "0"
+          ],
+          "Type": 0,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false
+        },
+        {
+          "Description": {
+            "Value": "Moderate"
+          },
+          "ProductID": [
+            "0"
+          ],
+          "Type": 3,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false
+        }
+      ],
+      "Remediations": [
+        {
+          "Description": {
+            "Value": "Release Notes"
+          },
+          "URL": "",
+          "ProductID": [
+            "0"
+          ],
+          "Type": 2,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false,
+          "RestartRequired": {
+            "Value": "No"
+          },
+          "SubType": "Security Update",
+          "FixedBuild": "155.0.4283.45"
+        },
+        {
+          "URL": "https://docs.microsoft.com/en-us/DeployEdge/microsoft-edge-relnotes-security",
+          "ProductID": [
+            "0"
+          ],
+          "Type": 3,
+          "Date": "0001-01-01T00:00:00",
+          "DateSpecified": false,
+          "SubType": "Release Notes"
+        }
+      ]
+    }
+  ]
+}

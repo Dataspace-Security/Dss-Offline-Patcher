@@ -1,0 +1,25 @@
+# nfpm packaging for the Linux agent (.deb and .rpm). Built by `make linux-packages`.
+name: offpatch-agent
+arch: ${GOARCH}
+platform: linux
+version: ${VERSION}
+section: admin
+priority: optional
+maintainer: offpatch <ops@example.invalid>
+description: |
+  offpatch endpoint agent. Installs approved updates from the internal
+  offpatch server only; no internet or distribution-repository access.
+license: Proprietary
+contents:
+  - src: ./bin/linux-pkg/pmagent
+    dst: /usr/sbin/pmagent
+    file_info: { mode: 0755 }
+  - src: ./packaging/linux/enroll.env.example
+    dst: /etc/offpatch/enroll.env.example
+    type: config|noreplace
+  - dst: /var/lib/offpatch
+    type: dir
+    file_info: { mode: 0700 }
+scripts:
+  postinstall: ./packaging/linux/postinstall.sh
+  preremove: ./packaging/linux/preremove.sh

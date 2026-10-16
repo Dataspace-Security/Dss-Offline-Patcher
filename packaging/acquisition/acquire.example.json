@@ -1,0 +1,47 @@
+{
+  "work_dir": "C:\\offpatch-acq\\auto",
+  "sequence_state": "C:\\offpatch-acq\\state.json",
+  "source": "acq-zone-1",
+  "key": "C:\\offpatch-acq\\bundle.key",
+  "bundle_ttl": "720h",
+  "send": { "via": "dropdir", "to": "\\\\diode-gw\\outbound", "log": "C:\\offpatch-acq\\sent.jsonl" },
+
+  "microsoft": {
+    "months": 2,
+    "min_severity": "important",
+    "products": [
+      { "msrc_product": "Windows 10 Version 22H2", "catalog_product": "Windows 10 Version 22H2", "arch": "x64", "min_build": 19045, "max_build": 19045 },
+      { "msrc_product": "Windows 11 Version 24H2", "catalog_product": "Windows 11 Version 24H2", "arch": "x64", "min_build": 26100, "max_build": 26100 },
+      { "msrc_product": "Windows Server 2022", "catalog_product": "Microsoft server operating system version 21H2", "arch": "x64", "min_build": 20348, "max_build": 20348 }
+    ]
+  },
+
+  "apps": [
+    {
+      "name": "firefox",
+      "title": "Mozilla Firefox (x64 en-US)",
+      "vendor": "Mozilla",
+      "kind": "msi",
+      "arch": "x64",
+      "severity": "important",
+      "version": { "url": "https://product-details.mozilla.org/1.0/firefox_versions.json", "json_path": "LATEST_FIREFOX_VERSION" },
+      "download_url": "https://download-installer.cdn.mozilla.net/pub/firefox/releases/{version}/win64/en-US/Firefox%20Setup%20{version}.msi",
+      "file_name": "firefox-{version}-win64-en-US.msi",
+      "sha256": { "url": "https://archive.mozilla.org/pub/firefox/releases/{version}/SHA256SUMS", "regex": "([0-9a-f]{64})  win64/en-US/Firefox Setup {version}\\.msi" },
+      "product_code_from_msi": true
+    },
+    {
+      "name": "chrome",
+      "title": "Google Chrome Enterprise (x64)",
+      "vendor": "Google",
+      "kind": "msi",
+      "arch": "x64",
+      "severity": "important",
+      "version": { "url": "https://versionhistory.googleapis.com/v1/chrome/platforms/win64/channels/stable/versions", "json_path": "versions.0.version" },
+      "download_url": "https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi",
+      "file_name": "googlechromestandaloneenterprise64-{version}.msi",
+      "authenticode_signer": "Google LLC",
+      "product_code_from_msi": true
+    }
+  ]
+}
