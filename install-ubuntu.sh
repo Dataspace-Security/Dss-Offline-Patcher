@@ -349,6 +349,7 @@ if [ "$ROLE" = all ] || [ "$ROLE" = acquisition ]; then
     ]
   },
   "intel": {},
+  "requests": "$ACQ_DATA/requests",
   "apps": [
     {
       "name": "firefox-win", "title": "Mozilla Firefox (Windows x64 en-US)", "vendor": "Mozilla", "kind": "msi", "arch": "x64",
@@ -367,16 +368,19 @@ EOF
     warn "Firefox MSI product codes change per version: on a Linux host set the real product_code, or run acquisition on Windows with product_code_from_msi"
   else
     ok "keeping existing $ETC/acquire.json"
-    if ! grep -q '"intel"' "$ETC/acquire.json" && command -v python3 >/dev/null; then
-      python3 - "$ETC/acquire.json" <<'PY' && ok "enabled update intelligence in $ETC/acquire.json"
+    if ! grep -q '"requests"' "$ETC/acquire.json" || ! grep -q '"intel"' "$ETC/acquire.json"; then
+      command -v python3 >/dev/null && python3 - "$ETC/acquire.json" "$ACQ_DATA/requests" <<'PY' && ok "enabled update intelligence and acquisition requests in $ETC/acquire.json"
 import json, sys
 p = sys.argv[1]
 c = json.load(open(p))
-c["intel"] = {}
+c.setdefault("intel", {})
+c.setdefault("requests", sys.argv[2])
 json.dump(c, open(p, "w"), indent=2)
 PY
     fi
   fi
+  # Acquisition requests exported from the console's Updates page go here.
+  install -d -m 0770 -o "$SVC_USER" -g "$SVC_USER" "$ACQ_DATA/requests"
   if [ $HAVE_SYSTEMD = 1 ]; then
     cat > /etc/systemd/system/offpatch-acquire.service <<EOF
 [Unit]
