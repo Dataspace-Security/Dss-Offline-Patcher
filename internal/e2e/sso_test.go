@@ -137,7 +137,7 @@ func TestSSOAndTwoPersonApproval(t *testing.T) {
 	idp := newIdP(t)
 	extra := fmt.Sprintf(`"oidc": {"issuer": %q, "client_id": "offpatch-console", "redirect_url": "http://placeholder/auth/callback",
 	  "role_groups": {"admin": ["pm-admins"], "approver": ["pm-approvers"], "operator": ["pm-operators"], "viewer": ["pm-viewers"]}},
-	  "require_mfa": true, "approval_policy": {"critical": 2}, "separation_of_duties": true,`, idp.srv.URL)
+	  "require_mfa": true, "approval_policy": {"critical": 2}, "separation_of_duties": true, "allow_static_tokens": true,`, idp.srv.URL)
 	e := newEnvOpts(t, false, extra)
 	e.cfg.OIDC.RedirectURL = e.srv.URL + "/auth/callback"
 

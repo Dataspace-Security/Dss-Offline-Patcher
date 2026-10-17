@@ -41,12 +41,12 @@ Roles are cumulative: `viewer` < `operator` < `approver` < `admin`.
 
 | Method & path | Auth | Body → Response |
 |---|---|---|
-| `POST /api/agent/enroll` | enrollment token in body | `{token, hostname, os, os_version, build, arch, agent_version, csr?}` → **201**. **TLS mode** (server has `pki_dir`): `csr` (PEM) is required, response `{endpoint_id, certificate, ca_certificate}`. **Lab mode** (`insecure_http`): response `{endpoint_id, secret}`. Invalid, used or expired token → 401. |
+| `POST /api/agent/enroll` | enrollment token in body | `{token, hostname, os, os_version, build, arch, agent_version, csr?}` → **201**. **TLS mode** (server has `pki_dir`): `csr` (PEM) is required, response `{endpoint_id, certificate, ca_certificate}`. **Lab mode** (`insecure_http`): response `{endpoint_id, secret}`. Invalid, used or expired token → 401. Body at most 64 KB; `hostname` must be 1-253 characters of letters, digits, `.`, `-`, `_` (else 400). Per client IP: a burst of 20, then one attempt per 3 s (→ **429** with `Retry-After`; requests from the server host itself are exempt). Denied attempts are logged each time but audited (`endpoint.enroll_denied`) at most once per IP per minute, with the number suppressed since the last one. |
 | `POST /api/agent/checkin` | device | `{hostname, os_version, build, arch, agent_version, reboot_pending, edition, inventory: InventoryItem[]}` → `{assignments: Assignment[], checkin_interval_seconds, reboot_now, download_rate_kbps, trust?}` |
 | `GET /api/agent/manifest/{package_id}` | device | → `{manifest: base64, signature: base64, key_id}` (the original signed bytes) |
 | `GET /api/agent/content/{sha256}` | device | → raw bytes, `Range` supported. Only for an approved package with an open target on this endpoint in an active deployment. |
 | `POST /api/agent/report` | device | `{deployment_id, package_id, state, detail, exit_code, health?, health_detail?}` → `{ok}` (`health`: `ok` \| `failed`) |
-| `POST /api/agent/renew` | device (mTLS) | `{csr}` → `{certificate, ca_certificate}`. Replaces the endpoint's certificate; the previous one stops working. 409 in lab mode. |
+| `POST /api/agent/renew` | device (mTLS) | `{csr}` → `{certificate, ca_certificate}`. Replaces the endpoint's certificate. The previous certificate keeps working until the new one is first used (so a lost response or a crash before the agent saves the new certificate does not lock it out); if a renewal is never used, a later renewal keeps that same previous certificate as the fallback. 409 in lab mode. |
 
 **Device authentication.** TLS mode: the client certificate issued at enrollment (mTLS); its
 serial must be the endpoint's current one and the endpoint must not be retired, otherwise 401

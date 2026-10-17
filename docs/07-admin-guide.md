@@ -153,7 +153,9 @@ live in `pmserver.json` and need OS access to the server plus a restart.
 Tokens are sent as `Authorization: Bearer <token>` and are what scripts use against the API. Notes:
 
 - They are managed only in the config file. Adding or removing one needs a server restart.
-- `allow_static_tokens: false` disables all of them.
+- `allow_static_tokens: false` disables all of them. **Default:** `true` without SSO; when `oidc`
+  is configured the default is `false` — set `"allow_static_tokens": true` explicitly to keep a
+  break-glass token (and keep it in a safe).
 - By design, `require_mfa` is **not** applied to static tokens (they are the break-glass path for
   when the IdP is unavailable). Keep them for break-glass and automation, store
   them in a safe, and watch the audit log for their use (`actor` = `user:<name>` from the config).
@@ -173,7 +175,9 @@ Tokens are sent as `Authorization: Bearer <token>` and are what scripts use agai
 |---|---|---|
 | `deployment_auto_paused` | critical | A ring crossed its failure threshold |
 | `lost_after_install` | critical | Endpoints stopped checking in after an install (the message names them; updated and re-sent while open) |
-| `signing_key_compromised` | critical | A trust document revoked a bundle key as compromised |
+| `signing_key_compromised` | critical | A trust document revoked a bundle key as compromised (raised again if a revocation interrupted by a restart is completed later) |
+| `manifest_verification_failed` | critical | An endpoint refused an assignment because the signed manifest or the downloaded content did not verify (tampering until shown otherwise) |
+| `server_cert_expiring` | warning / critical | The server TLS certificate expires within 30 days (critical once expired): run `pmserver reissue-server-cert` and restart |
 | `audit_export_failed` | critical | Writing audit export files failed |
 | `install_failed` | warning | An agent reported `failed` |
 | `health_check_failed` | warning | A post-install health check failed |
@@ -490,7 +494,7 @@ Open **Intake** → the bundle → **Validation checks**. The first failing chec
 | `source_authorized` | `-source` of the bundle is not in the key's `sources` | Use the right `-source`, or authorize it in the trust document / `trusted_keys`. |
 | `signature` | Manifest changed after signing, or signed by a different key than its `key_id` | Treat as possible tampering. Rebuild and resend; investigate the transfer path. |
 | `payload_hashes` | A payload file is missing, has a different size or SHA-256, or an extra file is present | Corruption or tampering in transit. Resend; compare with `sent.jsonl`. |
-| `content_scan` | `scan_command` exited non-zero for a file (or the scanner could not run) | Treat as potential malware until proven otherwise. Check the scanner output in the detail. |
+| `content_scan` | `scan_command` exited non-zero for a file, could not run, or ran longer than `scan_timeout` (per file, default `30m`) | Treat as potential malware until proven otherwise. Check the scanner output in the detail. |
 | `replay` | `sequence` not greater than the last accepted one for that source (e.g. state file lost, new acquisition host, or an old bundle resent) | Rebuild with `pmctl build -seq <last+1>` or restore `state.json`. A deliberately resent old bundle is correctly refused. |
 | `duplicate_bundle` | The same `bundle_id` was already accepted | Nothing to do if it was a duplicate send. |
 | `catalog_conflict` | A `package_id` already exists with different content | Give the new content a new `package_id`. |
@@ -498,6 +502,12 @@ Open **Intake** → the bundle → **Validation checks**. The first failing chec
 A bundle that never shows up: it may still be `*.part` (transfer incomplete), have the wrong
 extension (only `*.pmb`, `*.receipt.json` and `*.trust.json` are read), or be held back by the
 inbox rate limit (`intake_rate_limited` alert; it is processed later, nothing is dropped).
+
+Stopping or restarting pmserver mid-intake loses nothing: on stop it waits (up to 30 s for
+requests) for intake, alerting and audit export to finish; a bundle that was already moved to
+`received/` but not recorded is re-ingested on the next start ("re-ingesting a received bundle"
+in the log), and trust documents, receipts, status reports and update intelligence leave the inbox
+only after their result is recorded.
 
 ### 8.2 Agent problems
 

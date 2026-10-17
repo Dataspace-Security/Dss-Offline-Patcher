@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
+	"time"
 )
 
 type EnrollRequest struct {
@@ -17,6 +19,8 @@ type EnrollRequest struct {
 	Arch         string `json:"arch"`
 	AgentVersion string `json:"agent_version"`
 	CSR          string `json:"csr"` // PEM; required when the server runs with TLS
+	// Source is the caller's address, set by the server (never from JSON).
+	Source string `json:"-"`
 }
 
 // CertIssuer signs a client certificate for endpointID and returns the PEM,
@@ -27,8 +31,8 @@ type CertIssuer func(endpointID string) (certPEM, serial, notAfter string, err e
 // per-device secret (lab/HTTP mode) and, when issue is non-nil, an mTLS
 // client certificate bound to the endpoint.
 func (s *Store) Enroll(ctx context.Context, r EnrollRequest, issue CertIssuer) (endpointID, secret, certPEM string, err error) {
-	if strings.TrimSpace(r.Hostname) == "" {
-		return "", "", "", Errf(ErrInvalid, "hostname required")
+	if err := ValidHostname(r.Hostname); err != nil {
+		return "", "", "", err
 	}
 	th := HashSecret(r.Token)
 	err = s.tx(ctx, func(tx *sql.Tx) error {
@@ -69,14 +73,79 @@ func (s *Store) Enroll(ctx context.Context, r EnrollRequest, issue CertIssuer) (
 				"groups": json.RawMessage(groups), "cert_serial": serial, "cert_not_after": notAfter}})
 	})
 	if errors.Is(err, errEnrollDenied) {
-		s.Audit(ctx, Ev{Actor: "agent:" + r.Hostname, Action: "endpoint.enroll_denied", ObjectType: "endpoint", ObjectID: r.Hostname, Failure: true,
-			Details: map[string]any{"reason": "token invalid, used or expired"}})
-		return "", "", "", Errf(ErrInvalid, "enrollment token invalid, used or expired")
+		// Unauthenticated callers can repeat this at will: at most one audit
+		// event per source per deniedAuditEvery, counting those folded in.
+		if n, ok := s.enrollDenied.take(r.Source, s.Now()); ok {
+			s.Audit(ctx, Ev{Actor: "agent:" + r.Hostname, Action: "endpoint.enroll_denied", ObjectType: "endpoint", ObjectID: r.Hostname, Failure: true,
+				Details: map[string]any{"reason": "token invalid, used or expired", "source": r.Source, "suppressed_before": n}})
+		}
+		return "", "", "", ErrEnrollDenied
 	}
 	return endpointID, secret, certPEM, err
 }
 
 var errEnrollDenied = errors.New("enroll denied")
+
+// ErrEnrollDenied is returned for an unknown, used or expired token.
+var ErrEnrollDenied = Errf(ErrInvalid, "enrollment token invalid, used or expired")
+
+// MaxHostnameLen is the DNS limit for a fully qualified name.
+const MaxHostnameLen = 253
+
+// ValidHostname accepts DNS / NetBIOS style names: 1-253 characters of
+// letters, digits, '.', '-' and '_'.
+func ValidHostname(h string) error {
+	if h == "" || len(h) > MaxHostnameLen {
+		return Errf(ErrInvalid, "hostname must be 1-%d characters", MaxHostnameLen)
+	}
+	for _, c := range h {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '.', c == '-', c == '_':
+		default:
+			return Errf(ErrInvalid, "hostname may only contain letters, digits, '.', '-' and '_'")
+		}
+	}
+	return nil
+}
+
+// deniedAuditEvery: one enroll_denied audit event per source per interval.
+const deniedAuditEvery = time.Minute
+
+// deniedAudits throttles audit events for denied enrollments by source.
+type deniedAudits struct {
+	mu   sync.Mutex
+	last map[string]deniedEntry
+}
+
+type deniedEntry struct {
+	at         time.Time
+	suppressed int
+}
+
+// take reports whether an audit event may be written for source now, and
+// how many denials were suppressed since the previous one.
+func (d *deniedAudits) take(source string, now time.Time) (int, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.last == nil {
+		d.last = map[string]deniedEntry{}
+	}
+	e, seen := d.last[source]
+	if seen && now.Sub(e.at) < deniedAuditEvery {
+		e.suppressed++
+		d.last[source] = e
+		return 0, false
+	}
+	if len(d.last) >= 10000 { // bound memory: forget sources past their interval
+		for k, v := range d.last {
+			if now.Sub(v.at) >= deniedAuditEvery {
+				delete(d.last, k)
+			}
+		}
+	}
+	d.last[source] = deniedEntry{at: now}
+	return e.suppressed, true
+}
 
 // EnrollmentTokenUsable reports whether tok exists, has not expired and has
 // uses left. It does not consume a use; Enroll does that.
@@ -109,19 +178,35 @@ func (s *Store) EndpointIDBySecret(ctx context.Context, secret string) (string, 
 // CheckEndpointCert authenticates an agent by mTLS: the certificate's
 // subject must be an active endpoint whose current serial matches. Older
 // (renewed) and retired endpoints' certificates are rejected.
+//
+// After a renewal the previous serial stays valid until the new one is first
+// used, so an agent that lost the renewal response (or stopped before saving
+// the new certificate) is not locked out.
 func (s *Store) CheckEndpointCert(ctx context.Context, endpointID, serial string) error {
-	var cur, retired string
-	err := s.db.QueryRowContext(ctx, `SELECT cert_serial, retired_at FROM endpoints WHERE endpoint_id=?`, endpointID).Scan(&cur, &retired)
+	var cur, prev, retired string
+	err := s.db.QueryRowContext(ctx, `SELECT cert_serial, prev_cert_serial, retired_at FROM endpoints WHERE endpoint_id=?`, endpointID).Scan(&cur, &prev, &retired)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil {
 		return err
 	}
-	if retired != "" || cur == "" || cur != strings.ToLower(serial) {
+	serial = strings.ToLower(serial)
+	switch {
+	case retired != "" || serial == "":
 		return ErrNotFound
+	case cur == serial:
+		if prev != "" {
+			// First use of the renewed certificate: the old one stops working.
+			if _, err := s.db.ExecContext(ctx, `UPDATE endpoints SET prev_cert_serial='' WHERE endpoint_id=? AND cert_serial=?`, endpointID, cur); err != nil {
+				return err
+			}
+		}
+		return nil
+	case prev == serial:
+		return nil
 	}
-	return nil
+	return ErrNotFound
 }
 
 // RenewCert replaces an endpoint's client certificate.
@@ -139,7 +224,11 @@ func (s *Store) RenewCert(ctx context.Context, endpointID string, issue CertIssu
 		if err != nil {
 			return Errf(ErrInvalid, "certificate request rejected: %v", err)
 		}
-		if _, err := tx.Exec(`UPDATE endpoints SET cert_serial=?, cert_not_after=? WHERE endpoint_id=?`, serial, notAfter, endpointID); err != nil {
+		// Grace: the certificate the agent holds stays valid until the new one
+		// is used. If an earlier renewal was never used, the agent still holds
+		// the older certificate, so that one stays the fallback.
+		if _, err := tx.Exec(`UPDATE endpoints SET prev_cert_serial=CASE WHEN prev_cert_serial='' THEN cert_serial ELSE prev_cert_serial END,
+			cert_serial=?, cert_not_after=? WHERE endpoint_id=?`, serial, notAfter, endpointID); err != nil {
 			return err
 		}
 		out = certPEM
@@ -165,7 +254,7 @@ func (s *Store) RetireEndpoint(ctx context.Context, actor, id, reason string) (E
 			return Errf(ErrConflict, "endpoint already retired")
 		}
 		now := s.now()
-		if _, err := tx.Exec(`UPDATE endpoints SET retired_at=?, retired_reason=?, cert_serial='', secret_hash=? WHERE endpoint_id=?`,
+		if _, err := tx.Exec(`UPDATE endpoints SET retired_at=?, retired_reason=?, cert_serial='', prev_cert_serial='', secret_hash=? WHERE endpoint_id=?`,
 			now, reason, "retired:"+RandomSecret(), id); err != nil {
 			return err
 		}

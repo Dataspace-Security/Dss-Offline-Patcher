@@ -187,6 +187,14 @@ func nonNil(s []string) []string {
 	return s
 }
 
+// BundleFileRecorded reports whether a received file (by SHA-256) has an
+// intake record; intake re-ingests evidence files that do not.
+func (s *Store) BundleFileRecorded(ctx context.Context, fileSHA256 string) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM bundles WHERE file_sha256=?`, fileSHA256).Scan(&n)
+	return n > 0, err
+}
+
 func (s *Store) ListBundles(ctx context.Context) ([]Bundle, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+bundleCols+` FROM bundles ORDER BY id DESC`)
 	if err != nil {
@@ -382,9 +390,11 @@ func loadApprovals(ctx context.Context, q querier, id string) (map[string][]Appr
 	return out, rows.Err()
 }
 
-// SetPackageState applies approve/reject/revoke. publish is called inside the
-// transaction for approve so the DB only says "approved" if the content is
-// really in the repository.
+// SetPackageState applies approve/reject/revoke. For the approval that
+// completes the policy, publish runs BEFORE the transaction (copying and
+// hashing a large file must not hold the single database connection); it is
+// content-addressed and idempotent, so publishing and then losing a race is
+// harmless. The DB only says "approved" if the content is in the repository.
 func (s *Store) SetPackageState(ctx context.Context, actor, id, action, reason string, publish func(Package) error) (Package, error) {
 	if err := requireReason(reason); err != nil {
 		return Package{}, err
@@ -400,6 +410,15 @@ func (s *Store) SetPackageState(ctx context.Context, actor, id, action, reason s
 	default:
 		return Package{}, Errf(ErrInvalid, "unknown action %s", action)
 	}
+	published := false
+	if action == "approve" && publish != nil {
+		if p, err := s.GetPackage(ctx, id); err == nil && p.State == from && !approvedBy(p, actor) && len(p.Approvals)+1 >= p.ApprovalsRequired {
+			if err := publish(p); err != nil {
+				return Package{}, fmt.Errorf("publish to repository: %w", err)
+			}
+			published = true
+		}
+	}
 	var out Package
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		p, err := getPackage(ctx, tx, id)
@@ -411,10 +430,8 @@ func (s *Store) SetPackageState(ctx context.Context, actor, id, action, reason s
 			return Errf(ErrConflict, "package is %s; %s requires %s", p.State, action, from)
 		}
 		if action == "approve" {
-			for _, a := range p.Approvals {
-				if a.By == actor {
-					return Errf(ErrConflict, "%s already approved this package; a different approver is required", actor)
-				}
+			if approvedBy(p, actor) {
+				return Errf(ErrConflict, "%s already approved this package; a different approver is required", actor)
 			}
 			if _, err := tx.Exec(`INSERT INTO package_approvals(package_id,approver,reason,at) VALUES(?,?,?,?)`, id, actor, reason, s.now()); err != nil {
 				return err
@@ -429,10 +446,10 @@ func (s *Store) SetPackageState(ctx context.Context, actor, id, action, reason s
 				return err
 			}
 		}
-		if action == "approve" && publish != nil {
-			if err := publish(p); err != nil {
-				return fmt.Errorf("publish to repository: %w", err)
-			}
+		if action == "approve" && publish != nil && !published {
+			// Another approval landed between the check above and this
+			// transaction, so this one now completes the policy unpublished.
+			return Errf(ErrConflict, "approvals changed while publishing; retry the approval")
 		}
 		now := s.now()
 		if _, err := tx.Exec(`UPDATE packages SET state=?, state_reason=?, state_by=?, state_at=? WHERE package_id=?`, to, reason, actor, now, id); err != nil {
@@ -471,4 +488,13 @@ func (s *Store) SetPackageState(ctx context.Context, actor, id, action, reason s
 	})
 	out.ApprovalsRequired = s.Policy.required(out.Severity)
 	return out, err
+}
+
+func approvedBy(p Package, actor string) bool {
+	for _, a := range p.Approvals {
+		if a.By == actor {
+			return true
+		}
+	}
+	return false
 }

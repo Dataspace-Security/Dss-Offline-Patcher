@@ -143,6 +143,18 @@ func TestAcquisitionRequestExport(t *testing.T) {
 			t.Errorf("%s not linked to %s: %+v", ap.AppID, want, ap.Catalog)
 		}
 	}
+	// The endpoint is offered both (7-Zip despite its versioned display name).
+	var avail []store.Available
+	if c := e.api("GET", "/api/endpoints/"+a.id+"/available", tokViewer, nil, &avail); c != 200 {
+		t.Fatalf("available: %d", c)
+	}
+	offered := map[string]string{}
+	for _, av := range avail {
+		offered[av.PackageID] = av.InstalledVersion
+	}
+	if offered[chrome.PackageID] != "155.0.8059.82" || offered[sevenZip.PackageID] != "26.03.00.0" {
+		t.Errorf("available updates: %+v", avail)
+	}
 	e.api("GET", "/api/updates", tokViewer, nil, &fleet)
 	if len(fleet.Updates) != 3 {
 		t.Fatalf("fleet: %+v", fleet)

@@ -4,16 +4,22 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/csv"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"net"
 	"net/http"
 	"net/smtp"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"offpatch/internal/pki"
 	"offpatch/internal/store"
 )
 
@@ -71,7 +77,7 @@ func (s *Server) complianceCSV(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) endpointsCSV(w http.ResponseWriter, r *http.Request) {
-	eps, err := s.store.ListEndpoints(r.Context(), s.th)
+	eps, err := s.store.ListEndpointsBrief(r.Context(), s.th)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -129,21 +135,88 @@ type NotifyConfig struct {
 
 var sevRank = map[string]int{"info": 1, "warning": 2, "critical": 3}
 
-// RunAlerts sweeps time-based conditions and delivers new alerts.
+// deliverEvery: how often undelivered alerts are pushed to mail/webhook.
+// Delivery runs apart from the sweep, so a slow or unreachable relay delays
+// notifications but never the sweep (lost endpoints, auto-pause, expiry).
+var deliverEvery = 30 * time.Second
+
+// RunAlerts sweeps time-based conditions and delivers new alerts, until ctx
+// is cancelled and both loops have returned.
 func (s *Server) RunAlerts(ctx context.Context, every time.Duration) {
+	done := make(chan struct{})
+	kick := make(chan struct{}, 1)
+	go func() {
+		defer close(done)
+		s.runDelivery(ctx, kick)
+	}()
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
 		if err := s.store.SweepAlerts(ctx, s.th); err != nil {
 			s.log.Error("alert sweep", "err", err)
 		}
-		s.deliverAlerts(ctx)
+		if err := s.checkServerCert(ctx, time.Now()); err != nil {
+			s.log.Error("server certificate check", "err", err)
+		}
+		select { // deliver what the sweep raised; never wait for delivery
+		case kick <- struct{}{}:
+		default:
+		}
 		select {
 		case <-ctx.Done():
+			<-done
 			return
 		case <-t.C:
 		}
 	}
+}
+
+// runDelivery delivers after each sweep (kick) and every deliverEvery (for
+// alerts raised by intake and agent reports in between).
+func (s *Server) runDelivery(ctx context.Context, kick <-chan struct{}) {
+	t := time.NewTicker(deliverEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-kick:
+		case <-t.C:
+		}
+		s.deliverAlerts(ctx)
+	}
+}
+
+// serverCertWarn: alert this long before the server TLS certificate expires.
+const serverCertWarn = 30 * 24 * time.Hour
+
+// checkServerCert raises a warning when the server certificate expires
+// within serverCertWarn (critical once expired: agents refuse it).
+func (s *Server) checkServerCert(ctx context.Context, now time.Time) error {
+	if s.cfg.TLSCert == "" {
+		return nil
+	}
+	b, err := os.ReadFile(s.cfg.TLSCert)
+	if err != nil {
+		return err
+	}
+	blk, _ := pem.Decode(b)
+	if blk == nil {
+		return fmt.Errorf("%s: no PEM certificate", s.cfg.TLSCert)
+	}
+	c, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		return err
+	}
+	left := c.NotAfter.Sub(now)
+	if left > serverCertWarn {
+		return nil
+	}
+	sev, msg := "warning", fmt.Sprintf("server TLS certificate expires %s (in %d days); run `pmserver reissue-server-cert` and restart before then", c.NotAfter.UTC().Format("2006-01-02"), int(left.Hours()/24))
+	if left <= 0 {
+		sev, msg = "critical", fmt.Sprintf("server TLS certificate EXPIRED %s: agents cannot connect; run `pmserver reissue-server-cert` and restart", c.NotAfter.UTC().Format("2006-01-02"))
+	}
+	return s.store.RaiseAlert(ctx, sev, "server_cert_expiring", "server", pki.SerialHex(c), msg)
 }
 
 func (s *Server) deliverAlerts(ctx context.Context) {
@@ -153,19 +226,29 @@ func (s *Server) deliverAlerts(ctx context.Context) {
 		s.log.Error("alerts", "err", err)
 		return
 	}
+	// After one failure a channel is not retried this round: an unreachable
+	// relay costs one timeout per round, not one per alert.
+	mailDown, hookDown := false, false
 	for _, a := range as {
+		if ctx.Err() != nil {
+			return
+		}
 		ok := true
 		if n != nil && sevRank[a.Severity] >= sevRank[orDefault(n.MinSeverity, "warning")] {
 			if n.SMTP != nil {
-				if err := sendMail(n.SMTP.Addr, n.SMTP.From, n.SMTP.To, a); err != nil {
-					s.log.Warn("alert mail failed; will retry", "err", err)
+				if mailDown {
 					ok = false
+				} else if err := sendMail(n.SMTP.Addr, n.SMTP.From, n.SMTP.To, a); err != nil {
+					s.log.Warn("alert mail failed; will retry", "err", err)
+					ok, mailDown = false, true
 				}
 			}
 			if n.WebhookURL != "" {
-				if err := s.postWebhook(ctx, n.WebhookURL, n.WebhookToken, a); err != nil {
-					s.log.Warn("alert webhook failed; will retry", "err", err)
+				if hookDown {
 					ok = false
+				} else if err := s.postWebhook(ctx, n.WebhookURL, n.WebhookToken, a); err != nil {
+					s.log.Warn("alert webhook failed; will retry", "err", err)
+					ok, hookDown = false, true
 				}
 			}
 		}
@@ -182,11 +265,53 @@ func orDefault(v, d string) string {
 	return v
 }
 
+// smtpTimeout bounds one whole mail transaction (connect to QUIT).
+var smtpTimeout = 30 * time.Second
+
+// sendMail is smtp.SendMail with a deadline: a relay that accepts the
+// connection and then stalls must not hang alert delivery.
 func sendMail(addr, from string, to []string, a store.Alert) error {
 	subject := fmt.Sprintf("[offpatch %s] %s", strings.ToUpper(a.Severity), a.Kind)
 	body := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s\r\n\r\nObject: %s %s\r\nRaised: %s\r\n",
 		from, strings.Join(to, ", "), subject, a.Message, a.ObjectType, a.ObjectID, a.CreatedAt)
-	return smtp.SendMail(addr, nil, from, to, []byte(body))
+	conn, err := net.DialTimeout("tcp", addr, smtpTimeout)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(smtpTimeout)); err != nil {
+		return err
+	}
+	host, _, _ := net.SplitHostPort(addr)
+	c, err := smtp.NewClient(conn, host)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if ok, _ := c.Extension("STARTTLS"); ok { // as smtp.SendMail does
+		if err := c.StartTLS(&tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}); err != nil {
+			return err
+		}
+	}
+	if err := c.Mail(from); err != nil {
+		return err
+	}
+	for _, rcpt := range to {
+		if err := c.Rcpt(rcpt); err != nil {
+			return err
+		}
+	}
+	wc, err := c.Data()
+	if err != nil {
+		return err
+	}
+	if _, err := wc.Write([]byte(body)); err != nil {
+		return err
+	}
+	if err := wc.Close(); err != nil {
+		return err
+	}
+	return c.Quit()
 }
 
 func (s *Server) postWebhook(ctx context.Context, url, token string, a store.Alert) error {

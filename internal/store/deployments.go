@@ -545,13 +545,16 @@ func presentIn(inv []InventoryItem, p Package, sup map[string]bool) (bool, strin
 			return true, "inventory shows app " + it.Name + " " + it.Version
 		case (p.Kind == "deb" || p.Kind == "rpm" || p.Kind == "pkg") && it.Kind == "pkg" && it.ID == p.PackageName && VersionAtLeast(it.Version, p.Version):
 			return true, "inventory shows " + p.PackageName + " " + it.Version
-		case p.Kind == "msi" && p.PackageName != "" && it.Kind == "product" && strings.EqualFold(strings.TrimSpace(it.Name), p.PackageName) && p.Version != "" && VersionAtLeast(it.Version, p.Version):
+		case p.Kind == "msi" && p.PackageName != "" && it.Kind == "product" && SameAppName(it.Name, p.PackageName) && p.Version != "" && VersionAtLeast(it.Version, p.Version):
 			return true, "inventory shows " + it.Name + " " + it.Version
 		case it.Kind == "kb" && p.KB != "" && strings.EqualFold(it.ID, p.KB):
 			return true, "inventory shows " + p.KB
 		case it.Kind == "kb" && sup[strings.ToUpper(it.ID)]:
 			return true, "inventory shows superseding " + it.ID
-		case it.Kind == "product" && p.ProductCode != "" && strings.EqualFold(it.ID, p.ProductCode):
+		// Some MSIs keep their product code across versions (Chrome's
+		// enterprise MSI): the same code at an older version is not installed.
+		case it.Kind == "product" && p.ProductCode != "" && strings.EqualFold(it.ID, p.ProductCode) &&
+			(p.Version == "" || it.Version == "" || VersionAtLeast(it.Version, p.Version)):
 			return true, "inventory shows product " + p.ProductCode
 		}
 	}
@@ -643,6 +646,8 @@ func (s *Store) ensureTarget(ctx context.Context, tx *sql.Tx, d Deployment, e En
 			state, detail = "verified", "already present: "+why
 		} else if appStoreManaged(e.inventory, p) {
 			state, detail = "not_applicable", appStoreDetail
+		} else if e.InventoryAt != "" && !appInstalled(e.inventory, p) {
+			state, detail = "not_applicable", notInstalledDetail
 		} else if xid, err := s.activeException(ctx, tx, e.EndpointID, p.PackageID); err != nil {
 			return err
 		} else if xid != "" {
@@ -722,17 +727,66 @@ func (s *Store) evaluate(ctx context.Context, tx *sql.Tx, id string, failRing in
 		return err
 	}
 	terminal := skipped + verified + exhausted
-	if d.CurrentRing == len(d.Rings)-1 && total > 0 && terminal == total {
+	if terminal != total {
+		return nil
+	}
+	reason := ""
+	if d.CurrentRing == len(d.Rings)-1 && total > 0 {
+		reason = "all targets in final ring finished"
+	} else {
+		// Nothing left to do if no endpoint falls in a later ring (or the
+		// final ring is empty): waiting for an advance would hang forever.
+		done, err := s.remainingRingsEmpty(ctx, tx, d)
+		if err != nil {
+			return err
+		}
+		if done {
+			reason = "all targets finished; remaining rings have no endpoints"
+		}
+	}
+	if reason != "" {
 		if err := fillCounts(ctx, tx, &d); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`UPDATE deployments SET state='completed', state_reason='all targets in final ring finished', updated_at=? WHERE deployment_id=?`, now, id); err != nil {
+		if _, err := tx.Exec(`UPDATE deployments SET state='completed', state_reason=?, updated_at=? WHERE deployment_id=?`, reason, now, id); err != nil {
 			return err
 		}
 		return s.audit(tx, Ev{Actor: "system:scheduler", Action: "deployment.completed", ObjectType: "deployment", ObjectID: id, PackageID: d.PackageID,
 			Details: map[string]any{"counts": d.Counts}})
 	}
 	return nil
+}
+
+// remainingRingsEmpty reports whether d has targets but no active endpoint
+// belongs to a ring after the current one.
+func (s *Store) remainingRingsEmpty(ctx context.Context, tx *sql.Tx, d Deployment) (bool, error) {
+	var n int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM targets WHERE deployment_id=?`, d.DeploymentID).Scan(&n); err != nil {
+		return false, err
+	}
+	if n == 0 {
+		return false, nil // nothing targeted yet: endpoints may still enroll
+	}
+	if d.CurrentRing >= len(d.Rings)-1 {
+		return true, nil
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT endpoint_id, groups FROM endpoints WHERE retired_at=''`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, gs string
+		if err := rows.Scan(&id, &gs); err != nil {
+			return false, err
+		}
+		var groups []string
+		json.Unmarshal([]byte(gs), &groups)
+		if ringFor(d.Rings, groups, id) > d.CurrentRing {
+			return false, nil
+		}
+	}
+	return true, rows.Err()
 }
 
 func (s *Store) autoPause(tx *sql.Tx, d Deployment, reason string) error {
@@ -1098,15 +1152,28 @@ func (s *Store) ReportTarget(ctx context.Context, endpointID string, r Report) e
 			_, err := tx.Exec(`UPDATE targets SET detail=?, updated_at=? WHERE deployment_id=? AND endpoint_id=?`, r.Detail, s.now(), r.DeploymentID, endpointID)
 			return err
 		}
-		delta := 0
-		if r.State == "installing" {
-			delta = 1
+		delta := attemptDelta(t.State, r.State)
+		if r.State == "failed" && t.State == "failed" && r.Detail == t.Detail && r.ExitCode == t.ExitCode && r.Health == "" {
+			// The same failure again (e.g. a manifest that never verifies): it
+			// counts as an attempt, so retries run out and auto-pause applies,
+			// but writes no new audit event or alert.
+			if _, err := tx.Exec(`UPDATE targets SET attempts=attempts+?, updated_at=? WHERE deployment_id=? AND endpoint_id=?`, delta, s.now(), r.DeploymentID, endpointID); err != nil {
+				return err
+			}
+			return s.evaluateDeployment(ctx, tx, r.DeploymentID, true)
 		}
 		if err := s.setTarget(tx, "endpoint:"+endpointID, t, r.State, r.Detail, r.ExitCode, delta); err != nil {
 			return err
 		}
 		if r.State == "failed" {
-			if err := s.raiseAlert(tx, "warning", "install_failed", "target", r.DeploymentID+"/"+endpointID, t.Hostname+": "+r.PackageID+" failed: "+r.Detail); err != nil {
+			sev, kind := "warning", "install_failed"
+			if integrityFailure(r.Detail) {
+				// The endpoint refused what the server offered: the signed
+				// manifest or the content did not verify. Tampering or a
+				// trust mismatch until shown otherwise.
+				sev, kind = "critical", "manifest_verification_failed"
+			}
+			if err := s.raiseAlert(tx, sev, kind, "target", r.DeploymentID+"/"+endpointID, t.Hostname+": "+r.PackageID+" failed: "+r.Detail); err != nil {
 				return err
 			}
 		}
@@ -1129,6 +1196,27 @@ func (s *Store) ReportTarget(ctx context.Context, endpointID string, r Report) e
 		}
 		return s.evaluateDeployment(ctx, tx, r.DeploymentID, r.State == "failed" || r.Health == "failed")
 	})
+}
+
+// attemptDelta: one install attempt is counted when the installer starts,
+// and a failure that never reached the installer (manifest verification,
+// download, hash check) counts as an attempt of its own — otherwise those
+// retry forever and never reach the auto-pause threshold.
+func attemptDelta(from, to string) int {
+	switch {
+	case to == "installing":
+		return 1
+	case to == "failed" && from != "installing":
+		return 1
+	}
+	return 0
+}
+
+// integrityFailure recognises agent reports that the signed manifest or the
+// downloaded content did not verify.
+func integrityFailure(detail string) bool {
+	d := strings.ToLower(detail)
+	return strings.HasPrefix(d, "manifest verification failed") || strings.Contains(d, "possible tampering")
 }
 
 // ContentAllowed: an endpoint may only fetch content for an approved package

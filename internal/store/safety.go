@@ -165,6 +165,65 @@ func (s *Store) sweepLost(ctx context.Context, after time.Duration) error {
 	})
 }
 
+// DefaultStuckAfter is used when Thresholds.StuckAfter is 0.
+const DefaultStuckAfter = 6 * time.Hour
+
+// sweepStuck fails targets left downloading, downloaded or installing with
+// no report (and no check-in or heartbeat from the endpoint) for `after`:
+// the agent died or the endpoint vanished mid-install. Failing them frees the
+// deployment's concurrency slot, counts an attempt, and lets the endpoint
+// retry when it returns.
+func (s *Store) sweepStuck(ctx context.Context, after time.Duration) error {
+	if after <= 0 {
+		after = DefaultStuckAfter
+	}
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `SELECT t.deployment_id, t.endpoint_id, t.package_id, e.hostname, t.ring, t.state, t.exit_code, t.updated_at, e.last_seen
+			FROM targets t JOIN endpoints e ON e.endpoint_id=t.endpoint_id JOIN deployments d ON d.deployment_id=t.deployment_id
+			WHERE t.state IN ('downloading','downloaded','installing') AND d.state IN ('active','paused')`)
+		if err != nil {
+			return err
+		}
+		now := s.Now()
+		var stuck []Target
+		for rows.Next() {
+			var t Target
+			var seen string
+			if err := rows.Scan(&t.DeploymentID, &t.EndpointID, &t.PackageID, &t.Hostname, &t.Ring, &t.State, &t.ExitCode, &t.UpdatedAt, &seen); err != nil {
+				rows.Close()
+				return err
+			}
+			last := parseTime(t.UpdatedAt)
+			if v := parseTime(seen); v.After(last) {
+				last = v
+			}
+			if now.Sub(last) > after {
+				stuck = append(stuck, t)
+			}
+		}
+		rows.Close()
+		rings := map[string]map[int]bool{}
+		for _, t := range stuck {
+			why := fmt.Sprintf("no report from the endpoint for %s while %s; marked failed (will be retried if retries remain)", after, t.State)
+			if err := s.setTarget(tx, "system:scheduler", t, "failed", why, t.ExitCode, attemptDelta(t.State, "failed")); err != nil {
+				return err
+			}
+			if rings[t.DeploymentID] == nil {
+				rings[t.DeploymentID] = map[int]bool{}
+			}
+			rings[t.DeploymentID][t.Ring] = true
+		}
+		for id, rs := range rings {
+			for r := range rs {
+				if err := s.evaluateRing(ctx, tx, id, r); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}
+
 // alertLost raises (or, while one is open, updates and re-sends) the
 // critical alert listing every endpoint currently lost in the deployment.
 func (s *Store) alertLost(tx *sql.Tx, d Deployment) error {

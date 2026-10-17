@@ -82,8 +82,16 @@ func getEndpoint(ctx context.Context, q querier, id string) (Endpoint, error) {
 	return e, err
 }
 
+// endpointColsBrief skips the inventory document: list, summary and sweep
+// paths need status, not every endpoint's parsed inventory.
+var endpointColsBrief = strings.Replace(endpointCols, ",inventory,", ",'[]',", 1)
+
 func listEndpoints(ctx context.Context, q querier) ([]Endpoint, error) {
-	rows, err := q.QueryContext(ctx, `SELECT `+endpointCols+` FROM endpoints ORDER BY hostname`)
+	return listEndpointsCols(ctx, q, endpointCols)
+}
+
+func listEndpointsCols(ctx context.Context, q querier, cols string) ([]Endpoint, error) {
+	rows, err := q.QueryContext(ctx, `SELECT `+cols+` FROM endpoints ORDER BY hostname`)
 	if err != nil {
 		return nil, err
 	}
@@ -109,6 +117,9 @@ type Thresholds struct {
 	// installed / pending_reboot (or after its reboot request) is
 	// lost_after_install (0 = never).
 	LostAfterInstall time.Duration
+	// StuckAfter: a target downloading/downloaded/installing with no report
+	// and no endpoint activity this long is failed (0 = DefaultStuckAfter).
+	StuckAfter time.Duration
 }
 
 var DefaultThresholds = Thresholds{OfflineAfter: 30 * time.Minute, StaleAfter: 24 * time.Hour, LostAfterInstall: 2 * time.Hour}
@@ -159,8 +170,19 @@ func relevantTargets(ctx context.Context, q querier, endpointID string) ([]Targe
 	return queryTargets(ctx, q, where, args...)
 }
 
+// ListEndpoints returns every endpoint with its derived status and its
+// inventory (InventoryItems).
 func (s *Store) ListEndpoints(ctx context.Context, th Thresholds) ([]Endpoint, error) {
-	eps, err := listEndpoints(ctx, s.db)
+	return s.listEndpointStatus(ctx, th, endpointCols)
+}
+
+// ListEndpointsBrief is ListEndpoints without loading inventories.
+func (s *Store) ListEndpointsBrief(ctx context.Context, th Thresholds) ([]Endpoint, error) {
+	return s.listEndpointStatus(ctx, th, endpointColsBrief)
+}
+
+func (s *Store) listEndpointStatus(ctx context.Context, th Thresholds, cols string) ([]Endpoint, error) {
+	eps, err := listEndpointsCols(ctx, s.db, cols)
 	if err != nil {
 		return nil, err
 	}

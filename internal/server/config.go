@@ -62,6 +62,7 @@ type Config struct {
 	MaxFiles                int                 `json:"max_files"`
 	MaxFileBytes            int64               `json:"max_file_bytes"`
 	ScanCommand             []string            `json:"scan_command"`
+	ScanTimeout             Duration            `json:"scan_timeout"` // per file; default 30m
 	IntakeInterval          Duration            `json:"intake_interval"`
 	CheckinIntervalSeconds  int                 `json:"checkin_interval_seconds"`
 	DownloadRateKbps        int                 `json:"download_rate_kbps"`
@@ -134,7 +135,9 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: at least one trusted_keys entry is required")
 	}
 	if c.AllowStaticTokens == nil {
-		t := true
+		// With SSO, static tokens are break-glass only: off unless the config
+		// says "allow_static_tokens": true explicitly.
+		t := c.OIDC == nil
 		c.AllowStaticTokens = &t
 	}
 	if c.SessionTTL.Duration == 0 {
@@ -247,6 +250,7 @@ func (c *Config) IntakeConfig() (intake.Config, error) {
 		Limits:            manifest.Limits{MaxFiles: c.MaxFiles, MaxFileBytes: c.MaxFileBytes, MaxTotal: c.MaxBundleBytes},
 		MaxBundleBytes:    c.MaxBundleBytes,
 		ScanCommand:       c.ScanCommand,
+		ScanTimeout:       c.ScanTimeout.Duration,
 		Interval:          c.IntakeInterval.Duration,
 		MaxBundlesPerHour: c.IntakeMaxBundlesPerHour,
 		MaxBytesPerHour:   c.IntakeMaxBytesPerHour,

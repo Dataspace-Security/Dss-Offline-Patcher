@@ -45,7 +45,10 @@ type Config struct {
 	Limits         manifest.Limits
 	MaxBundleBytes int64
 	ScanCommand    []string // optional; payload path appended; exit 0 = clean
-	Interval       time.Duration
+	// ScanTimeout bounds one scan_command run per file (0 = DefaultScanTimeout);
+	// a scanner that hangs fails the content_scan check instead of stalling intake.
+	ScanTimeout time.Duration
+	Interval    time.Duration
 	// Rate limits per rolling hour (0 = unlimited). Excess bundles stay in
 	// the inbox and are processed later; nothing is dropped.
 	MaxBundlesPerHour int
@@ -60,7 +63,17 @@ type Service struct {
 
 	lastLimitAudit time.Time
 	keyMu          sync.Mutex
+	// compromised: key IDs the current trust document revokes as
+	// compromised (guarded by keyMu). Their content is revoked again on every
+	// scan, so a revocation interrupted part-way is completed.
+	compromised []string
+	// recoverDone: received/ was checked for unrecorded bundles and no
+	// intake has failed since (see recoverReceived).
+	recoverDone bool
 }
+
+// DefaultScanTimeout applies when Config.ScanTimeout is 0.
+const DefaultScanTimeout = 30 * time.Minute
 
 func New(cfg Config, st *store.Store, log *slog.Logger) (*Service, error) {
 	for _, d := range []string{cfg.Inbox, cfg.ReceivedDir, cfg.QuarantineDir} {
@@ -71,7 +84,80 @@ func New(cfg Config, st *store.Store, log *slog.Logger) (*Service, error) {
 	if cfg.Interval == 0 {
 		cfg.Interval = 5 * time.Second
 	}
+	if cfg.ScanTimeout <= 0 {
+		cfg.ScanTimeout = DefaultScanTimeout
+	}
 	return &Service{cfg: cfg, store: st, log: log, Now: func() time.Time { return time.Now().UTC() }}, nil
+}
+
+// archive moves a processed file out of the inbox. Callers run it only once
+// the outcome is recorded, so a stop mid-processing leaves the file in the
+// inbox to be processed again (each processor tolerates seeing a file twice).
+func (s *Service) archive(path, dst string) {
+	os.MkdirAll(filepath.Dir(dst), 0o750)
+	if err := os.Rename(path, dst); err != nil {
+		s.log.Error("could not move processed file out of the inbox", "file", path, "err", err)
+	}
+}
+
+// recoverReceived re-ingests bundles that were moved to received/ but never
+// recorded (the process stopped between the move and the database commit).
+// It runs on the first scan and after any failed intake, not every tick.
+func (s *Service) recoverReceived(ctx context.Context) []store.Bundle {
+	if s.recoverDone {
+		return nil
+	}
+	s.recoverDone = true
+	entries, err := os.ReadDir(s.cfg.ReceivedDir)
+	if err != nil {
+		s.log.Error("read received", "err", err)
+		return nil
+	}
+	var out []store.Bundle
+	for _, e := range entries {
+		name := e.Name()
+		sha := strings.TrimSuffix(name, ".pmb")
+		if !e.Type().IsRegular() || sha == name || len(sha) != 64 {
+			continue
+		}
+		done, err := s.store.BundleFileRecorded(ctx, sha)
+		if err != nil {
+			s.recoverDone = false
+			continue
+		}
+		if done {
+			continue
+		}
+		s.log.Warn("re-ingesting a received bundle that was never recorded (interrupted intake)", "file", name)
+		b, err := s.Process(ctx, filepath.Join(s.cfg.ReceivedDir, name))
+		if err != nil {
+			s.recoverDone = false
+			s.log.Error("intake failed", "file", name, "err", err)
+			continue
+		}
+		out = append(out, b)
+	}
+	return out
+}
+
+// reapplyRevocations revokes, again, content signed by keys the current
+// trust document marks compromised. Idempotent: only packages still
+// quarantined or approved are touched.
+func (s *Service) reapplyRevocations(ctx context.Context) {
+	s.keyMu.Lock()
+	ids := append([]string(nil), s.compromised...)
+	s.keyMu.Unlock()
+	for _, id := range ids {
+		n, err := s.store.RevokeKeyContent(ctx, id)
+		if err != nil {
+			s.log.Error("re-applying compromised key revocation", "key_id", id, "err", err)
+			continue
+		}
+		if n > 0 {
+			s.log.Warn("completed an interrupted compromised-key revocation", "key_id", id, "packages", n)
+			s.store.RaiseAlert(ctx, "critical", "signing_key_compromised", "key", id, fmt.Sprintf("bundle signing key %s is revoked as COMPROMISED; %d more package(s) signed by it were revoked and their deployments cancelled — start the incident procedure", id, n))
+		}
+	}
 }
 
 // Run polls the inbox until ctx is cancelled.
@@ -120,6 +206,7 @@ func (s *Service) ScanOnce(ctx context.Context) []store.Bundle {
 			s.log.Error("trust document rejected", "file", n, "err", err)
 		}
 	}
+	s.reapplyRevocations(ctx)
 	sort.Strings(intels) // oldest first, so a backlog ends on the newest
 	for _, n := range intels {
 		if err := s.processIntel(ctx, filepath.Join(s.cfg.Inbox, n)); err != nil {
@@ -127,20 +214,22 @@ func (s *Service) ScanOnce(ctx context.Context) []store.Bundle {
 		}
 	}
 	sort.Strings(names)
-	var out []store.Bundle
-	for _, n := range names {
+	// Interrupted intakes first: they arrived before anything in the inbox.
+	out := s.recoverReceived(ctx)
+	for i, n := range names {
 		if why := s.overLimit(ctx, filepath.Join(s.cfg.Inbox, n)); why != "" {
-			s.log.Warn("intake rate limit reached; leaving bundles in the inbox", "reason", why, "waiting", len(names)-len(out))
+			s.log.Warn("intake rate limit reached; leaving bundles in the inbox", "reason", why, "waiting", len(names)-i)
 			if s.Now().Sub(s.lastLimitAudit) > 15*time.Minute {
 				s.lastLimitAudit = s.Now()
 				s.store.RaiseAlert(ctx, "warning", "intake_rate_limited", "inbox", "inbox", "intake rate limit reached: "+why)
 				s.store.Audit(ctx, store.Ev{Actor: "system:intake", Action: "intake.rate_limited", ObjectType: "inbox", ObjectID: "inbox", Failure: true,
-					Details: map[string]any{"reason": why, "waiting": len(names) - len(out)}})
+					Details: map[string]any{"reason": why, "waiting": len(names) - i}})
 			}
 			break
 		}
 		b, err := s.Process(ctx, filepath.Join(s.cfg.Inbox, n))
 		if err != nil {
+			s.recoverDone = false // it may be in received/ without a record
 			s.log.Error("intake failed", "file", n, "err", err)
 			continue
 		}
@@ -192,22 +281,29 @@ func (s *Service) processReceipt(ctx context.Context, path string) error {
 		return err
 	}
 	dst := filepath.Join(s.cfg.ReceivedDir, "receipts", fmt.Sprintf("%d-%s", s.Now().UnixNano(), filepath.Base(path)))
-	os.MkdirAll(filepath.Dir(dst), 0o750)
-	if err := os.Rename(path, dst); err != nil {
-		return err
-	}
 	var r transfer.Receipt
-	if err := json.Unmarshal(b, &r); err != nil || len(r.SHA256) != 64 {
-		return s.store.RecordReceipt(ctx, store.TransferReceipt{File: filepath.Base(path), FileSHA256: "invalid", Adapter: "unknown", SentAt: ""})
+	rec := store.TransferReceipt{File: filepath.Base(path), FileSHA256: "invalid", Adapter: "unknown", SentAt: ""}
+	if err := json.Unmarshal(b, &r); err == nil && len(r.SHA256) == 64 {
+		ok := false
+		s.keyMu.Lock()
+		k, found := s.cfg.Keys[r.KeyID]
+		s.keyMu.Unlock()
+		if found {
+			ok = transfer.VerifyReceipt(r, k.Pub)
+		}
+		rec = store.TransferReceipt{File: r.File, FileSHA256: r.SHA256, Size: r.Size, Adapter: r.Adapter, SentAt: r.SentAt, KeyID: r.KeyID, SignatureOK: ok}
 	}
-	ok := false
-	if k, found := s.cfg.Keys[r.KeyID]; found {
-		ok = transfer.VerifyReceipt(r, k.Pub)
+	if err := s.store.RecordReceipt(ctx, rec); err != nil {
+		return err // left in the inbox; recorded on a later scan
 	}
-	return s.store.RecordReceipt(ctx, store.TransferReceipt{File: r.File, FileSHA256: r.SHA256, Size: r.Size, Adapter: r.Adapter, SentAt: r.SentAt, KeyID: r.KeyID, SignatureOK: ok})
+	s.archive(path, dst)
+	return nil
 }
 
-// Process validates one bundle file and moves it out of the inbox.
+// Process validates one bundle file and moves it out of the inbox. The file
+// is moved to received/<sha256>.pmb first; if the process stops before the
+// result is recorded, the next scan re-ingests it from there
+// (recoverReceived), so no bundle is lost.
 func (s *Service) Process(ctx context.Context, path string) (store.Bundle, error) {
 	fname := filepath.Base(path)
 	size, sha, err := manifest.HashFile(path)
@@ -217,8 +313,16 @@ func (s *Service) Process(ctx context.Context, path string) (store.Bundle, error
 	// Evidence copy: the bundle as received, by hash. Moved, not copied, so the
 	// inbox only ever holds unprocessed files.
 	evidence := filepath.Join(s.cfg.ReceivedDir, sha+".pmb")
-	if err := os.Rename(path, evidence); err != nil {
-		return store.Bundle{}, fmt.Errorf("move to received: %w", err)
+	if filepath.Clean(path) != filepath.Clean(evidence) {
+		if _, err := os.Stat(evidence); err == nil {
+			// Same content delivered again: the evidence (named by hash) is
+			// already kept, and is read-only (Windows refuses a rename onto it).
+			if err := os.Remove(path); err != nil {
+				return store.Bundle{}, fmt.Errorf("remove duplicate from inbox: %w", err)
+			}
+		} else if err := os.Rename(path, evidence); err != nil {
+			return store.Bundle{}, fmt.Errorf("move to received: %w", err)
+		}
 	}
 	os.Chmod(evidence, 0o440)
 
@@ -228,8 +332,18 @@ func (s *Service) Process(ctx context.Context, path string) (store.Bundle, error
 		return ok
 	}
 	in := store.Intake{}
-	qdir := filepath.Join(s.cfg.QuarantineDir, fmt.Sprintf("%s-%s", s.Now().Format("20060102T150405"), sha[:12]))
+	// Unique per attempt: the same bundle delivered twice in one second must
+	// not share (and, on rejection, delete) the first one's quarantine.
+	qdir := filepath.Join(s.cfg.QuarantineDir, fmt.Sprintf("%s-%s-%s", s.Now().Format("20060102T150405"), sha[:12], store.NewID("")))
+	interrupted := func() (store.Bundle, error) {
+		os.RemoveAll(qdir)
+		return store.Bundle{}, fmt.Errorf("intake of %s interrupted (%w); it is re-ingested from received/ on the next scan", fname, ctx.Err())
+	}
 	reject := func() (store.Bundle, error) {
+		if ctx.Err() != nil {
+			// Shutting down: a killed scanner or cancelled step is not a verdict.
+			return interrupted()
+		}
 		in.Bundle = b
 		in.Manifest = nil
 		os.RemoveAll(qdir)
@@ -301,10 +415,8 @@ func (s *Service) Process(ctx context.Context, path string) (store.Bundle, error
 	if len(s.cfg.ScanCommand) > 0 {
 		var bad []string
 		for name, f := range ex.Files {
-			args := append(append([]string{}, s.cfg.ScanCommand[1:]...), f.Path)
-			cmd := exec.CommandContext(ctx, s.cfg.ScanCommand[0], args...)
-			if out, err := cmd.CombinedOutput(); err != nil {
-				bad = append(bad, fmt.Sprintf("%s: %v %s", name, err, strings.TrimSpace(string(out))))
+			if msg := s.scan(ctx, f.Path); msg != "" {
+				bad = append(bad, name+": "+msg)
 			}
 		}
 		if !check("content_scan", len(bad) == 0, "%s", strings.Join(append(bad, s.cfg.ScanCommand[0]), "; ")) {
@@ -313,12 +425,33 @@ func (s *Service) Process(ctx context.Context, path string) (store.Bundle, error
 	} else {
 		check("content_scan", true, "no scanner configured (skipped)")
 	}
+	if ctx.Err() != nil {
+		return interrupted()
+	}
 	in.Bundle, in.Manifest, in.QuarantineDir = b, m, qdir
 	res, err := s.store.IngestBundle(ctx, in)
-	if err == nil && res.State != "validated" {
+	if err != nil || res.State != "validated" {
+		// On error nothing was recorded; recoverReceived extracts it afresh.
 		os.RemoveAll(qdir)
 	}
 	return res, err
+}
+
+// scan runs scan_command on one file with ScanTimeout; "" means clean.
+func (s *Service) scan(ctx context.Context, path string) string {
+	sctx, cancel := context.WithTimeout(ctx, s.cfg.ScanTimeout)
+	defer cancel()
+	args := append(append([]string{}, s.cfg.ScanCommand[1:]...), path)
+	cmd := exec.CommandContext(sctx, s.cfg.ScanCommand[0], args...)
+	cmd.WaitDelay = 10 * time.Second // a scanner's children must not hold the output pipe open
+	out, err := cmd.CombinedOutput()
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(sctx.Err(), context.DeadlineExceeded):
+		return fmt.Sprintf("scanner timed out after %s", s.cfg.ScanTimeout)
+	}
+	return fmt.Sprintf("%v %s", err, strings.TrimSpace(string(out)))
 }
 
 func errText(err error, ok string) string {
@@ -338,27 +471,34 @@ func (s *Service) ApplyTrust(d trust.Document) {
 		}
 		keys[k.KeyID] = TrustedKey{Pub: pub, Sources: k.Sources, Retired: k.Status == "retired"}
 	}
+	var compromised []string
+	for _, r := range d.Revoked {
+		if r.Reason == "compromised" {
+			compromised = append(compromised, r.KeyID)
+		}
+	}
 	s.keyMu.Lock()
 	s.cfg.Keys = keys
+	s.compromised = compromised
 	s.keyMu.Unlock()
 }
 
 // processTrust verifies a trust document against the root key, stores it if
-// newer, applies it, and revokes content signed by compromised keys.
+// newer, applies it, and revokes content signed by compromised keys. The file
+// leaves the inbox only once that outcome is recorded; seeing the stored
+// document again (a stop before the move) re-applies it instead of
+// rejecting it as a replay.
 func (s *Service) processTrust(ctx context.Context, path string) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
 	dst := filepath.Join(s.cfg.ReceivedDir, "trust", fmt.Sprintf("%d-%s", s.Now().UnixNano(), filepath.Base(path)))
-	os.MkdirAll(filepath.Dir(dst), 0o750)
-	if err := os.Rename(path, dst); err != nil {
-		return err
-	}
 	fail := func(reason string) error {
 		s.store.RaiseAlert(ctx, "warning", "trust_rejected", "trust", filepath.Base(path), "trust document "+filepath.Base(path)+" rejected: "+reason)
 		s.store.Audit(ctx, store.Ev{Actor: "system:intake", Action: "trust.rejected", ObjectType: "trust", ObjectID: filepath.Base(path), Failure: true,
 			Details: map[string]any{"reason": reason}})
+		s.archive(path, dst)
 		return errors.New(reason)
 	}
 	if s.cfg.RootPub == nil {
@@ -372,11 +512,26 @@ func (s *Service) processTrust(ctx context.Context, path string) error {
 	if err != nil {
 		return fail(err.Error())
 	}
-	cur, _ := s.store.GetMeta(ctx, "trust_seq")
-	if curSeq, _ := strconv.ParseInt(cur, 10, 64); doc.Sequence <= curSeq {
+	raw, _ := json.Marshal(signed)
+	cur, err := s.store.GetMeta(ctx, "trust_seq")
+	if err != nil {
+		return err
+	}
+	curSeq, _ := strconv.ParseInt(cur, 10, 64)
+	stored, err := s.store.GetMeta(ctx, "trust_doc")
+	if err != nil {
+		return err
+	}
+	switch {
+	case doc.Sequence == curSeq && stored == string(raw):
+		s.log.Info("trust document already applied; completing it", "sequence", doc.Sequence)
+		s.ApplyTrust(doc)
+		s.reapplyRevocations(ctx)
+		s.archive(path, dst)
+		return nil
+	case doc.Sequence <= curSeq:
 		return fail(fmt.Sprintf("sequence %d not newer than current %d (replay)", doc.Sequence, curSeq))
 	}
-	raw, _ := json.Marshal(signed)
 	if err := s.store.SaveTrust(ctx, string(raw), doc.Sequence, doc); err != nil {
 		return err
 	}
@@ -385,17 +540,19 @@ func (s *Service) processTrust(ctx context.Context, path string) error {
 		if r.Reason == "compromised" {
 			n, err := s.store.RevokeKeyContent(ctx, r.KeyID)
 			if err != nil {
-				return err
+				return err // stays in the inbox; reapplyRevocations finishes the job
 			}
 			s.log.Warn("signing key revoked as compromised; its packages were revoked", "key_id", r.KeyID, "packages", n)
 			s.store.RaiseAlert(ctx, "critical", "signing_key_compromised", "key", r.KeyID, fmt.Sprintf("bundle signing key %s revoked as COMPROMISED; %d package(s) revoked and their deployments cancelled — start the incident procedure", r.KeyID, n))
 		}
 	}
+	s.archive(path, dst)
 	s.log.Info("trust document applied", "sequence", doc.Sequence, "keys", len(doc.Keys), "revoked", len(doc.Revoked))
 	return nil
 }
 
-// LoadStoredTrust re-applies the latest stored trust document at startup.
+// LoadStoredTrust re-applies the latest stored trust document at startup,
+// including any compromised-key revocation a previous run did not finish.
 func (s *Service) LoadStoredTrust(ctx context.Context) error {
 	raw, err := s.store.GetMeta(ctx, "trust_doc")
 	if err != nil || raw == "" || s.cfg.RootPub == nil {
@@ -410,6 +567,7 @@ func (s *Service) LoadStoredTrust(ctx context.Context) error {
 		return fmt.Errorf("stored trust document no longer verifies: %w", err)
 	}
 	s.ApplyTrust(doc)
+	s.reapplyRevocations(ctx)
 	s.log.Info("trust document loaded", "sequence", doc.Sequence)
 	return nil
 }
@@ -427,12 +585,9 @@ func (s *Service) processStatus(ctx context.Context, path string) error {
 		return err
 	}
 	dst := filepath.Join(s.cfg.ReceivedDir, "status", filepath.Base(path))
-	os.MkdirAll(filepath.Dir(dst), 0o750)
-	if err := os.Rename(path, dst); err != nil {
-		return err
-	}
 	var signed acqstatus.Signed
 	if err := json.Unmarshal(b, &signed); err != nil {
+		s.archive(path, dst)
 		return err
 	}
 	keys := map[string]ed25519.PublicKey{}
@@ -444,6 +599,7 @@ func (s *Service) processStatus(ctx context.Context, path string) error {
 	r, err := acqstatus.Verify(signed, keys)
 	if err != nil {
 		s.store.RaiseAlert(ctx, "warning", "acquisition_status_rejected", "acquisition", filepath.Base(path), "acquisition status report rejected: "+err.Error())
+		s.archive(path, dst)
 		return err
 	}
 	doc, _ := json.Marshal(r)
@@ -451,5 +607,9 @@ func (s *Service) processStatus(ctx context.Context, path string) error {
 	if r.Error != "" {
 		summary += ": " + r.Error
 	}
-	return s.store.RecordAcquisition(ctx, r.Source, r.FinishedAt, r.Outcome, signed.KeyID, doc, summary)
+	if err := s.store.RecordAcquisition(ctx, r.Source, r.FinishedAt, r.Outcome, signed.KeyID, doc, summary); err != nil {
+		return err // left in the inbox; recorded on a later scan
+	}
+	s.archive(path, dst)
+	return nil
 }

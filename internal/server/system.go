@@ -86,7 +86,7 @@ func (s *Server) system(w http.ResponseWriter, r *http.Request) {
 			dbBytes += fi.Size()
 		}
 	}
-	chain, _ := s.store.VerifyAudit(ctx)
+	chain, _ := s.store.AuditChainStatus(ctx)
 	exported, _ := s.store.GetMeta(ctx, "audit_exported_seq")
 	alerts, _ := s.store.ListAlerts(ctx, true)
 	deadlines := map[string]string{}

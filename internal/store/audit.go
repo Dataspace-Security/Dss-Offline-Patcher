@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 type AuditEvent struct {
@@ -86,6 +88,7 @@ type AuditQuery struct {
 	ObjectID, Action, Actor, PackageID string
 	Limit                              int
 	BeforeSeq                          int64
+	AfterSeq                           int64 // paging forwards (with Ascending)
 	Ascending                          bool
 }
 
@@ -111,6 +114,10 @@ func (s *Store) ListAudit(ctx context.Context, q AuditQuery) ([]AuditEvent, erro
 	if q.BeforeSeq > 0 {
 		where = append(where, "seq < ?")
 		args = append(args, q.BeforeSeq)
+	}
+	if q.AfterSeq > 0 {
+		where = append(where, "seq > ?")
+		args = append(args, q.AfterSeq)
 	}
 	sqlq := `SELECT seq,ts,actor,action,object_type,object_id,outcome,package_id,details,prev_hash,hash FROM audit`
 	if len(where) > 0 {
@@ -157,30 +164,97 @@ func (s *Store) VerifyAudit(ctx context.Context) (ChainResult, error) {
 	if err != nil {
 		return ChainResult{}, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT seq,ts,actor,action,object_type,object_id,outcome,package_id,details,prev_hash,hash FROM audit ORDER BY seq ASC`)
+	res, last, err := s.verifyAfter(ctx, prev, n)
+	if err == nil {
+		s.chain.remember(res, last, true)
+	}
+	return res, err
+}
+
+// auditFullVerifyEvery bounds how long AuditChainStatus trusts its cached
+// prefix before walking the whole chain again.
+var auditFullVerifyEvery = time.Hour
+
+// chainCache remembers the last verified link so status pages (summary,
+// system, metrics) only hash events appended since.
+type chainCache struct {
+	mu     sync.Mutex
+	ok     bool
+	seq    int64
+	hash   string
+	fullAt time.Time
+}
+
+func (c *chainCache) remember(res ChainResult, lastHash string, full bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ok = res.OK
+	if !res.OK {
+		return
+	}
+	c.seq, c.hash = res.Count, lastHash
+	if full {
+		c.fullAt = time.Now()
+	}
+}
+
+// AuditChainStatus is VerifyAudit for status pages: it re-verifies only the
+// events after the last verified one (checking that link is unchanged) and
+// walks the whole chain at most every auditFullVerifyEvery, or whenever the
+// last result was a failure. /api/audit/verify always walks everything.
+func (s *Store) AuditChainStatus(ctx context.Context) (ChainResult, error) {
+	c := &s.chain
+	c.mu.Lock()
+	ok, seq, hash, fullAt := c.ok, c.seq, c.hash, c.fullAt
+	c.mu.Unlock()
+	if !ok || fullAt.IsZero() || time.Since(fullAt) > auditFullVerifyEvery {
+		return s.VerifyAudit(ctx)
+	}
+	var cur string
+	err := s.db.QueryRowContext(ctx, `SELECT hash FROM audit WHERE seq=?`, seq).Scan(&cur)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Pruned past the cached link (retention): start again from the anchor.
+		return s.VerifyAudit(ctx)
+	}
 	if err != nil {
 		return ChainResult{}, err
+	}
+	if cur != hash {
+		return s.VerifyAudit(ctx)
+	}
+	res, last, err := s.verifyAfter(ctx, hash, seq)
+	if err == nil {
+		s.chain.remember(res, last, false)
+	}
+	return res, err
+}
+
+// verifyAfter checks every event with seq > n, starting from link prev.
+func (s *Store) verifyAfter(ctx context.Context, prev string, n int64) (ChainResult, string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT seq,ts,actor,action,object_type,object_id,outcome,package_id,details,prev_hash,hash FROM audit WHERE seq > ? ORDER BY seq ASC`, n)
+	if err != nil {
+		return ChainResult{}, "", err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var e AuditEvent
 		var d string
 		if err := rows.Scan(&e.Seq, &e.TS, &e.Actor, &e.Action, &e.ObjectType, &e.ObjectID, &e.Outcome, &e.PackageID, &d, &e.PrevHash, &e.Hash); err != nil {
-			return ChainResult{}, err
+			return ChainResult{}, "", err
 		}
 		e.Details = json.RawMessage(d)
 		n++
 		switch {
 		case e.Seq != n:
-			return ChainResult{Count: n, FirstBadSeq: e.Seq, Error: "sequence gap"}, nil
+			return ChainResult{Count: n, FirstBadSeq: e.Seq, Error: "sequence gap"}, "", nil
 		case e.PrevHash != prev:
-			return ChainResult{Count: n, FirstBadSeq: e.Seq, Error: "prev_hash mismatch"}, nil
+			return ChainResult{Count: n, FirstBadSeq: e.Seq, Error: "prev_hash mismatch"}, "", nil
 		case chainHash(prev, e) != e.Hash:
-			return ChainResult{Count: n, FirstBadSeq: e.Seq, Error: "hash mismatch (event modified)"}, nil
+			return ChainResult{Count: n, FirstBadSeq: e.Seq, Error: "hash mismatch (event modified)"}, "", nil
 		}
 		prev = e.Hash
 	}
-	return ChainResult{OK: true, Count: n}, rows.Err()
+	return ChainResult{OK: true, Count: n}, prev, rows.Err()
 }
 
 // ChainHash recomputes an event's hash (exported for off-box verification).

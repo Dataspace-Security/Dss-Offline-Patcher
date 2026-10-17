@@ -69,15 +69,13 @@ func (s *Service) processIntel(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
+	// Moved out of the inbox only once the outcome is recorded (see archive).
 	dst := filepath.Join(s.cfg.ReceivedDir, "intel", filepath.Base(path))
-	os.MkdirAll(filepath.Dir(dst), 0o750)
-	if err := os.Rename(path, dst); err != nil {
-		return err
-	}
 	reject := func(why string) error {
 		s.store.RaiseAlert(ctx, "warning", "intel_rejected", "intel", filepath.Base(path), "update intelligence rejected: "+why)
 		s.store.Audit(ctx, store.Ev{Actor: "system:intake", Action: "intel.rejected", ObjectType: "intel", ObjectID: filepath.Base(path), Failure: true,
 			Details: map[string]any{"reason": why}})
+		s.archive(path, dst)
 		return fmt.Errorf("intel rejected: %s", why)
 	}
 	if len(b) > maxIntelFile {
@@ -91,7 +89,11 @@ func (s *Service) processIntel(ctx context.Context, path string) error {
 	if gen.After(s.Now().Add(maxIntelClockSkew)) {
 		return reject(fmt.Sprintf("generated_at %s is in the future (acquisition clock wrong?)", d.GeneratedAt))
 	}
-	if cur, _ := s.store.GetMeta(ctx, MetaIntelGenerated); cur != "" {
+	cur, err := s.store.GetMeta(ctx, MetaIntelGenerated)
+	if err != nil {
+		return err
+	}
+	if cur != "" {
 		if ct, err := time.Parse(time.RFC3339, cur); err == nil && !gen.After(ct) {
 			return reject(fmt.Sprintf("not newer than the current document (%s, current %s)", d.GeneratedAt, cur))
 		}
@@ -116,6 +118,8 @@ func (s *Service) processIntel(ctx context.Context, path string) error {
 		return err
 	}
 	s.log.Info("update intelligence accepted", "source", d.Source, "generated_at", d.GeneratedAt, "windows", len(d.Windows), "apps", len(d.Apps))
-	return s.store.Audit(ctx, store.Ev{Actor: "system:intake", Action: "intel.accepted", ObjectType: "intel", ObjectID: d.GeneratedAt,
+	err = s.store.Audit(ctx, store.Ev{Actor: "system:intake", Action: "intel.accepted", ObjectType: "intel", ObjectID: d.GeneratedAt,
 		Details: map[string]any{"source": d.Source, "key_id": kid, "windows": len(d.Windows), "apps": len(d.Apps), "file": filepath.Base(path)}})
+	s.archive(path, dst)
+	return err
 }

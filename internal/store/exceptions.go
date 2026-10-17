@@ -198,7 +198,7 @@ func (s *Store) Summary(ctx context.Context, th Thresholds) (Summary, error) {
 	for _, k := range []string{"compliant", "noncompliant", "pending_reboot", "failed", "exception", "stale", "offline", "lost_after_install"} {
 		sm.Endpoints.ByStatus[k] = 0
 	}
-	eps, err := s.ListEndpoints(ctx, th)
+	eps, err := s.ListEndpointsBrief(ctx, th)
 	if err != nil {
 		return sm, err
 	}
@@ -238,7 +238,7 @@ func (s *Store) Summary(ctx context.Context, th Thresholds) (Summary, error) {
 		return sm, err
 	}
 	s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM exceptions WHERE revoked=0 AND expires_at > ?`, s.now()).Scan(&sm.ActiveExceptions)
-	cr, err := s.VerifyAudit(ctx)
+	cr, err := s.AuditChainStatus(ctx)
 	if err != nil {
 		return sm, err
 	}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"sort"
 	"strings"
+
+	"offpatch/internal/intel"
 )
 
 // Available is a catalog package an endpoint still needs.
@@ -69,11 +71,16 @@ func needs(p Package, e Endpoint, inv []InventoryItem, sup map[string]bool) (boo
 			}
 		}
 	case "msi":
-		if p.PackageName == "" {
+		if p.PackageName == "" && p.ProductCode == "" {
 			return false, "", ""
 		}
 		for _, it := range inv {
-			if it.Kind == "product" && strings.EqualFold(strings.TrimSpace(it.Name), p.PackageName) && !VersionAtLeast(it.Version, p.Version) {
+			if it.Kind != "product" || it.Version == "" || p.Version == "" || VersionAtLeast(it.Version, p.Version) {
+				continue
+			}
+			// Same app by name, or an older version under the same product
+			// code (MSIs such as Chrome's keep it across versions).
+			if (p.PackageName != "" && SameAppName(it.Name, p.PackageName)) || (p.ProductCode != "" && strings.EqualFold(it.ID, p.ProductCode)) {
 				return true, it.Version, "update available"
 			}
 		}
@@ -202,4 +209,53 @@ func (s *Store) Needs(ctx context.Context) (map[string]PackageNeed, error) {
 		out[p.PackageID] = pn
 	}
 	return out, nil
+}
+
+// SameAppName reports whether an installed program's display name (Apps &
+// features) is the app an MSI package's package_name names. Names are
+// compared exactly, or normalised like update intelligence does (version
+// numbers, architecture and parenthesised qualifiers dropped), so a
+// package_name "7-Zip" matches "7-Zip 26.03 (x64 edition)", whose name
+// changes with every version.
+func SameAppName(installed, packageName string) bool {
+	if strings.EqualFold(strings.TrimSpace(installed), strings.TrimSpace(packageName)) {
+		return true
+	}
+	a, b := intel.Normalize(installed), intel.Normalize(packageName)
+	return len(a) >= 3 && a == b
+}
+
+const notInstalledDetail = "app not installed: third-party packages update an installed app and are never installed on machines without it"
+
+// appInstalled reports whether a third-party app package (msi, deb, rpm,
+// pkg) has any version of its app on the endpoint. Windows updates and agent
+// packages are not apps and always count as installed.
+func appInstalled(inv []InventoryItem, p Package) bool {
+	switch p.Kind {
+	case "msi":
+		for _, it := range inv {
+			if it.Kind != "product" {
+				continue
+			}
+			if (p.ProductCode != "" && strings.EqualFold(it.ID, p.ProductCode)) || (p.PackageName != "" && SameAppName(it.Name, p.PackageName)) {
+				return true
+			}
+		}
+		return false
+	case "deb", "rpm":
+		for _, it := range inv {
+			if it.Kind == "pkg" && it.ID == p.PackageName {
+				return true
+			}
+		}
+		return false
+	case "pkg":
+		for _, it := range inv {
+			if (it.Kind == "pkg" || it.Kind == "app") && it.ID == p.PackageName {
+				return true
+			}
+		}
+		return false
+	}
+	return true
 }

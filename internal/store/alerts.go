@@ -121,10 +121,13 @@ func (s *Store) SweepAlerts(ctx context.Context, th Thresholds) error {
 	if err := s.sweepLost(ctx, th.LostAfterInstall); err != nil {
 		return err
 	}
+	if err := s.sweepStuck(ctx, th.StuckAfter); err != nil {
+		return err
+	}
 	if err := s.sweepAcquisition(ctx); err != nil {
 		return err
 	}
-	eps, err := s.ListEndpoints(ctx, th)
+	eps, err := s.ListEndpointsBrief(ctx, th)
 	if err != nil {
 		return err
 	}

@@ -491,15 +491,27 @@ func TestEndToEnd(t *testing.T) {
 	obj := filepath.Join(e.repoDir, p.SHA256[:2], p.SHA256)
 	os.Chmod(obj, 0o640)
 	os.WriteFile(obj, []byte("MSI payload TAMPERED"), 0o640)
+	// App packages only update an installed app: give the pilot Acme 2.0.
+	simState := filepath.Join(pilot.dir, "sim-state.json")
+	var ss map[string]any
+	sb, _ := os.ReadFile(simState)
+	json.Unmarshal(sb, &ss)
+	ss["products"] = []store.InventoryItem{{Kind: "product", ID: msiGUID, Name: "Acme Agent 2.0", Version: "2.0.0"}}
+	sb, _ = json.Marshal(ss)
+	os.WriteFile(simState, sb, 0o600)
+	e.cycle(pilot)
 	var d2 store.Deployment
-	e.api("POST", "/api/deployments", tokOperator, store.NewDeployment{PackageID: "AcmeAgent-2.1", Name: "Acme", Rings: []store.Ring{{Name: "pilot", Groups: []string{"pilot"}}}, MaxFailurePct: 100, MaxRetries: 0}, &d2)
+	e.api("POST", "/api/deployments", tokOperator, store.NewDeployment{PackageID: "AcmeAgent-2.1", Name: "Acme", Rings: []store.Ring{{Name: "pilot", Groups: []string{"pilot"}}}, MaxFailurePct: 100, MaxRetries: 1}, &d2)
 	e.cycle(pilot)
 	dd = e.deployment(d2.DeploymentID)
 	if dd.Targets[0].State != "failed" || !strings.Contains(dd.Targets[0].Detail, "tampering") {
 		t.Fatalf("tampered content not detected on endpoint: %+v", dd.Targets[0])
 	}
-	if items, _, _ := agent.NewSim(agent.SimConfig{}, filepath.Join(pilot.dir, "sim-state.json")).Inventory(); len(items) != 1 {
-		t.Fatalf("tampered package must not be installed; inventory=%+v", items)
+	items, _, _ := agent.NewSim(agent.SimConfig{}, simState).Inventory()
+	for _, it := range items {
+		if it.Version == "2.1.0" {
+			t.Fatalf("tampered package must not be installed; inventory=%+v", items)
+		}
 	}
 
 	// ---- agent may not fetch content it isn't assigned ----

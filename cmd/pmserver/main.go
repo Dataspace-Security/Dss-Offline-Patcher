@@ -16,8 +16,10 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
+	_ "time/tzdata" // maintenance windows and deadlines resolve zones on hosts without tzdata
 
 	"offpatch/internal/auditexport"
 	"offpatch/internal/backup"
@@ -119,16 +121,31 @@ func run(cfgPath string, log *slog.Logger) error {
 	h.SetIntelKeys(in.ActiveKeys)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	go in.Run(ctx)
-	go h.RunAlerts(ctx, cfg.AlertSweepEvery.Duration)
+	// Background work (intake, alerts, audit export) and in-flight requests
+	// finish before the database closes (deferred above, so it runs after
+	// this): an intake stopped mid-way is re-ingested on the next start.
+	var wg sync.WaitGroup
+	background := func(f func()) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			f()
+		}()
+	}
+	defer func() {
+		stop()
+		wg.Wait()
+		log.Info("pmserver stopped")
+	}()
+	background(func() { in.Run(ctx) })
+	background(func() { h.RunAlerts(ctx, cfg.AlertSweepEvery.Duration) })
 	if cfg.AuditExportDir != "" {
 		key, err := auditexport.LoadOrCreateKey(filepath.Join(cfg.DataDir, "audit-signing.key"))
 		if err != nil {
 			return err
 		}
 		x := &auditexport.Exporter{Store: st, Dir: cfg.AuditExportDir, Key: key, Log: log.With("component", "audit-export")}
-		go x.Run(ctx, cfg.AuditCheckpointEvery.Duration, cfg.AuditRetention.Duration)
+		background(func() { x.Run(ctx, cfg.AuditCheckpointEvery.Duration, cfg.AuditRetention.Duration) })
 		log.Info("audit export enabled", "dir", cfg.AuditExportDir, "every", cfg.AuditCheckpointEvery.Duration, "retention", cfg.AuditRetention.Duration,
 			"verify_with", filepath.Join(cfg.DataDir, "audit-signing.pub"))
 	} else {
@@ -140,13 +157,20 @@ func run(cfgPath string, log *slog.Logger) error {
 		Handler:           h.Handler(),
 		TLSConfig:         h.TLSConfig(),
 		ReadHeaderTimeout: 10 * time.Second,
+		// Bounds reading a request (headers + body: check-ins, reports). No
+		// WriteTimeout: content downloads stream for as long as they take.
+		ReadTimeout:    5 * time.Minute,
+		IdleTimeout:    2 * time.Minute,
+		MaxHeaderBytes: 64 << 10,
 	}
-	go func() {
+	background(func() {
 		<-ctx.Done()
-		sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		sctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		srv.Shutdown(sctx)
-	}()
+		if err := srv.Shutdown(sctx); err != nil {
+			log.Warn("shutdown: in-flight requests did not finish", "err", err)
+		}
+	})
 	log.Info("pmserver listening", "addr", cfg.Listen, "tls", cfg.TLSCert != "", "mtls_agents", cfg.PKIDir != "", "data", cfg.DataDir, "inbox", icfg.Inbox)
 	if cfg.TLSCert != "" && len(srv.TLSConfig.Certificates) > 0 {
 		err = srv.ListenAndServeTLS("", "") // certificate chain already loaded in TLSConfig

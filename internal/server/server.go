@@ -42,12 +42,15 @@ type Server struct {
 	certHosts []string
 
 	intel intelCache
+
+	enrollLimit *ipLimiter
 }
 
 func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger) (*Server, error) {
 	s := &Server{cfg: cfg, store: st, repo: rp, ui: ui, log: log,
 		th: store.Thresholds{OfflineAfter: cfg.OfflineAfter.Duration, StaleAfter: cfg.StaleInventoryAfter.Duration, LostAfterInstall: cfg.LostAfterInstall.Duration}}
 	s.auth = newAuthState()
+	s.enrollLimit = newIPLimiter(enrollBurst, enrollEvery)
 	dl := map[string]time.Duration{}
 	for k, v := range cfg.PatchDeadlines {
 		dl[k] = v.Duration
@@ -399,7 +402,7 @@ func (s *Server) packageAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listEndpoints(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.ListEndpoints(r.Context(), s.th)
+	v, err := s.store.ListEndpointsBrief(r.Context(), s.th)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -578,12 +581,12 @@ func (s *Server) exportLifecycle(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	evs, err := s.store.ListAudit(ctx, store.AuditQuery{PackageID: pid, Limit: 5000, Ascending: true})
+	evs, err := s.allAudit(ctx, store.AuditQuery{PackageID: pid})
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	bevs, err := s.store.ListAudit(ctx, store.AuditQuery{ObjectID: p.BundleID, Limit: 100, Ascending: true})
+	bevs, err := s.allAudit(ctx, store.AuditQuery{ObjectID: p.BundleID})
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -601,13 +604,56 @@ func (s *Server) exportLifecycle(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// auditPage is the largest page ListAudit returns.
+var auditPage = 5000
+
+// allAudit pages through every matching audit event in sequence order
+// (evidence exports must not be silently truncated).
+func (s *Server) allAudit(ctx context.Context, q store.AuditQuery) ([]store.AuditEvent, error) {
+	q.Ascending, q.Limit = true, auditPage
+	out := []store.AuditEvent{}
+	for {
+		page, err := s.store.ListAudit(ctx, q)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, page...)
+		if len(page) < auditPage {
+			return out, nil
+		}
+		q.AfterSeq = page[len(page)-1].Seq
+	}
+}
+
 // ---- agent handlers ----
 
+// Enrollment is unauthenticated: small bodies, and per-IP rate limiting
+// (a fleet enrolls from many addresses; one address hammering is an attack
+// or a broken script).
+const (
+	enrollMaxBody = 64 << 10
+	enrollBurst   = 20
+	enrollEvery   = 3 * time.Second
+)
+
 func (s *Server) agentEnroll(w http.ResponseWriter, r *http.Request) {
+	ip := clientIP(r)
+	if ok, wait := s.enrollAllowed(ip); !ok {
+		s.log.Warn("enrollment rate limited", "ip", ip)
+		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+		writeErr(w, http.StatusTooManyRequests, "too many enrollment attempts from this address; retry later")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, enrollMaxBody)
 	var req store.EnrollRequest
 	if !decode(w, r, &req) {
 		return
 	}
+	if err := store.ValidHostname(req.Hostname); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.Source = ip
 	var issue store.CertIssuer
 	if s.ca != nil {
 		if req.CSR == "" {
@@ -619,6 +665,10 @@ func (s *Server) agentEnroll(w http.ResponseWriter, r *http.Request) {
 	id, secret, certPEM, err := s.store.Enroll(r.Context(), req, issue)
 	if err != nil {
 		if errors.Is(err, store.ErrInvalid) {
+			if errors.Is(err, store.ErrEnrollDenied) {
+				// Audited at most once per address per minute (store); every attempt is logged.
+				s.log.Warn("enrollment denied", "ip", ip, "hostname", req.Hostname)
+			}
 			writeErr(w, http.StatusUnauthorized, err.Error())
 			return
 		}

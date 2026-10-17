@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 
 	"offpatch/internal/manifest"
 )
@@ -74,5 +75,23 @@ func (r *Repo) Publish(src, sha string, size int64) error {
 	if err := os.Chmod(tmp, 0o440); err != nil {
 		return err
 	}
-	return os.Rename(tmp, dst)
+	if err := os.Rename(tmp, dst); err != nil {
+		return err
+	}
+	// Make the rename itself durable: the database is about to say "approved".
+	return syncDir(filepath.Dir(dst))
+}
+
+// syncDir fsyncs a directory so a rename into it survives a crash. Windows
+// cannot sync directory handles (NTFS journals metadata), so it is a no-op there.
+func syncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }

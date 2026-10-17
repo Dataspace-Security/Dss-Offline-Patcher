@@ -114,12 +114,14 @@ func TestReportsAlertsMetrics(t *testing.T) {
 	sctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() { e.srvHandler.RunAlerts(sctx, time.Hour); close(done) }()
-	time.Sleep(300 * time.Millisecond)
+	n := 0
+	for deadline := time.Now().Add(10 * time.Second); n < 3 && time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		mu.Lock()
+		n = len(hooks)
+		mu.Unlock()
+	}
 	cancel()
 	<-done
-	mu.Lock()
-	n := len(hooks)
-	mu.Unlock()
 	if n < 3 {
 		t.Fatalf("expected warning+critical alerts delivered to webhook, got %d", n)
 	}

@@ -195,7 +195,7 @@ func (s *Store) Compliance(ctx context.Context, th Thresholds) (ComplianceReport
 		return r.Packages[i].PackageID < r.Packages[j].PackageID
 	})
 
-	eps, err := s.ListEndpoints(ctx, th)
+	eps, err := s.ListEndpointsBrief(ctx, th)
 	if err != nil {
 		return r, err
 	}

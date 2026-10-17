@@ -10,6 +10,7 @@ import (
 var columnMigrations = []struct{ table, column, ddl string }{
 	{"endpoints", "cert_serial", "TEXT NOT NULL DEFAULT ''"},
 	{"endpoints", "cert_not_after", "TEXT NOT NULL DEFAULT ''"},
+	{"endpoints", "prev_cert_serial", "TEXT NOT NULL DEFAULT ''"},
 	{"endpoints", "retired_at", "TEXT NOT NULL DEFAULT ''"},
 	{"endpoints", "retired_reason", "TEXT NOT NULL DEFAULT ''"},
 	{"endpoints", "edition", "TEXT NOT NULL DEFAULT ''"},

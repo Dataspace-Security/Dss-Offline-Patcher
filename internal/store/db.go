@@ -34,6 +34,9 @@ type Store struct {
 	Policy Policy
 	// Now is overridable in tests.
 	Now func() time.Time
+
+	chain        chainCache
+	enrollDenied deniedAudits
 }
 
 const schema = `
@@ -45,6 +48,7 @@ CREATE TABLE IF NOT EXISTS bundles(
   checks TEXT NOT NULL DEFAULT '[]', error TEXT NOT NULL DEFAULT '',
   manifest BLOB, signature TEXT NOT NULL DEFAULT '');
 CREATE UNIQUE INDEX IF NOT EXISTS bundles_validated_id ON bundles(bundle_id) WHERE state='validated';
+CREATE INDEX IF NOT EXISTS bundles_file_sha ON bundles(file_sha256);
 CREATE TABLE IF NOT EXISTS source_sequences(source TEXT PRIMARY KEY, last_sequence INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS packages(
   package_id TEXT PRIMARY KEY, bundle_id TEXT NOT NULL, title TEXT NOT NULL, vendor TEXT NOT NULL,
