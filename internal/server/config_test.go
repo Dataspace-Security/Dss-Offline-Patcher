@@ -33,3 +33,15 @@ func TestPreinstallDefaults(t *testing.T) {
 		t.Fatalf("example: %v %+v", err, c)
 	}
 }
+
+// Windows 11 cumulative updates exceed 4 GiB (KB5127648 is 4.77 GB): the
+// defaults must admit them, in one bundle with the rest of a monthly run.
+func TestSizeLimitDefaults(t *testing.T) {
+	c, err := LoadConfig("../../packaging/server/pmserver.example.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MaxFileBytes < 4775050195 || c.MaxBundleBytes < 2*c.MaxFileBytes {
+		t.Fatalf("max_file_bytes %d, max_bundle_bytes %d", c.MaxFileBytes, c.MaxBundleBytes)
+	}
+}

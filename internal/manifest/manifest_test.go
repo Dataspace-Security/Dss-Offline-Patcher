@@ -28,10 +28,13 @@ func TestSchema(t *testing.T) {
 		t.Fatalf("valid manifest rejected: %v", err)
 	}
 	cases := map[string]func(m *Manifest){
-		"expired":        func(m *Manifest) { m.ExpiresAt = time.Now().Add(-time.Hour) },
-		"lifetime":       func(m *Manifest) { m.ExpiresAt = m.CreatedAt.Add(100 * 24 * time.Hour) },
-		"traversal":      func(m *Manifest) { m.Packages[0].File.Name = "payload/../x" },
-		"bad kb":         func(m *Manifest) { m.Packages[0].KB = "5000001" },
+		"expired":   func(m *Manifest) { m.ExpiresAt = time.Now().Add(-time.Hour) },
+		"lifetime":  func(m *Manifest) { m.ExpiresAt = m.CreatedAt.Add(100 * 24 * time.Hour) },
+		"traversal": func(m *Manifest) { m.Packages[0].File.Name = "payload/../x" },
+		"bad kb":    func(m *Manifest) { m.Packages[0].KB = "5000001" },
+		"nil product": func(m *Manifest) {
+			m.Packages[0].Kind, m.Packages[0].ProductCode = "msi", "{00000000-0000-0000-0000-000000000000}"
+		},
 		"vendor invalid": func(m *Manifest) { m.Packages[0].VendorSignature.Status = "invalid" },
 		"msi no guid":    func(m *Manifest) { m.Packages[0].Kind = "msi" },
 		"no packages":    func(m *Manifest) { m.Packages = nil },

@@ -85,7 +85,7 @@ Rules for writing spec.json:
 | Microsoft Update Catalog | All pages and downloads use HTTPS. Redirects to plain HTTP are refused, and `http://*.windowsupdate.com` links are upgraded to HTTPS. Catalog file names end in `_<sha1>.msu`, and the download dialog also gives a base64 SHA-1 `digest`. The two must agree, or `fetch` fails. The downloaded file must match that SHA-1, and the exact byte size from the search row when the update has a single file. The download dialog sometimes includes a SHA-256; when it does, that is checked too. If the catalog gives no hash at all, `fetch` refuses the download. |
 | Authenticode | When `pmctl build` runs on a Windows acquisition host, it checks the Microsoft signature and records the result in the signed manifest. The server rejects packages recorded as `invalid`. |
 | Third-party vendors (`fetch-url`) | HTTPS only. `-sha256` is required. The operator gets it from the vendor through a separate channel, such as the vendor's release notes or a signed checksum file. A mismatch deletes the download and leaves spec.json untouched. |
-| Everything fetched | Treated as untrusted data. Pages are size-limited and only parsed. Downloads are only hashed and never executed. File names must be `[A-Za-z0-9._-]`. Total size is capped at 4 GiB. |
+| Everything fetched | Treated as untrusted data. Pages are size-limited and only parsed. Downloads are only hashed and never executed. File names must be `[A-Za-z0-9._-]`. Each file is capped at 16 GiB (Windows 11 cumulative updates already exceed 4 GiB). |
 
 SHA-1 alone is a weak hash. Here it binds the file to what the catalog page advertised over HTTPS.
 Authenticode at build time is the vendor-level check. After build, the bundle's own SHA-256 and Ed25519

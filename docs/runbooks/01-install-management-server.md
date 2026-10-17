@@ -141,9 +141,9 @@ All keys (`internal/server/config.go`, `internal/oidc/oidc.go`, `internal/server
 | `checkin_interval_seconds` | `60` | Sent to agents. |
 | `download_rate_kbps` | `0` (unlimited) | Per-agent download throttle, kilobits/s. |
 | `site_download_kbps` | — | Per-site override, e.g. `{"branch-office-1": 20000}`. |
-| `max_bundle_bytes` | 8 GiB | Intake `size` check and total extracted size. |
+| `max_bundle_bytes` | 32 GiB | Intake `size` check and total extracted size. |
 | `max_files` | `500` | Files per bundle. |
-| `max_file_bytes` | 4 GiB | Per payload file. |
+| `max_file_bytes` | 16 GiB | Per payload file. |
 | `scan_command` | — | e.g. `["/usr/bin/clamscan", "--no-summary"]`; the file path is appended; exit 0 = clean. |
 | `intake_interval` | `5s` | Inbox polling. |
 | `intake_max_bundles_per_hour` | `0` (off) | Rolling-hour limit; excess waits in the inbox. |

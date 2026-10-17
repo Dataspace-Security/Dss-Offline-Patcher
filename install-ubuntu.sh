@@ -350,33 +350,41 @@ if [ "$ROLE" = all ] || [ "$ROLE" = acquisition ]; then
   },
   "intel": {},
   "requests": "$ACQ_DATA/requests",
-  "apps": [
-    {
-      "name": "firefox-win", "title": "Mozilla Firefox (Windows x64 en-US)", "vendor": "Mozilla", "kind": "msi", "arch": "x64",
-      "severity": "important", "package_name": "Mozilla Firefox (x64 en-US)",
-      "version": { "url": "https://product-details.mozilla.org/1.0/firefox_versions.json", "json_path": "LATEST_FIREFOX_VERSION" },
-      "download_url": "https://download-installer.cdn.mozilla.net/pub/firefox/releases/{version}/win64/en-US/Firefox%20Setup%20{version}.msi",
-      "file_name": "firefox-{version}-win64-en-US.msi",
-      "sha256": { "url": "https://archive.mozilla.org/pub/firefox/releases/{version}/SHA256SUMS", "regex": "([0-9a-f]{64})  win64/en-US/Firefox Setup {version}\\\\.msi" },
-      "product_code": "{00000000-0000-0000-0000-000000000000}"
-    }
-  ]
+  "apps": []
 }
 EOF
     chown root:"$SVC_USER" "$ETC/acquire.json"; chmod 0640 "$ETC/acquire.json"
-    ok "wrote $ETC/acquire.json (Windows 11 24H2 critical updates + Firefox for Windows) — edit it for your fleet"
-    warn "Firefox MSI product codes change per version: on a Linux host set the real product_code, or run acquisition on Windows with product_code_from_msi"
+    ok "wrote $ETC/acquire.json (Windows 11 24H2 critical updates; apps come from the console's acquisition requests) — edit it for your fleet"
   else
     ok "keeping existing $ETC/acquire.json"
-    if ! grep -q '"requests"' "$ETC/acquire.json" || ! grep -q '"intel"' "$ETC/acquire.json"; then
-      command -v python3 >/dev/null && python3 - "$ETC/acquire.json" "$ACQ_DATA/requests" <<'PY' && ok "enabled update intelligence and acquisition requests in $ETC/acquire.json"
+    # Upgrades: turn on intelligence and requests, and drop app entries with
+    # the all-zero placeholder product code that older installers wrote
+    # (pmctl now refuses them, which would stop every run).
+    if command -v python3 >/dev/null; then
+      if msg=$(python3 - "$ETC/acquire.json" "$ACQ_DATA/requests" <<'PY'
 import json, sys
 p = sys.argv[1]
 c = json.load(open(p))
-c.setdefault("intel", {})
-c.setdefault("requests", sys.argv[2])
-json.dump(c, open(p, "w"), indent=2)
+changed = []
+if "intel" not in c:
+    c["intel"] = {}; changed.append("enabled update intelligence")
+if "requests" not in c:
+    c["requests"] = sys.argv[2]; changed.append("enabled acquisition requests")
+nil = lambda g: isinstance(g, str) and g.strip("{}0-") == "" and "0" in g
+apps = c.get("apps") or []
+keep = [a for a in apps if not (a.get("kind") == "msi" and not a.get("product_code_from_msi") and nil(a.get("product_code", "")))]
+if len(keep) != len(apps):
+    changed.append("removed %d app(s) with a placeholder product_code: %s" % (len(apps) - len(keep), ", ".join(a.get("name", "?") for a in apps if a not in keep)))
+    c["apps"] = keep
+if changed:
+    json.dump(c, open(p, "w"), indent=2)
+    print("; ".join(changed))
 PY
+); then
+        if [ -n "$msg" ]; then ok "$ETC/acquire.json: $msg"; fi
+      else
+        warn "could not update $ETC/acquire.json; check it by hand"
+      fi
     fi
   fi
   # Acquisition requests exported from the console's Updates page go here.

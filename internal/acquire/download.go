@@ -21,7 +21,7 @@ import (
 
 // MaxDownloadBytes is a hard cap on any single downloaded file (matches the
 // server's default max_file_bytes).
-const MaxDownloadBytes = 4 << 30
+const MaxDownloadBytes = 16 << 30
 
 var (
 	// ErrHashMismatch is returned when a downloaded file does not match the

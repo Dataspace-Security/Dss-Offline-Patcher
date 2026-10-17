@@ -150,6 +150,20 @@ func TestAutoConfigRejectsUnverifiedApps(t *testing.T) {
 	}
 }
 
+// An MSI app needs its real product code: the all-zero placeholder older
+// installers wrote (or none at all) is refused at config load.
+func TestAutoConfigRejectsPlaceholderProductCode(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.json")
+	for _, code := range []string{`"product_code":"{00000000-0000-0000-0000-000000000000}",`, ``} {
+		os.WriteFile(p, []byte(`{"work_dir":"w","key":"k","apps":[{"name":"firefox-win","title":"X","vendor":"V","kind":"msi",`+code+`
+		  "version":{"url":"https://v/x","regex":"([0-9]+)"},"download_url":"https://v/x.msi","sha256":{"url":"https://v/sums"}}]}`), 0o600)
+		if _, err := loadAutoConfig(p); err == nil || !strings.Contains(err.Error(), "real product_code") {
+			t.Fatalf("placeholder %q accepted: %v", code, err)
+		}
+	}
+}
+
 // The shipped example must keep parsing as the config schema evolves.
 func TestAutoExampleConfigParses(t *testing.T) {
 	c, err := loadAutoConfig("../../packaging/acquisition/acquire.example.json")

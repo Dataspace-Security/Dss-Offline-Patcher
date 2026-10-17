@@ -116,13 +116,13 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 	if c.MaxBundleBytes == 0 {
-		c.MaxBundleBytes = 8 << 30
+		c.MaxBundleBytes = 32 << 30
 	}
 	if c.MaxFiles == 0 {
 		c.MaxFiles = 500
 	}
 	if c.MaxFileBytes == 0 {
-		c.MaxFileBytes = 4 << 30
+		c.MaxFileBytes = 16 << 30
 	}
 	if c.IntakeInterval.Duration == 0 {
 		c.IntakeInterval.Duration = 5 * time.Second

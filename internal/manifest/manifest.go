@@ -174,6 +174,9 @@ func (m *Manifest) ValidateSchema(now time.Time) error {
 			wantOS = "windows"
 			if !productRe.MatchString(p.ProductCode) {
 				add("%s.product_code must be a {GUID} for msi", pfx)
+			} else if IsNilGUID(p.ProductCode) {
+				// A placeholder: detection and rollback would target nothing real.
+				add("%s.product_code is the all-zero placeholder GUID; set the MSI's real ProductCode", pfx)
 			}
 			// Optional: the app's display name in Add/Remove Programs, used to
 			// recognise an older installed version (product codes change per version).
@@ -353,4 +356,9 @@ func Verify(pub ed25519.PublicKey, manifestBytes []byte, sigB64 string) error {
 		return errors.New("signature does not verify")
 	}
 	return nil
+}
+
+// IsNilGUID reports whether a {GUID} is all zeros (a config placeholder).
+func IsNilGUID(g string) bool {
+	return strings.Trim(g, "{}0-") == "" && strings.Contains(g, "0")
 }

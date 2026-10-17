@@ -481,8 +481,8 @@ Open **Intake** → the bundle → **Validation checks**. The first failing chec
 
 | Check | Likely cause | What to do |
 |---|---|---|
-| `size` | Bundle larger than `max_bundle_bytes` (default 8 GiB) | Split the spec into several bundles, or raise the limit. |
-| `structure` | Tar layout not allowed: extra entries, directories other than `payload/`, links, devices, traversal, more than `max_files` (500) or a file over `max_file_bytes` (4 GiB), or a truncated file | Rebuild with `pmctl build`. Never hand-edit a bundle. A truncated file points to a transfer problem. |
+| `size` | Bundle larger than `max_bundle_bytes` (default 32 GiB) | Split the spec into several bundles, or raise the limit. |
+| `structure` | Tar layout not allowed: extra entries, directories other than `payload/`, links, devices, traversal, more than `max_files` (500) or a file over `max_file_bytes` (16 GiB), or a truncated file | Rebuild with `pmctl build`. Never hand-edit a bundle. A truncated file points to a transfer problem. |
 | `manifest_parse` | `manifest.json` not strict JSON or has unknown fields | Rebuild with a `pmctl` of the same version as the server. |
 | `manifest_schema` | Expired (`expires_at` passed — the bundle sat too long; `pmctl build -ttl` default 720h, max 90 days), `created_at` in the future (acquisition clock ahead by more than 10 minutes), invalid field, or `vendor_signature` recorded as `invalid` | Fix clocks, rebuild, send promptly. For `invalid` vendor signatures, find out why before anything else. |
 | `trusted_key` | Bundle signed with a key the server does not trust | Wrong key used, or the rotation trust document was not sent. See runbook 03. |

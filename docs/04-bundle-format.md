@@ -80,7 +80,7 @@ Any other entry is rejected. That includes directories other than `payload/`, sy
 
 ### Limits (server config, defaults)
 
-`max_bundle_bytes` 8 GiB · `max_files` 500 · `max_file_bytes` 4 GiB
+`max_bundle_bytes` 32 GiB · `max_files` 500 · `max_file_bytes` 16 GiB
 
 ## Transfer receipt (recorded on every intake attempt)
 

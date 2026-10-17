@@ -243,6 +243,9 @@ func loadAutoConfig(path string) (*autoConfig, error) {
 		if a.SHA256 == nil && a.AuthenticodeSigner == "" && a.PkgSigner == "" {
 			return nil, fmt.Errorf("config: apps[%d] (%s) needs a sha256 checksum source, authenticode_signer or pkg_signer — unverified downloads are never accepted", i, a.Name)
 		}
+		if a.Kind == "msi" && !a.ProductCodeFromMSI && (a.ProductCode == "" || manifest.IsNilGUID(a.ProductCode)) {
+			return nil, fmt.Errorf("config: apps[%d] (%s) needs the MSI's real product_code (not a placeholder), or product_code_from_msi on a Windows acquisition host", i, a.Name)
+		}
 	}
 	return c, nil
 }
@@ -827,7 +830,7 @@ func downloadVerified(ctx context.Context, hc *http.Client, rawURL, downloads, n
 	if err != nil {
 		return "", err
 	}
-	_, err = io.Copy(f, io.LimitReader(&stallReader{r: resp.Body, cancel: cancel, idle: 2 * time.Minute}, 4<<30))
+	_, err = io.Copy(f, io.LimitReader(&stallReader{r: resp.Body, cancel: cancel, idle: 2 * time.Minute}, acquire.MaxDownloadBytes))
 	f.Close()
 	if err != nil {
 		os.Remove(p)
