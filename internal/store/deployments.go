@@ -1060,6 +1060,19 @@ type Report struct {
 	HealthDetail string `json:"health_detail"`
 }
 
+// Heartbeat marks an endpoint as alive without a full check-in: the agent
+// sends it while a long installer runs, so the endpoint is not shown offline.
+func (s *Store) Heartbeat(ctx context.Context, endpointID string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE endpoints SET last_seen=? WHERE endpoint_id=?`, s.now(), endpointID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) ReportTarget(ctx context.Context, endpointID string, r Report) error {
 	if !agentStates[r.State] {
 		return Errf(ErrInvalid, "state %q cannot be reported by an agent", r.State)

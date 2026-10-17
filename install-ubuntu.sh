@@ -348,6 +348,7 @@ if [ "$ROLE" = all ] || [ "$ROLE" = acquisition ]; then
       { "msrc_product": "Windows 11 Version 24H2", "catalog_product": "Windows 11 Version 24H2", "arch": "x64", "min_build": 26100, "max_build": 26100 }
     ]
   },
+  "intel": {},
   "apps": [
     {
       "name": "firefox-win", "title": "Mozilla Firefox (Windows x64 en-US)", "vendor": "Mozilla", "kind": "msi", "arch": "x64",
@@ -366,6 +367,15 @@ EOF
     warn "Firefox MSI product codes change per version: on a Linux host set the real product_code, or run acquisition on Windows with product_code_from_msi"
   else
     ok "keeping existing $ETC/acquire.json"
+    if ! grep -q '"intel"' "$ETC/acquire.json" && command -v python3 >/dev/null; then
+      python3 - "$ETC/acquire.json" <<'PY' && ok "enabled update intelligence in $ETC/acquire.json"
+import json, sys
+p = sys.argv[1]
+c = json.load(open(p))
+c["intel"] = {}
+json.dump(c, open(p, "w"), indent=2)
+PY
+    fi
   fi
   if [ $HAVE_SYSTEMD = 1 ]; then
     cat > /etc/systemd/system/offpatch-acquire.service <<EOF
@@ -401,6 +411,17 @@ EOF
     systemctl daemon-reload
     systemctl enable --now offpatch-acquire.timer >/dev/null 2>&1
     ok "daily acquisition at 07:00 (systemd timer offpatch-acquire.timer)"
+    # First update-intelligence run now, so the console's Updates page fills
+    # immediately (needs internet; harmless if it fails — the timer retries).
+    if [ "$ROLE" = all ]; then
+      if out=$(cd "$ACQ_DATA" && runuser -u "$SVC_USER" -- "$PREFIX/bin/pmctl" intel -key "$ETC/keys/bundle.key" -out "$ACQ_DATA/intel" -to "$DROP" 2>&1); then
+        ok "update intelligence sent (newest Windows updates and app versions)"
+      else
+        warn "update intelligence not collected now; the daily run will retry. Reason:"
+        printf '%s
+' "$out" | tail -n 3 | sed 's/^/      /'
+      fi
+    fi
   else
     warn "no systemd: run acquisition manually or from cron: $PREFIX/bin/pmctl auto -config $ETC/acquire.json"
   fi

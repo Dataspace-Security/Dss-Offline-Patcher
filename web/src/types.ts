@@ -192,3 +192,26 @@ export type Alert = {
 // ---- Console-only helper types (not part of the API contract) ----
 export type AuditVerify = { ok: boolean; count: number; first_bad_seq: number; error: string };
 export type EnrollmentToken = { token: string; expires_at: string; max_uses: number };
+
+// ---- update intelligence (GET /api/endpoints/{id}/updates, /api/updates) ----
+export type IntelSummary = {
+  source: string; key_id: string; generated_at: string; received_at: string;
+  windows: number; apps: number; apps_source?: string; warnings?: string[];
+  error?: string; // set when the stored document cannot be used (e.g. its key was revoked)
+};
+export type CatalogLink = { package_id: string; state: string };
+export type OSUpdate = {
+  product: string; build: number; server?: boolean; arch: string; kb: string; ubr?: number;
+  release_date?: string; title: string; size_mb?: number; installed_ubr: number; catalog: CatalogLink | null;
+  basis: "build_revision" | "kb_inventory";
+};
+export type AppUpdate = {
+  app_id: string; name: string; installed_name: string; installed_version: string; latest_version: string;
+  matched_by: "product_code" | "name"; product_code?: string; catalog: CatalogLink | null;
+};
+export type EndpointUpdates = { intel: IntelSummary | null; os: OSUpdate[]; apps: AppUpdate[]; current: number; unmatched: number };
+export type FleetUpdates = {
+  intel: IntelSummary | null;
+  updates: { kind: "os" | "app"; key: string; name: string; latest: string; catalog: CatalogLink | null;
+    endpoints: { endpoint_id: string; hostname: string; installed: string }[] }[];
+};

@@ -449,6 +449,37 @@ func (a *Agent) reboot(ctx context.Context) {
 	a.log.Info("reboot scheduled to complete pending updates")
 }
 
+// keepAlive sends a heartbeat every check-in interval until the returned
+// stop function is called. Installers (a Windows cumulative update takes
+// 10+ minutes) block the cycle; without this the server would show the
+// endpoint as offline while it is busy installing.
+func (a *Agent) keepAlive(ctx context.Context) (stop func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// At most a minute apart, whatever the check-in interval: the server's
+		// offline threshold must never be reached while we are busy.
+		every := a.interval
+		if every <= 0 || every > time.Minute {
+			every = time.Minute
+		}
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := a.do(ctx, "POST", "/api/agent/heartbeat", struct{}{}, nil); err != nil && ctx.Err() == nil {
+					a.log.Warn("heartbeat failed", "err", err)
+				}
+			}
+		}
+	}()
+	return func() { cancel(); <-done }
+}
+
 // process handles one assignment and reports whether a reboot is pending.
 func (a *Agent) process(ctx context.Context, as store.Assignment, f Facts, inv []store.InventoryItem) (rebootPending bool) {
 	log := a.log.With("deployment", as.DeploymentID, "package", as.PackageID)
@@ -502,12 +533,13 @@ func (a *Agent) process(ctx context.Context, as store.Assignment, f Facts, inv [
 	a.report(ctx, as, "downloaded", 0, "sha256 verified "+pkg.File.SHA256[:16])
 	// 5. Install.
 	a.report(ctx, as, "installing", 0, a.plat.Name()+" installer started")
-	var res Result
-	if pkg.Kind == "agent" {
-		res = a.selfUpgrade(ctx, pkg, file)
-	} else {
-		res = a.plat.Install(ctx, pkg, file)
-	}
+	res := func() Result {
+		defer a.keepAlive(ctx)()
+		if pkg.Kind == "agent" {
+			return a.selfUpgrade(ctx, pkg, file)
+		}
+		return a.plat.Install(ctx, pkg, file)
+	}()
 	log.Info("install finished", "state", res.State, "exit", res.ExitCode, "detail", res.Detail)
 	a.finish(ctx, as, res)
 	if res.State != "failed" {

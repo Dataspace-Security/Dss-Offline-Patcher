@@ -10,6 +10,7 @@ import Catalog from "./pages/Catalog";
 import { DeploymentList, NewDeploymentPage } from "./pages/Deployments";
 import DeploymentDetailPage from "./pages/DeploymentDetail";
 import Endpoints from "./pages/Endpoints";
+import Updates from "./pages/Updates";
 import EndpointDetailPage from "./pages/EndpointDetail";
 import Exceptions from "./pages/Exceptions";
 import Audit from "./pages/Audit";
@@ -105,6 +106,7 @@ function Shell({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
             <NavLink to="/deployments">Deployments</NavLink>
             <NavLink to="/windows">Windows</NavLink>
             <NavLink to="/endpoints">Endpoints</NavLink>
+            <NavLink to="/updates">Updates</NavLink>
             <NavLink to="/agent-setup">Agent setup</NavLink>
             <NavLink to="/exceptions">Exceptions</NavLink>
             <NavLink to="/reports">Reports</NavLink>
@@ -144,6 +146,7 @@ function Shell({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
               <Route path="/deployments/:id" element={<DeploymentDetailPage />} />
               <Route path="/windows" element={<MaintenanceWindows />} />
               <Route path="/endpoints" element={<Endpoints />} />
+              <Route path="/updates" element={<Updates />} />
               <Route path="/endpoints/:id" element={<EndpointDetailPage />} />
               <Route path="/agent-setup" element={<AgentSetupPage />} />
               <Route path="/exceptions" element={<Exceptions />} />

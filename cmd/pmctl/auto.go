@@ -51,6 +51,10 @@ type autoConfig struct {
 		Products    []autoMSProd `json:"products"`
 	} `json:"microsoft"`
 	Apps []autoApp `json:"apps"`
+	// Intel: also send update intelligence (newest Windows cumulative updates
+	// and application versions) so the console can show what every endpoint
+	// is missing. Omit to skip; {} for the defaults.
+	Intel *intelOpts `json:"intel"`
 
 	// Advanced: alternative endpoints (tests, or an internal mirror).
 	CatalogURL string `json:"catalog_url"`
@@ -465,6 +469,16 @@ func runAuto(ctx context.Context, cfgPath string, dry bool) (rep autoReport, err
 		rep.Finished = autoNow().UTC().Format(time.RFC3339)
 		if err != nil {
 			rep.Error = err.Error()
+		}
+		if !dry && c.Intel != nil && !c.Intel.Disabled {
+			d, ierr := sendIntel(ctx, c)
+			rep.Warnings = append(rep.Warnings, d.Warnings...)
+			if ierr != nil {
+				rep.Warnings = append(rep.Warnings, "update intelligence not sent: "+ierr.Error())
+			} else {
+				rep.Feeds = append(rep.Feeds, acqstatus.Feed{Type: "intel", Name: "update intelligence",
+					LatestVersion: fmt.Sprintf("%d Windows builds, %d apps", len(d.Windows), len(d.Apps)), Status: "up_to_date", Detail: d.AppsSource})
+			}
 		}
 		if !dry {
 			if serr := sendStatus(c, &rep); serr != nil {

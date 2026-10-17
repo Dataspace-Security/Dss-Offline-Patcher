@@ -108,6 +108,7 @@ func newEnvOpts(t *testing.T, tlsMode bool, extra string) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
+	h.SetIntelKeys(e.intake.ActiveKeys)
 	e.cfg = cfg
 	e.srvHandler = h
 	e.hc = http.DefaultClient

@@ -45,6 +45,10 @@ type Endpoint struct {
 	inventory []InventoryItem
 }
 
+// InventoryItems is the endpoint's last reported inventory (loaded by
+// ListEndpoints and GetEndpoint).
+func (e Endpoint) InventoryItems() []InventoryItem { return e.inventory }
+
 type EndpointDetail struct {
 	Endpoint
 	Inventory []InventoryItem `json:"inventory"`

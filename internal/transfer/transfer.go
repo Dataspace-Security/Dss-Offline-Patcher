@@ -71,10 +71,18 @@ type Adapter interface {
 	SendReceipt(r Receipt) error
 }
 
+// Transferable reports whether a file of this name may cross the boundary:
+// signed bundles, trust documents, acquisition status reports and update
+// intelligence. Everything else is refused.
+func Transferable(name string) bool {
+	return filepath.Ext(name) == ".pmb" || strings.HasSuffix(name, ".trust.json") ||
+		strings.HasSuffix(name, ".status.json") || strings.HasSuffix(name, ".intel.gz")
+}
+
 func checkBundle(path string) (string, int64, string, error) {
 	name := filepath.Base(path)
-	if filepath.Ext(name) != ".pmb" && !strings.HasSuffix(name, ".trust.json") && !strings.HasSuffix(name, ".status.json") {
-		return "", 0, "", errors.New("only .pmb bundles, .trust.json and .status.json documents may be transferred")
+	if !Transferable(name) {
+		return "", 0, "", errors.New("only .pmb bundles, .trust.json, .status.json and .intel.gz documents may be transferred")
 	}
 	size, sha, err := manifest.HashFile(path)
 	return name, size, sha, err

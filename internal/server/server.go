@@ -40,6 +40,8 @@ type Server struct {
 	// (needed to pin it) and the names/IPs the server certificate covers.
 	caInChain bool
 	certHosts []string
+
+	intel intelCache
 }
 
 func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger) (*Server, error) {
@@ -138,6 +140,9 @@ func (s *Server) Handler() http.Handler {
 	admin("viewer", "GET /api/endpoints", s.listEndpoints)
 	admin("viewer", "GET /api/endpoints/{id}", s.getEndpoint)
 	admin("viewer", "GET /api/endpoints/{id}/available", s.availableFor)
+	admin("viewer", "GET /api/endpoints/{id}/updates", s.endpointUpdates)
+	admin("viewer", "GET /api/updates", s.fleetUpdates)
+	admin("viewer", "GET /api/intel", s.intelStatus)
 	admin("viewer", "GET /api/packages-needs", s.packageNeeds)
 	admin("operator", "PATCH /api/endpoints/{id}", s.patchEndpoint)
 	admin("operator", "POST /api/endpoints/{id}/retire", s.retireEndpoint)
@@ -172,6 +177,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/agent/manifest/{id}", s.requireAgent(s.agentManifest))
 	mux.Handle("GET /api/agent/content/{sha}", s.requireAgent(s.agentContent))
 	mux.Handle("POST /api/agent/report", s.requireAgent(s.agentReport))
+	mux.Handle("POST /api/agent/heartbeat", s.requireAgent(s.agentHeartbeat))
 	mux.Handle("POST /api/agent/renew", s.requireAgent(s.agentRenew))
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { writeErr(w, http.StatusNotFound, "no such endpoint") })
@@ -700,6 +706,14 @@ func (s *Server) agentReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (s *Server) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.Heartbeat(r.Context(), endpointID(r)); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // issuer signs the CSR for an endpoint (enrollment and renewal).

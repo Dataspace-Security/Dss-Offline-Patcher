@@ -31,6 +31,8 @@ const usage = `pmctl — offpatch acquisition-zone tool
 acquisition (connected zone; see docs/08-acquisition.md):
   pmctl catalog-search -q <query>                  search the Microsoft Update Catalog
   pmctl msrc      -month 2026-Oct [-product "Windows 10"] [-arch x64]   list KBs/severity/CVEs from MSRC
+  pmctl intel     -key bundle.key [-out dir] [-to <inbox/drop dir>]      sign update intelligence: newest Windows
+                  [-no-apps] [-no-windows] [-winget-url u]                CUs + app versions (winget), for the console
   pmctl fetch     -kb KB5044273 -product "Windows 10 Version 22H2" -arch x64 -min-build 19045 -max-build 19045
                   [-severity critical | -msrc-month 2026-Oct] [-match s] [-file s] -out <dir> -spec <spec.json>
   pmctl fetch-url -url https://... -sha256 <hex> -package-id X -title T -vendor V -kind msi -product-code {GUID}
@@ -69,6 +71,8 @@ func main() {
 		err = fetchURL(os.Args[2:])
 	case "msrc":
 		err = msrcCmd(os.Args[2:])
+	case "intel":
+		err = intelCmd(os.Args[2:])
 	default:
 		fmt.Print(usage)
 		os.Exit(2)

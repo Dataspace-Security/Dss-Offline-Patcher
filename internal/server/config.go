@@ -241,6 +241,7 @@ func (c *Config) IntakeConfig() (intake.Config, error) {
 		RootPub:           root,
 		Inbox:             filepath.Join(d, "inbox"),
 		ReceivedDir:       filepath.Join(d, "received"),
+		IntelDir:          filepath.Join(d, "intel"),
 		QuarantineDir:     filepath.Join(d, "quarantine"),
 		Keys:              keys,
 		Limits:            manifest.Limits{MaxFiles: c.MaxFiles, MaxFileBytes: c.MaxFileBytes, MaxTotal: c.MaxBundleBytes},

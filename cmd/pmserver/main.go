@@ -116,6 +116,7 @@ func run(cfgPath string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	h.SetIntelKeys(in.ActiveKeys)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

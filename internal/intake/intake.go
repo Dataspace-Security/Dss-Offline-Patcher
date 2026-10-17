@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"offpatch/internal/acqstatus"
+	"offpatch/internal/intel"
 	"offpatch/internal/manifest"
 	"offpatch/internal/store"
 	"offpatch/internal/transfer"
@@ -36,6 +37,8 @@ type TrustedKey struct {
 
 type Config struct {
 	Inbox, ReceivedDir, QuarantineDir string
+	// IntelDir holds the current update-intelligence document (see intel.go).
+	IntelDir string
 	// RootPub enables signed trust documents (key rotation/revocation).
 	RootPub        ed25519.PublicKey
 	Keys           map[string]TrustedKey // by key_id
@@ -93,7 +96,7 @@ func (s *Service) ScanOnce(ctx context.Context) []store.Bundle {
 		s.log.Error("read inbox", "err", err)
 		return nil
 	}
-	var names, receipts, trustDocs, statuses []string
+	var names, receipts, trustDocs, statuses, intels []string
 	// Trust documents first: a revocation must take effect before bundles
 	// that arrived alongside it are validated.
 	for _, e := range entries {
@@ -107,12 +110,20 @@ func (s *Service) ScanOnce(ctx context.Context) []store.Bundle {
 			trustDocs = append(trustDocs, e.Name())
 		case strings.HasSuffix(e.Name(), acqstatus.FileSuffix):
 			statuses = append(statuses, e.Name())
+		case strings.HasSuffix(e.Name(), intel.FileSuffix):
+			intels = append(intels, e.Name())
 		}
 	}
 	sort.Strings(trustDocs)
 	for _, n := range trustDocs {
 		if err := s.processTrust(ctx, filepath.Join(s.cfg.Inbox, n)); err != nil {
 			s.log.Error("trust document rejected", "file", n, "err", err)
+		}
+	}
+	sort.Strings(intels) // oldest first, so a backlog ends on the newest
+	for _, n := range intels {
+		if err := s.processIntel(ctx, filepath.Join(s.cfg.Inbox, n)); err != nil {
+			s.log.Error("update intelligence rejected", "file", n, "err", err)
 		}
 	}
 	sort.Strings(names)

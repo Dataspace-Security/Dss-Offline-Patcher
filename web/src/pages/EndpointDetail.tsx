@@ -4,6 +4,7 @@ import { api, enc, errMsg } from "../api";
 import { useCan } from "../auth";
 import { Empty, ErrorBanner, KV, Mono, PageHeader, Pill, ReasonModal, RelTime, TargetPill, Time } from "../components/ui";
 import { AvailablePatches } from "../components/AvailablePatches";
+import { UpdatesAvailable } from "../components/UpdatesAvailable";
 import { HardwareCard } from "../components/Hardware";
 import type { Endpoint, EndpointDetail } from "../types";
 import { parseTime, splitList, useLoad, useNow } from "../util";
@@ -83,6 +84,7 @@ export default function EndpointDetailPage() {
         </section>
       </div>
 
+      <UpdatesAvailable endpointId={e.endpoint_id} os={e.os} />
       <AvailablePatches endpointId={e.endpoint_id} hostname={e.hostname} />
 
       <section className="section">
