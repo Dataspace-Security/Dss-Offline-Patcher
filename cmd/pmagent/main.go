@@ -57,6 +57,8 @@ func main() {
 		err = run(os.Args[2:], log)
 	case "service":
 		err = serviceCmd(os.Args[2:])
+	case "restart-service":
+		err = restartServiceCmd(os.Args[2:])
 	case "secure-state-dir":
 		fs := flag.NewFlagSet("secure-state-dir", flag.ExitOnError)
 		dir := fs.String("state-dir", defaultStateDir(), "agent state directory")

@@ -77,6 +77,15 @@ func (h *handler) Execute(args []string, req <-chan svc.ChangeRequest, status ch
 			}
 		case err := <-done:
 			cancel()
+			if errors.Is(err, agent.ErrRestart) {
+				// Self-upgrade: come back on the new binary right away.
+				if herr := spawnRestartHelper(); herr != nil {
+					h.log.Error("restart helper not started; the service recovery actions will restart the agent", "err", herr)
+				} else {
+					h.log.Info("restarting on the upgraded agent")
+				}
+				return false, 1
+			}
 			if err != nil {
 				h.log.Error("agent exited", "err", err)
 				return false, 1
