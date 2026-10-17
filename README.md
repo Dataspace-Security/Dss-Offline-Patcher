@@ -12,6 +12,24 @@ Product workflow: [docs/00-product-workflow.md](docs/00-product-workflow.md) · 
 | `pmserver` | Isolated management | Intake → quarantine → validation → catalog → approval → immutable repository → staged deployments → verification → hash-chained audit, plus the React console at `/` |
 | `pmagent` | Endpoint | Windows (`.msu` / `.msi`), Linux (`.deb` / `.rpm`) and macOS (`.pkg`). Enrolls with a CSR and gets an mTLS certificate that renews automatically. Re-verifies signatures and hashes. Respects maintenance windows, bandwidth limits and reboot policy. Runs health checks and signed self-upgrades. Runs as a Windows service, systemd unit or launchd daemon. `-platform sim` simulates a Windows endpoint for demos. |
 
+## One-command install on Ubuntu
+
+On Ubuntu 22.04 or 24.04 (amd64 or arm64), from the repository root:
+
+```bash
+sudo ./install-ubuntu.sh
+```
+
+This installs Go (SHA-256 verified) if needed and builds everything. It then sets up an all-in-one lab:
+
+- the management server as a systemd service with **TLS + mTLS** (internal CA), a break-glass admin token and audit export
+- the daily `pmctl auto` acquisition timer (07:00)
+- this machine enrolled as a managed endpoint
+
+It prints the console URL and where to find the admin token. It is safe to re-run: existing keys, certificates, token and agent identity are kept.
+
+For a split production setup, install each role on its own machine: `--role server`, `--role acquisition`, or `--role agent --server … --token … --ca … --pubkey …`. Other commands: `--status`, `--uninstall` (`--purge` also deletes keys and data), `--insecure-lab` (plain HTTP). Tested on Ubuntu 24.04 with systemd and without it (containers).
+
 ## Quick start (single machine, simulated endpoints)
 
 Requirements: Go 1.27.2+ (1.27.1 builds, but has standard-library CVEs), Node 20.19+ or 22.12+ (only to rebuild the console).

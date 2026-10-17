@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -187,5 +188,60 @@ func TestCheckPkgSignatureLive(t *testing.T) {
 	}
 	if err := checkPkgSignature(p, "offpatch"); err == nil {
 		t.Fatal("unsigned pkg accepted")
+	}
+}
+
+// Vendor feed runs ahead of the download link (Chrome staged rollout): the
+// package must be labelled with the version INSIDE the .pkg, and the next run
+// must not re-download the same old build.
+func TestAutoLabelsPkgWithRealVersion(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("needs pkgbuild (macOS)")
+	}
+	dir := t.TempDir()
+	root := filepath.Join(dir, "root", "Acme.app", "Contents")
+	os.MkdirAll(root, 0o755)
+	os.WriteFile(filepath.Join(root, "Info.plist"), []byte(`<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.acme.app</string><key>CFBundleShortVersionString</key><string>1.9.0</string></dict></plist>`), 0o644)
+	comp, prod := filepath.Join(dir, "c.pkg"), filepath.Join(dir, "acme.pkg")
+	if out, err := exec.Command("pkgbuild", "--root", filepath.Join(dir, "root"), "--identifier", "com.acme.app.pkg", "--version", "1.9.0", "--install-location", "/Applications", comp).CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
+	if out, err := exec.Command("productbuild", "--package", comp, prod).CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
+	pkg, _ := os.ReadFile(prod)
+	sum := sha256.Sum256(pkg)
+	srv := acquiretest.New(t, "../../internal/acquire/testdata", acquiretest.Payload(10))
+	srv.Vendor["acme.pkg"] = pkg
+	srv.Vendor["version.json"] = []byte(`{"latest":"2.0.0"}`) // feed is ahead of the file
+	srv.Vendor["SHA256SUMS"] = []byte(hex.EncodeToString(sum[:]) + "  acme.pkg\n")
+
+	oldHTTP := autoHTTP
+	autoHTTP = func() *http.Client { return srv.Client() }
+	t.Cleanup(func() { autoHTTP = oldHTTP })
+	_, priv, _ := manifest.GenerateKey()
+	os.WriteFile(filepath.Join(dir, "k.key"), manifest.EncodePrivate(priv), 0o600)
+	os.MkdirAll(filepath.Join(dir, "drop"), 0o750)
+	cfg := fmt.Sprintf(`{"work_dir":"w","key":"k.key","send":{"to":"drop"},"apps":[{"name":"acme","title":"Acme","vendor":"Acme","kind":"pkg","os":"macos","arch":"any",
+	  "package_name":"com.acme.app","version":{"url":"%s/vendor/version.json","json_path":"latest"},"download_url":"%s/vendor/acme.pkg",
+	  "file_name":"acme-{version}.pkg","sha256":{"url":"%s/vendor/SHA256SUMS","regex":"([0-9a-f]{64})  acme.pkg"}}]}`, srv.URL, srv.URL, srv.URL)
+	cp := filepath.Join(dir, "a.json")
+	os.WriteFile(cp, []byte(cfg), 0o600)
+
+	rep, err := runAuto(context.Background(), cp, false)
+	if err != nil || len(rep.New) != 1 || rep.New[0] != "acme-1.9.0" {
+		t.Fatalf("should be labelled with the real version 1.9.0: %v %+v", err, rep)
+	}
+	if !strings.Contains(strings.Join(rep.Warnings, " "), "feed says 2.0.0 but the installer contains 1.9.0") {
+		t.Fatalf("missing mismatch warning: %v", rep.Warnings)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "w", "downloads", "acme-1.9.0.pkg")); err != nil {
+		t.Fatal("file should be renamed to the real version")
+	}
+	// Next run: feed still says 2.0.0, link still serves 1.9.0 → nothing to do, no re-download.
+	rep, err = runAuto(context.Background(), cp, false)
+	if err != nil || rep.Sent || len(rep.New) != 0 || rep.Skipped != 1 {
+		t.Fatalf("second run should skip the same old build: %v %+v", err, rep)
 	}
 }

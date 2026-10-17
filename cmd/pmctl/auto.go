@@ -120,6 +120,9 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 type autoState struct {
 	Done   map[string]autoDone `json:"done"`   // package_id → when/where sent
 	Failed map[string]string   `json:"failed"` // package_id → last error (retried next run)
+	// FeedSeen: app → "feedVersion=realVersion" when a vendor feed announced a
+	// version the download link did not (yet) serve.
+	FeedSeen map[string]string `json:"feed_seen,omitempty"`
 }
 
 type autoDone struct {
@@ -263,6 +266,9 @@ func loadState(path string) autoState {
 	if st.Failed == nil {
 		st.Failed = map[string]string{}
 	}
+	if st.FeedSeen == nil {
+		st.FeedSeen = map[string]string{}
+	}
 	return st
 }
 
@@ -286,7 +292,12 @@ func recentMonths(now time.Time, n int) []string {
 	return out
 }
 
+// autoWarn records a warning in the current run's report (set by runAuto).
+var autoWarn = func(string) {}
+
 func runAuto(ctx context.Context, cfgPath string, dry bool) (rep autoReport, err error) {
+	autoWarn = func(s string) { rep.Warnings = append(rep.Warnings, s) }
+	defer func() { autoWarn = func(string) {} }()
 	rep = autoReport{StartedAt: autoNow().UTC().Format(time.RFC3339), DryRun: dry, Failures: map[string]string{}, New: []string{}}
 	c, err := loadAutoConfig(cfgPath)
 	if err != nil {
@@ -620,6 +631,15 @@ func fetchAppInner(ctx context.Context, hc *http.Client, a autoApp, downloads, s
 	if !verRe.MatchString(ver) {
 		return "", ver, fmt.Errorf("version %q from vendor feed is not a plain version string", ver)
 	}
+	// The feed already announced this version earlier, but the download link
+	// served an older build that we have already sent: don't re-download it.
+	if seen := st.FeedSeen[a.Name]; seen != "" {
+		if feedV, realV, ok := strings.Cut(seen, "="); ok && feedV == ver {
+			if _, done := st.Done[a.Name+"-"+realV]; done {
+				return "", realV, nil
+			}
+		}
+	}
 	id := a.Name + "-" + ver
 	if _, done := st.Done[id]; done {
 		return "", ver, nil
@@ -653,6 +673,32 @@ func fetchAppInner(ctx context.Context, hc *http.Client, a autoApp, downloads, s
 	default:
 		if sha, err = downloadAuthenticode(ctx, hc, dl, downloads, name, a.AuthenticodeSigner); err != nil {
 			return "", ver, err
+		}
+	}
+	// Trust the installer, not the feed: label .pkg packages with the version
+	// the file really contains (vendors' feeds can run ahead of the fixed
+	// download link during staged rollouts).
+	if a.Kind == "pkg" {
+		realV, perr := acquire.PkgVersion(filepath.Join(downloads, name), a.PackageName)
+		switch {
+		case perr != nil:
+			autoWarn(a.Name + ": could not read the version inside the .pkg (" + perr.Error() + "); using the feed version " + ver)
+		case realV != ver && verRe.MatchString(realV):
+			autoWarn(fmt.Sprintf("%s: vendor feed says %s but the installer contains %s; labelled with the real version", a.Name, ver, realV))
+			st.FeedSeen[a.Name] = ver + "=" + realV
+			if a.FileName != "" {
+				newName := sub(a.FileName, realV)
+				if newName != name {
+					if err := os.Rename(filepath.Join(downloads, name), filepath.Join(downloads, newName)); err == nil {
+						name = newName
+					}
+				}
+			}
+			ver = realV
+			id = a.Name + "-" + ver
+			if _, done := st.Done[id]; done {
+				return "", ver, nil
+			}
 		}
 	}
 	productCode := a.ProductCode

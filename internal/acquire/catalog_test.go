@@ -178,3 +178,15 @@ func TestCatalogClientAgainstFake(t *testing.T) {
 		t.Fatal("invalid guid accepted")
 	}
 }
+
+func TestPickUpdateIgnoresCatalogPunctuation(t *testing.T) {
+	ups := []Update{
+		{ID: "a", Title: "2026-10 Cumulative Update for Windows 11, version 24H2 for x64-based Systems (KB5127648) (26100.9711)"},
+		{ID: "b", Title: "2026-10 Cumulative Update for Windows 11, version 25H2 for x64-based Systems (KB5127648) (26200.9711)"},
+		{ID: "c", Title: "2026-10 Cumulative Update for Windows 11, version 24H2 for arm64-based Systems (KB5127648) (26100.9711)"},
+	}
+	u, err := PickUpdate(ups, PickOptions{KB: "KB5127648", Product: "Windows 11 Version 24H2", Arch: "x64"})
+	if err != nil || u.ID != "a" {
+		t.Fatalf("got %+v, %v", u, err)
+	}
+}

@@ -199,20 +199,20 @@ func PickUpdate(updates []Update, o PickOptions) (Update, error) {
 		return Update{}, fmt.Errorf("arch must be x64, x86 or arm64 (got %q)", o.Arch)
 	}
 	kb := strings.ToUpper(strings.TrimSpace(o.KB))
-	prod := strings.ToLower(strings.TrimSpace(o.Product))
-	match := strings.ToLower(strings.TrimSpace(o.Match))
+	prod := normTitle(o.Product)
+	match := normTitle(o.Match)
 	var hits []Update
 	for _, u := range updates {
 		if kb != "" && !strings.EqualFold(u.KB(), kb) {
 			continue
 		}
-		if prod != "" && !strings.Contains(strings.ToLower(u.Title), prod) && !strings.Contains(strings.ToLower(u.Products), prod) {
+		if prod != "" && !strings.Contains(normTitle(u.Title), prod) && !strings.Contains(normTitle(u.Products), prod) {
 			continue
 		}
 		if !MatchesArch(u.Title, o.Arch) {
 			continue
 		}
-		if match != "" && !strings.Contains(strings.ToLower(u.Title), match) {
+		if match != "" && !strings.Contains(normTitle(u.Title), match) {
 			continue
 		}
 		hits = append(hits, u)
@@ -503,4 +503,11 @@ func MaxSeverity(a, b string) string {
 		return b
 	}
 	return a
+}
+
+// normTitle lowercases, drops commas and collapses spaces, so the MSRC
+// spelling "Windows 11 Version 24H2" matches catalog titles that say
+// "Windows 11, version 24H2".
+func normTitle(s string) string {
+	return strings.Join(strings.Fields(strings.ReplaceAll(strings.ToLower(s), ",", " ")), " ")
 }
