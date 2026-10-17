@@ -3,9 +3,10 @@ import { Link, useSearchParams } from "react-router-dom";
 import { api, enc, errMsg } from "../api";
 import { useCan } from "../auth";
 import { AgentSetupGuide } from "../components/AgentSetup";
+import { usedPct } from "../components/Hardware";
 import { CopyBox, Empty, ErrorBanner, Modal, PageHeader, Pill, RelTime, Time } from "../components/ui";
 import type { Endpoint, EndpointStatus, EnrollmentToken } from "../types";
-import { relTime, splitList, useLoad, useNow } from "../util";
+import { fmtBytes, relTime, splitList, useLoad, useNow } from "../util";
 
 const STATUSES: EndpointStatus[] = ["offline", "stale", "failed", "pending_reboot", "exception", "noncompliant", "compliant", "retired"];
 
@@ -95,7 +96,7 @@ export default function Endpoints() {
                   <input type="checkbox" className="rowcheck" checked={allOn} onChange={toggleAll} aria-label="Select all" />
                 </th>
               )}
-              <th>Hostname</th><th>Status</th><th>OS</th><th>Arch</th><th>Groups</th><th>Site</th><th>Owner</th>
+              <th>Hostname</th><th>Status</th><th>OS</th><th>Arch</th><th>RAM</th><th>Disk free</th><th>Groups</th><th>Site</th><th>Owner</th>
               <th>Last seen</th><th>Inventory age</th><th>Reboot</th>
             </tr>
           </thead>
@@ -118,6 +119,8 @@ export default function Endpoints() {
                   <div className="cell-sub">{e.edition ? `${e.edition} · ` : ""}build {e.build || "—"}</div>
                 </td>
                 <td>{e.arch}</td>
+                <td className="nowrap">{e.hardware?.memory_bytes ? fmtBytes(e.hardware.memory_bytes) : <span className="muted">—</span>}</td>
+                <td className="nowrap"><DiskFree e={e} /></td>
                 <td>{(e.groups ?? []).map((g) => <span key={g} className="tag">{g}</span>)}</td>
                 <td>{e.site || <span className="muted">—</span>}</td>
                 <td>{e.owner || <span className="muted">—</span>}</td>
@@ -318,5 +321,20 @@ function EnrollmentModal({ onClose }: { onClose: () => void }) {
         </>
       )}
     </Modal>
+  );
+}
+
+// Free space on the endpoint's fullest disk, coloured when it runs low
+// (patches need room to download and install).
+function DiskFree({ e }: { e: Endpoint }) {
+  const disks = e.hardware?.disks ?? [];
+  if (!disks.length) return <span className="muted">—</span>;
+  const d = disks.reduce((a, b) => (usedPct(b) > usedPct(a) ? b : a));
+  const pct = usedPct(d);
+  return (
+    <span className={pct >= 90 ? "text-red" : pct >= 75 ? "text-amber" : ""} title={`${d.mount}: ${fmtBytes(d.free_bytes)} free of ${fmtBytes(d.total_bytes)} (${pct}% used)`}>
+      {fmtBytes(d.free_bytes)}
+      <div className="cell-sub">of {fmtBytes(d.total_bytes)}</div>
+    </span>
   );
 }

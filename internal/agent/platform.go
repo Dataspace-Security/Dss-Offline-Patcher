@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -74,4 +76,45 @@ func runHealth(checks []store.HealthCheck, serviceRunning func(string) (bool, er
 		return false, strings.Join(bad, "; ")
 	}
 	return true, fmt.Sprintf("%d check(s) passed", len(checks))
+}
+
+// hardwareReporter is implemented by platforms that can describe the
+// machine (model, CPU, RAM, disks...). It must be cheap: it runs on every
+// check-in.
+type hardwareReporter interface {
+	Hardware(ctx context.Context) store.Hardware
+}
+
+// fillNetwork adds non-loopback IP addresses, the MAC address of the first
+// interface carrying an IPv4 address, and the local time zone.
+func fillNetwork(h *store.Hardware) {
+	ifs, _ := net.Interfaces()
+	for _, i := range ifs {
+		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, _ := i.Addrs()
+		for _, a := range addrs {
+			ipn, ok := a.(*net.IPNet)
+			if !ok || ipn.IP.IsLinkLocalUnicast() || ipn.IP.IsLoopback() {
+				continue
+			}
+			h.IPAddresses = append(h.IPAddresses, ipn.IP.String())
+			if ipn.IP.To4() != nil && h.MACAddress == "" && len(i.HardwareAddr) > 0 {
+				h.MACAddress = i.HardwareAddr.String()
+			}
+		}
+	}
+	// IPv4 first: easier to read than (often several) IPv6 addresses.
+	sort.SliceStable(h.IPAddresses, func(i, j int) bool {
+		return strings.Contains(h.IPAddresses[i], ".") && !strings.Contains(h.IPAddresses[j], ".")
+	})
+	h.Timezone = time.Local.String()
+	if h.Timezone == "Local" {
+		if l, err := os.Readlink("/etc/localtime"); err == nil && strings.Contains(l, "zoneinfo/") {
+			h.Timezone = l[strings.Index(l, "zoneinfo/")+len("zoneinfo/"):]
+		} else {
+			h.Timezone, _ = time.Now().Zone()
+		}
+	}
 }

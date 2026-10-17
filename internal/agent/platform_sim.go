@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"offpatch/internal/manifest"
 	"offpatch/internal/store"
@@ -163,4 +164,25 @@ func (s *Sim) SelfUpgrade(p manifest.Package) Result {
 		return Result{State: "failed", ExitCode: 1, Detail: err.Error()}
 	}
 	return Result{State: "installed", Detail: "simulated agent upgrade to " + p.Version}
+}
+
+// Hardware returns a plausible, stable fake machine per simulated host.
+func (s *Sim) Hardware(ctx context.Context) store.Hardware {
+	n := 0
+	for _, c := range s.cfg.Hostname {
+		n = n*31 + int(c)
+	}
+	if n < 0 {
+		n = -n
+	}
+	ram := []int64{8, 16, 16, 32}[n%4] << 30
+	total := []int64{256, 512, 512, 1024}[n/4%4] << 30
+	return store.Hardware{
+		Manufacturer: "Simulated", Model: "Virtual PC " + []string{"G5", "G7", "G8"}[n%3], SerialNumber: fmt.Sprintf("SIM%07d", n%10000000),
+		CPU: "Simulated x64 CPU @ 2.60GHz", CPUCores: []int{4, 8, 8, 16}[n/16%4], MemoryBytes: ram,
+		Disks:       []store.DiskInfo{{Mount: "C:", TotalBytes: total, FreeBytes: total * int64(10+n%60) / 100}},
+		BootTime:    time.Now().Add(-time.Duration(1+n%200) * time.Hour).UTC().Truncate(time.Hour).Format(time.RFC3339),
+		Timezone:    "UTC",
+		IPAddresses: []string{fmt.Sprintf("10.20.%d.%d", n/256%256, n%254+1)},
+	}
 }

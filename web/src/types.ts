@@ -44,8 +44,14 @@ export type Endpoint = {
   enrolled_at: string; status: EndpointStatus;
   // v1.1
   edition: string; cert_not_after: string; retired_at: string; retired_reason: string; reboot_requested_at: string;
+  hardware?: Hardware;
 };
-export type InventoryItem = { kind: "kb" | "product"; id: string; name: string; version: string };
+export type Hardware = {
+  manufacturer?: string; model?: string; serial_number?: string; cpu?: string; cpu_cores?: number; memory_bytes?: number;
+  disks?: { mount: string; total_bytes: number; free_bytes: number }[];
+  ip_addresses?: string[]; mac_address?: string; boot_time?: string; logged_in_user?: string; timezone?: string;
+};
+export type InventoryItem = { kind: "kb" | "product" | "pkg" | "app" | "agent"; id: string; name: string; version: string; source?: "appstore" };
 export type EndpointDetail = Endpoint & { inventory: InventoryItem[]; targets: Target[] };
 
 export type DeploymentState = "active" | "paused" | "cancelled" | "completed";

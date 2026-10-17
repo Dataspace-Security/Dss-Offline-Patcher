@@ -40,6 +40,7 @@ type Endpoint struct {
 	RetiredAt         string   `json:"retired_at"`
 	RetiredReason     string   `json:"retired_reason"`
 	Status            string   `json:"status"`
+	Hardware          Hardware `json:"hardware"`
 
 	inventory []InventoryItem
 }
@@ -50,14 +51,14 @@ type EndpointDetail struct {
 	Targets   []Target        `json:"targets"`
 }
 
-const endpointCols = `endpoint_id,hostname,os,os_version,build,arch,groups,site,owner,criticality,last_seen,inventory_at,reboot_pending,agent_version,enrolled_at,inventory,cert_not_after,retired_at,retired_reason,edition,reboot_requested_at`
+const endpointCols = `endpoint_id,hostname,os,os_version,build,arch,groups,site,owner,criticality,last_seen,inventory_at,reboot_pending,agent_version,enrolled_at,inventory,cert_not_after,retired_at,retired_reason,edition,reboot_requested_at,hardware`
 
 func scanEndpoint(sc interface{ Scan(...any) error }) (Endpoint, error) {
 	var e Endpoint
-	var groups, inv string
+	var groups, inv, hw string
 	var rp int
 	err := sc.Scan(&e.EndpointID, &e.Hostname, &e.OS, &e.OSVersion, &e.Build, &e.Arch, &groups, &e.Site, &e.Owner, &e.Criticality,
-		&e.LastSeen, &e.InventoryAt, &rp, &e.AgentVersion, &e.EnrolledAt, &inv, &e.CertNotAfter, &e.RetiredAt, &e.RetiredReason, &e.Edition, &e.RebootRequestedAt)
+		&e.LastSeen, &e.InventoryAt, &rp, &e.AgentVersion, &e.EnrolledAt, &inv, &e.CertNotAfter, &e.RetiredAt, &e.RetiredReason, &e.Edition, &e.RebootRequestedAt, &hw)
 	if err != nil {
 		return e, err
 	}
@@ -65,6 +66,7 @@ func scanEndpoint(sc interface{ Scan(...any) error }) (Endpoint, error) {
 	json.Unmarshal([]byte(groups), &e.Groups)
 	e.Groups = nonNil(e.Groups)
 	json.Unmarshal([]byte(inv), &e.inventory)
+	json.Unmarshal([]byte(hw), &e.Hardware)
 	return e, nil
 }
 
@@ -280,4 +282,64 @@ func (s *Store) CreateEnrollmentToken(ctx context.Context, actor string, groups 
 			Details: map[string]any{"groups": g, "site": site, "expires_at": exp, "max_uses": maxUses}})
 	})
 	return EnrollmentToken{Token: tok, ExpiresAt: exp, MaxUses: maxUses}, err
+}
+
+// Hardware is the endpoint's hardware and system snapshot, reported by the
+// agent on check-in (all optional; fields an OS can't provide stay empty).
+type Hardware struct {
+	Manufacturer string     `json:"manufacturer,omitempty"`
+	Model        string     `json:"model,omitempty"`
+	SerialNumber string     `json:"serial_number,omitempty"`
+	CPU          string     `json:"cpu,omitempty"`
+	CPUCores     int        `json:"cpu_cores,omitempty"`
+	MemoryBytes  int64      `json:"memory_bytes,omitempty"`
+	Disks        []DiskInfo `json:"disks,omitempty"`
+	IPAddresses  []string   `json:"ip_addresses,omitempty"`
+	MACAddress   string     `json:"mac_address,omitempty"`
+	BootTime     string     `json:"boot_time,omitempty"` // RFC 3339
+	LoggedInUser string     `json:"logged_in_user,omitempty"`
+	Timezone     string     `json:"timezone,omitempty"`
+}
+
+type DiskInfo struct {
+	Mount      string `json:"mount"` // "/", "C:"
+	TotalBytes int64  `json:"total_bytes"`
+	FreeBytes  int64  `json:"free_bytes"`
+}
+
+// clean bounds what an agent can store (the report is untrusted input).
+func (h Hardware) clean() Hardware {
+	cut := func(s string, n int) string {
+		s = strings.Map(func(r rune) rune {
+			if r < 0x20 || r == 0x7f {
+				return -1
+			}
+			return r
+		}, strings.TrimSpace(s))
+		if len(s) > n {
+			s = s[:n]
+		}
+		return s
+	}
+	h.Manufacturer, h.Model, h.SerialNumber, h.CPU = cut(h.Manufacturer, 100), cut(h.Model, 100), cut(h.SerialNumber, 64), cut(h.CPU, 128)
+	h.MACAddress, h.BootTime, h.LoggedInUser, h.Timezone = cut(h.MACAddress, 32), cut(h.BootTime, 40), cut(h.LoggedInUser, 100), cut(h.Timezone, 64)
+	if h.CPUCores < 0 || h.CPUCores > 4096 {
+		h.CPUCores = 0
+	}
+	if h.MemoryBytes < 0 {
+		h.MemoryBytes = 0
+	}
+	if len(h.Disks) > 16 {
+		h.Disks = h.Disks[:16]
+	}
+	for i := range h.Disks {
+		h.Disks[i].Mount = cut(h.Disks[i].Mount, 64)
+	}
+	if len(h.IPAddresses) > 16 {
+		h.IPAddresses = h.IPAddresses[:16]
+	}
+	for i := range h.IPAddresses {
+		h.IPAddresses[i] = cut(h.IPAddresses[i], 64)
+	}
+	return h
 }

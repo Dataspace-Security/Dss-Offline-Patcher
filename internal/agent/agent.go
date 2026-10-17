@@ -400,6 +400,10 @@ func (a *Agent) Cycle(ctx context.Context) error {
 		DownloadRateKbps       int                `json:"download_rate_kbps"`
 	}
 	req := store.CheckinRequest{Hostname: f.Hostname, OSVersion: f.OSVersion, Build: f.Build, Arch: f.Arch, AgentVersion: a.agentVersion(), RebootPending: reboot, Inventory: inv, Edition: f.Edition}
+	if hr, ok := a.plat.(hardwareReporter); ok {
+		h := hr.Hardware(ctx)
+		req.Hardware = &h
+	}
 	if err := a.do(ctx, "POST", "/api/agent/checkin", req, &resp); err != nil {
 		return fmt.Errorf("checkin: %w", err)
 	}

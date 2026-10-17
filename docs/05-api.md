@@ -186,6 +186,10 @@ type User = { username: string; role: Role; source: string; email: string; mfa: 
 
 // Endpoint gains:
 //   edition: string; cert_not_after: string; retired_at: string; retired_reason: string; reboot_requested_at: string
+//   hardware: Hardware   (reported by the agent on check-in; '{}' until the first report; kept when an older agent sends none)
+// type Hardware = { manufacturer?, model?, serial_number?, cpu?: string; cpu_cores?, memory_bytes?: number;
+//   disks?: {mount: string; total_bytes: number; free_bytes: number}[]; ip_addresses?: string[]; mac_address?, boot_time?, logged_in_user?, timezone?: string }
+// InventoryItem gains source?: "appstore" (macOS apps from the Mac App Store; never offered .pkg updates).
 // EndpointStatus gains "retired". Summary.endpoints gains `retired: number` (retired endpoints are excluded from total/by_status).
 
 // Package gains:

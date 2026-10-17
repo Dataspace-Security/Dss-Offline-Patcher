@@ -424,3 +424,7 @@ ul.plain li { padding: 2px 0; }
   .tiles { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
   .page-header { align-items: flex-start; }
 }
+
+/* Endpoint hardware: storage bars */
+.disk-row { margin: 8px 0 12px; }
+.disk-label { font-size: 13px; }

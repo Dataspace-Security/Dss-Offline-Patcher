@@ -683,6 +683,8 @@ type CheckinRequest struct {
 	RebootPending bool            `json:"reboot_pending"`
 	Inventory     []InventoryItem `json:"inventory"`
 	Edition       string          `json:"edition"`
+	// Hardware is nil from agents older than this field: keep the last value.
+	Hardware *Hardware `json:"hardware,omitempty"`
 }
 
 type Assignment struct {
@@ -722,6 +724,11 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 		if _, err := tx.Exec(`UPDATE endpoints SET hostname=?, os_version=?, build=?, arch=?, agent_version=?, reboot_pending=?, inventory=?, last_seen=?, inventory_at=?, edition=? WHERE endpoint_id=?`,
 			r.Hostname, r.OSVersion, r.Build, r.Arch, r.AgentVersion, rp, mustJSON(r.Inventory), now, now, r.Edition, endpointID); err != nil {
 			return err
+		}
+		if r.Hardware != nil {
+			if _, err := tx.Exec(`UPDATE endpoints SET hardware=? WHERE endpoint_id=?`, mustJSON(r.Hardware.clean()), endpointID); err != nil {
+				return err
+			}
 		}
 		e, err := getEndpoint(ctx, tx, endpointID)
 		if err != nil {

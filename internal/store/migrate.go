@@ -14,6 +14,7 @@ var columnMigrations = []struct{ table, column, ddl string }{
 	{"endpoints", "retired_reason", "TEXT NOT NULL DEFAULT ''"},
 	{"endpoints", "edition", "TEXT NOT NULL DEFAULT ''"},
 	{"endpoints", "reboot_requested_at", "TEXT NOT NULL DEFAULT ''"},
+	{"endpoints", "hardware", "TEXT NOT NULL DEFAULT '{}'"},
 	{"deployments", "deadline", "TEXT NOT NULL DEFAULT ''"},
 	{"deployments", "max_concurrent", "INTEGER NOT NULL DEFAULT 0"},
 	{"deployments", "reboot_policy", "TEXT NOT NULL DEFAULT 'never'"},

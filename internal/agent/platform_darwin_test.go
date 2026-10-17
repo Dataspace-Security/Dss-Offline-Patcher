@@ -86,3 +86,12 @@ func TestAppBundlesMarksAppStoreApps(t *testing.T) {
 		t.Fatalf("sources: %v", got)
 	}
 }
+
+// Reads this Mac's real hardware (model, RAM, disk, CPU).
+func TestMacHardware(t *testing.T) {
+	h := (&MacOS{}).Hardware(context.Background())
+	t.Logf("%+v", h)
+	if h.MemoryBytes <= 0 || h.CPUCores <= 0 || h.CPU == "" || h.Model == "" || len(h.Disks) != 1 || h.Disks[0].FreeBytes <= 0 || h.BootTime == "" {
+		t.Fatalf("incomplete: %+v", h)
+	}
+}

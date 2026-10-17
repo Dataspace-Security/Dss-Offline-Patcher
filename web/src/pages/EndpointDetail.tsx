@@ -4,6 +4,7 @@ import { api, enc, errMsg } from "../api";
 import { useCan } from "../auth";
 import { Empty, ErrorBanner, KV, Mono, PageHeader, Pill, ReasonModal, RelTime, Time } from "../components/ui";
 import { AvailablePatches } from "../components/AvailablePatches";
+import { HardwareCard } from "../components/Hardware";
 import type { Endpoint, EndpointDetail } from "../types";
 import { parseTime, splitList, useLoad, useNow } from "../util";
 
@@ -66,6 +67,7 @@ export default function EndpointDetailPage() {
             ...(e.reboot_requested_at && parseTime(e.reboot_requested_at) ? [["Reboot requested", <Time value={e.reboot_requested_at} />] as [string, ReactNode]] : []),
           ]} />
         </section>
+        <HardwareCard hw={e.hardware} now={now} />
         <section className="card">
           <h2>Assignment</h2>
           <EditForm e={e} canEdit={canEdit && !retired} onSaved={() => void reload()} />
@@ -108,7 +110,7 @@ export default function EndpointDetailPage() {
             <tbody>
               {inv.map((i, n) => (
                 <tr key={`${i.kind}-${i.id}-${n}`}>
-                  <td><span className="tag">{i.kind}</span></td>
+                  <td className="nowrap"><span className="tag">{i.kind}</span>{i.source === "appstore" && <span className="tag" title="Installed from the Mac App Store, which keeps it updated">App Store</span>}</td>
                   <td><Mono>{i.id}</Mono></td>
                   <td>{i.name}</td>
                   <td>{i.version}</td>
