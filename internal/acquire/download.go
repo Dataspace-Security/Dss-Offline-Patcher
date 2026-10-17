@@ -23,6 +23,29 @@ import (
 // server's default max_file_bytes).
 const MaxDownloadBytes = 16 << 30
 
+// DiskReserve is kept free on the download volume. Before fetching, the
+// volume must hold the rest of the file twice (the download and its copy in
+// the signed bundle) plus this reserve, so a large Windows update fails
+// cleanly (and is retried) instead of filling the disk under other services.
+const DiskReserve = 2 << 30
+
+// diskFree is a hook for tests.
+var diskFree = diskFreeBytes
+
+// CheckDiskSpace refuses a download of remaining bytes into dir that would leave
+// less than DiskReserve free once the bundle copy is made.
+func CheckDiskSpace(dir string, remaining int64) error {
+	free, err := diskFree(dir)
+	if err != nil {
+		return nil // unknown: do not block the download on it
+	}
+	if need := 2*remaining + DiskReserve; free < need {
+		return fmt.Errorf("not enough disk space in %s: %.1f GB free, need %.1f GB (the download, its copy in the bundle, and a %d GB reserve); free space or grow the disk, the item is retried next run",
+			dir, float64(free)/1e9, float64(need)/1e9, DiskReserve>>30)
+	}
+	return nil
+}
+
 var (
 	// ErrHashMismatch is returned when a downloaded file does not match the
 	// expected SHA-1/SHA-256. The partial file is removed.
@@ -207,6 +230,11 @@ func fetchToPart(ctx context.Context, hc *http.Client, req DownloadRequest, part
 	limit := int64(MaxDownloadBytes)
 	if req.Size > 0 {
 		limit = req.Size
+	}
+	if total > 0 {
+		if err := CheckDiskSpace(req.DestDir, total-offset); err != nil {
+			return false, err
+		}
 	}
 
 	f, err := os.OpenFile(part, flags, 0o644)

@@ -137,3 +137,24 @@ func TestDownloadRefusals(t *testing.T) {
 		t.Fatal("unsafe file name allowed")
 	}
 }
+
+// A download that would not fit twice (file + bundle copy) plus the reserve
+// is refused before any byte is written, so it cannot fill the disk.
+func TestDownloadRefusedWhenDiskTooSmall(t *testing.T) {
+	srv := acquiretest.New(t, "testdata", acquiretest.Payload(100_000))
+	old := diskFree
+	t.Cleanup(func() { diskFree = old })
+	diskFree = func(string) (int64, error) { return DiskReserve + 150_000, nil } // < 2×100 000 + reserve
+	dir := t.TempDir()
+	_, err := Download(context.Background(), srv.Client(), catalogReq(srv, dir))
+	if err == nil || !strings.Contains(err.Error(), "not enough disk space") {
+		t.Fatalf("want disk-space refusal, got %v", err)
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
+		t.Fatalf("files written: %v", ents)
+	}
+	diskFree = func(string) (int64, error) { return DiskReserve + 200_000, nil }
+	if _, err := Download(context.Background(), srv.Client(), catalogReq(srv, dir)); err != nil {
+		t.Fatalf("enough space: %v", err)
+	}
+}

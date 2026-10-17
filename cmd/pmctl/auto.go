@@ -826,6 +826,11 @@ func downloadVerified(ctx context.Context, hc *http.Client, rawURL, downloads, n
 	if resp.StatusCode != 200 {
 		return "", fmt.Errorf("GET %s: %s", rawURL, resp.Status)
 	}
+	if resp.ContentLength > 0 {
+		if err := acquire.CheckDiskSpace(downloads, resp.ContentLength); err != nil {
+			return "", err
+		}
+	}
 	f, err := os.Create(p)
 	if err != nil {
 		return "", err
