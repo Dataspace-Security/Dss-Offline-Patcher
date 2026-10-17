@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"offpatch/internal/acqrequest"
 	"offpatch/internal/intake"
 	"offpatch/internal/intel"
 	"offpatch/internal/store"
@@ -133,24 +134,71 @@ type catalogLink struct {
 	State     string `json:"state"` // quarantined | approved | rejected | revoked
 }
 
-func (s *Server) catalogByKB(ctx context.Context) (map[string]catalogLink, map[string]catalogLink, error) {
+// catalogIndex finds catalog packages for available updates: Windows updates
+// by KB, applications by MSI product code or, because a new MSI version
+// usually has a new product code, by its Apps & features display name
+// (package_name, compared normalised like the intelligence does, so "7-Zip"
+// matches "7-Zip 26.03 (x64 edition)") when the package is newer than what
+// is installed.
+type catalogIndex struct {
+	byKB           map[string]catalogLink
+	byCode, byName map[string]namedPackage
+}
+
+type namedPackage struct {
+	link    catalogLink
+	version string
+}
+
+func (s *Server) catalogIndex(ctx context.Context) (*catalogIndex, error) {
 	pkgs, err := s.store.ListPackages(ctx, "")
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	byKB, byCode := map[string]catalogLink{}, map[string]catalogLink{}
+	ci := &catalogIndex{byKB: map[string]catalogLink{}, byCode: map[string]namedPackage{}, byName: map[string]namedPackage{}}
+	// keep the newest version per product; on a tie, the approved one.
+	keep := func(m map[string]namedPackage, k string, p store.Package) {
+		cur, ok := m[k]
+		if !ok || !store.VersionAtLeast(cur.version, p.Version) ||
+			(cur.version == p.Version && cur.link.State != "approved" && p.State == "approved") {
+			m[k] = namedPackage{link: catalogLink{PackageID: p.PackageID, State: p.State}, version: p.Version}
+		}
+	}
 	for _, p := range pkgs {
-		l := catalogLink{PackageID: p.PackageID, State: p.State}
 		if p.KB != "" {
-			if cur, ok := byKB[strings.ToUpper(p.KB)]; !ok || cur.State != "approved" {
-				byKB[strings.ToUpper(p.KB)] = l
+			if cur, ok := ci.byKB[strings.ToUpper(p.KB)]; !ok || cur.State != "approved" {
+				ci.byKB[strings.ToUpper(p.KB)] = catalogLink{PackageID: p.PackageID, State: p.State}
 			}
 		}
 		if p.ProductCode != "" {
-			byCode[strings.ToLower(p.ProductCode)] = l
+			keep(ci.byCode, strings.ToLower(p.ProductCode), p)
+		}
+		if k := intel.Normalize(p.PackageName); p.Kind == "msi" && k != "" && p.Version != "" {
+			keep(ci.byName, k, p)
 		}
 	}
-	return byKB, byCode, nil
+	return ci, nil
+}
+
+func (ci *catalogIndex) forOS(kb string) *catalogLink {
+	if l, ok := ci.byKB[strings.ToUpper(kb)]; ok {
+		return &l
+	}
+	return nil
+}
+
+func (ci *catalogIndex) forApp(u intel.AppUpdate) *catalogLink {
+	if n, ok := ci.byCode[strings.ToLower(u.ProductCode)]; ok && u.ProductCode != "" {
+		l := n.link
+		return &l
+	}
+	if k := intel.Normalize(u.InstalledName); k != "" {
+		if n, ok := ci.byName[k]; ok && !store.VersionAtLeast(u.InstalledVersion, n.version) {
+			l := n.link
+			return &l
+		}
+	}
+	return nil
 }
 
 type osUpdateView struct {
@@ -184,7 +232,7 @@ func (s *Server) endpointUpdates(w http.ResponseWriter, r *http.Request) {
 	}
 	out := endpointUpdates{Intel: sum, OS: []osUpdateView{}, Apps: []appUpdateView{}}
 	if ix != nil {
-		byKB, byCode, err := s.catalogByKB(r.Context())
+		ci, err := s.catalogIndex(r.Context())
 		if err != nil {
 			s.fail(w, err)
 			return
@@ -192,18 +240,10 @@ func (s *Server) endpointUpdates(w http.ResponseWriter, r *http.Request) {
 		res := ix.Match(toIntelEndpoint(e.Endpoint, e.Inventory))
 		out.Current, out.Unmatched = res.Current, res.Unmatched
 		for _, u := range res.OS {
-			v := osUpdateView{OSUpdate: u}
-			if l, ok := byKB[strings.ToUpper(u.KB)]; ok {
-				v.Catalog = &l
-			}
-			out.OS = append(out.OS, v)
+			out.OS = append(out.OS, osUpdateView{OSUpdate: u, Catalog: ci.forOS(u.KB)})
 		}
 		for _, u := range res.Apps {
-			v := appUpdateView{AppUpdate: u}
-			if l, ok := byCode[strings.ToLower(u.ProductCode)]; ok && u.ProductCode != "" {
-				v.Catalog = &l
-			}
-			out.Apps = append(out.Apps, v)
+			out.Apps = append(out.Apps, appUpdateView{AppUpdate: u, Catalog: ci.forApp(u)})
 		}
 	}
 	writeJSON(w, 200, out)
@@ -217,55 +257,50 @@ type fleetUpdate struct {
 	Latest    string       `json:"latest"`
 	Catalog   *catalogLink `json:"catalog"`
 	Endpoints []fleetNeed  `json:"endpoints"`
+
+	// For acquisition requests (not shown): the Windows release, and the
+	// architectures and installed forms of an app seen across the fleet.
+	releases  map[string]intel.WindowsRelease // by architecture (a KB can cover x64 and arm64)
+	arches    map[string]bool
+	installed map[acqrequest.Installed]bool
 }
 
 type fleetNeed struct {
 	EndpointID string `json:"endpoint_id"`
 	Hostname   string `json:"hostname"`
 	Installed  string `json:"installed"`
+	arch       string
 }
 
-func (s *Server) fleetUpdates(w http.ResponseWriter, r *http.Request) {
-	ix, sum, err := s.intelIndex(r.Context())
-	if err != nil {
-		s.fail(w, err)
-		return
-	}
-	out := struct {
-		Intel   *intake.IntelSummary `json:"intel"`
-		Updates []*fleetUpdate       `json:"updates"`
-	}{Intel: sum, Updates: []*fleetUpdate{}}
-	if ix == nil {
-		writeJSON(w, 200, out)
-		return
+// fleet returns every update the fleet is missing (nil without usable
+// intelligence), cached for fleetTTL. The result is shared: read only.
+func (s *Server) fleet(ctx context.Context) (*intake.IntelSummary, []*fleetUpdate, error) {
+	ix, sum, err := s.intelIndex(ctx)
+	if err != nil || ix == nil {
+		return sum, nil, err
 	}
 	s.intel.mu.Lock()
-	cached := s.intel.fleet != nil && s.intel.fleetGen == sum.GeneratedAt && time.Since(s.intel.fleetAt) < fleetTTL
-	if cached {
-		out.Updates = s.intel.fleet
+	if s.intel.fleet != nil && s.intel.fleetGen == sum.GeneratedAt && time.Since(s.intel.fleetAt) < fleetTTL {
+		f := s.intel.fleet
+		s.intel.mu.Unlock()
+		return sum, f, nil
 	}
 	s.intel.mu.Unlock()
-	if cached {
-		writeJSON(w, 200, out)
-		return
-	}
-	eps, err := s.store.ListEndpoints(r.Context(), s.th)
+	eps, err := s.store.ListEndpoints(ctx, s.th)
 	if err != nil {
-		s.fail(w, err)
-		return
+		return nil, nil, err
 	}
-	byKB, byCode, err := s.catalogByKB(r.Context())
+	ci, err := s.catalogIndex(ctx)
 	if err != nil {
-		s.fail(w, err)
-		return
+		return nil, nil, err
 	}
 	agg := map[string]*fleetUpdate{}
 	get := func(kind, key, name, latest string, cat *catalogLink) *fleetUpdate {
-		if u := agg[kind+"\x00"+key]; u != nil {
+		if u := agg[kind+"/"+key]; u != nil {
 			return u
 		}
-		u := &fleetUpdate{Kind: kind, Key: key, Name: name, Latest: latest, Catalog: cat}
-		agg[kind+"\x00"+key] = u
+		u := &fleetUpdate{Kind: kind, Key: key, Name: name, Latest: latest, Catalog: cat, arches: map[string]bool{}, installed: map[acqrequest.Installed]bool{}}
+		agg[kind+"/"+key] = u
 		return u
 	}
 	for _, e := range eps {
@@ -274,27 +309,32 @@ func (s *Server) fleetUpdates(w http.ResponseWriter, r *http.Request) {
 		}
 		res := ix.Match(toIntelEndpoint(e, e.InventoryItems()))
 		for _, o := range res.OS {
-			var cat *catalogLink
-			if l, ok := byKB[strings.ToUpper(o.KB)]; ok {
-				cat = &l
+			u := get("os", o.KB, o.Title, o.KB, ci.forOS(o.KB))
+			if cur, ok := u.releases[o.Arch]; ok && cur.Build != o.Build {
+				o.Build = 0 // one KB for several builds (e.g. 22H2 and 23H2): do not pin the build
 			}
-			u := get("os", o.KB, o.Title, o.KB, cat)
-			u.Endpoints = append(u.Endpoints, fleetNeed{EndpointID: e.EndpointID, Hostname: e.Hostname, Installed: e.OSVersion})
+			if u.releases == nil {
+				u.releases = map[string]intel.WindowsRelease{}
+			}
+			u.releases[o.Arch] = o.WindowsRelease
+			u.Endpoints = append(u.Endpoints, fleetNeed{EndpointID: e.EndpointID, Hostname: e.Hostname, Installed: e.OSVersion, arch: e.Arch})
 		}
 		for _, a := range res.Apps {
-			var cat *catalogLink
-			if l, ok := byCode[strings.ToLower(a.ProductCode)]; ok && a.ProductCode != "" {
-				cat = &l
+			u := get("app", a.AppID, a.Name, a.LatestVersion, ci.forApp(a))
+			if u.Catalog == nil {
+				u.Catalog = ci.forApp(a)
 			}
-			u := get("app", a.AppID, a.Name, a.LatestVersion, cat)
-			u.Endpoints = append(u.Endpoints, fleetNeed{EndpointID: e.EndpointID, Hostname: e.Hostname, Installed: a.InstalledVersion})
+			u.arches[strings.ToLower(e.Arch)] = true
+			u.installed[acqrequest.Installed{ProductCode: a.ProductCode, Name: a.InstalledName, Version: a.InstalledVersion}] = true
+			u.Endpoints = append(u.Endpoints, fleetNeed{EndpointID: e.EndpointID, Hostname: e.Hostname, Installed: a.InstalledVersion, arch: e.Arch})
 		}
 	}
+	out := make([]*fleetUpdate, 0, len(agg))
 	for _, u := range agg {
-		out.Updates = append(out.Updates, u)
+		out = append(out, u)
 	}
-	sort.Slice(out.Updates, func(i, j int) bool {
-		a, b := out.Updates[i], out.Updates[j]
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
 		if a.Kind != b.Kind {
 			return a.Kind == "os" // Windows updates first
 		}
@@ -304,9 +344,24 @@ func (s *Server) fleetUpdates(w http.ResponseWriter, r *http.Request) {
 		return strings.ToLower(a.Name) < strings.ToLower(b.Name)
 	})
 	s.intel.mu.Lock()
-	s.intel.fleet, s.intel.fleetGen, s.intel.fleetAt = out.Updates, sum.GeneratedAt, time.Now()
+	s.intel.fleet, s.intel.fleetGen, s.intel.fleetAt = out, sum.GeneratedAt, time.Now()
 	s.intel.mu.Unlock()
-	writeJSON(w, 200, out)
+	return sum, out, nil
+}
+
+func (s *Server) fleetUpdates(w http.ResponseWriter, r *http.Request) {
+	sum, updates, err := s.fleet(r.Context())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if updates == nil {
+		updates = []*fleetUpdate{}
+	}
+	writeJSON(w, 200, struct {
+		Intel   *intake.IntelSummary `json:"intel"`
+		Updates []*fleetUpdate       `json:"updates"`
+	}{sum, updates})
 }
 
 func (s *Server) intelStatus(w http.ResponseWriter, r *http.Request) {

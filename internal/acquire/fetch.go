@@ -284,7 +284,9 @@ type FetchURLOptions struct {
 	OutDir      string
 	SpecPath    string
 	HTTP        *http.Client
-	Progress    func(done, total int64)
+	// Verified describes where SHA256 came from (default "sha256(operator)").
+	Verified string
+	Progress func(done, total int64)
 }
 
 // FetchURL downloads a vendor file over HTTPS, requires it to match the
@@ -355,7 +357,7 @@ func FetchURL(ctx context.Context, o FetchURLOptions) (*FetchResult, error) {
 	}
 	e.Acquired = &Provenance{
 		At: time.Now().UTC().Format(time.RFC3339), Method: "url",
-		SHA1: dl.SHA1, SHA256: dl.SHA256, Size: dl.Size, Verified: "sha256(operator)",
+		SHA1: dl.SHA1, SHA256: dl.SHA256, Size: dl.Size, Verified: verifiedOr(o.Verified, "sha256(operator)"),
 	}
 	if err := ValidateEntry(e, dl.Size, dl.SHA256); err != nil {
 		return nil, err
@@ -365,4 +367,11 @@ func FetchURL(ctx context.Context, o FetchURLOptions) (*FetchResult, error) {
 		return nil, err
 	}
 	return &FetchResult{Entry: e, Download: dl, Replaced: replaced}, nil
+}
+
+func verifiedOr(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
 }

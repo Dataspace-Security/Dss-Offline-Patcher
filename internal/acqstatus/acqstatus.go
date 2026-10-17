@@ -21,8 +21,8 @@ const FileSuffix = ".status.json"
 
 // Feed is the per-source result of one run.
 type Feed struct {
-	Type          string `json:"type"` // microsoft | app
-	Name          string `json:"name"` // app name or "Windows 10 Version 22H2 x64"
+	Type          string `json:"type"` // microsoft | app | intel | request
+	Name          string `json:"name"` // app name, request id or "Windows 10 Version 22H2 x64"
 	Title         string `json:"title,omitempty"`
 	LatestVersion string `json:"latest_version,omitempty"` // app version, or newest KB found
 	Status        string `json:"status"`                   // new | up_to_date | failed

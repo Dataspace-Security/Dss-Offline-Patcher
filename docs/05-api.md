@@ -280,3 +280,14 @@ type Alert = { id: number; created_at: string; severity: "info" | "warning" | "c
 // Revoking a package cancels its install deployments only; rollback deployments keep running.
 // Audit actions: deployment.created_rollback, target.deferred, target.lost_after_install, target.rolled_back.
 ```
+
+## v1.3 additions — acquisition requests (docs/08-acquisition.md)
+
+| Method & path | Role | Body → Response |
+|---|---|---|
+| `POST /api/acquisition-requests` | operator | `{apps: string[] (winget ids), kbs: string[]}` → `AcquisitionRequest` as a JSON attachment. 400 if nothing is selected, more than 500 items are selected, or an item is not currently needed by any endpoint; 409 without usable update intelligence. Audited as `acquisition.request_exported` (`details`: `apps` as `id@version`, `kbs` as `KB/arch`, `intel_generated_at`). |
+
+Behaviour:
+- The server builds the file only from its own fleet view (`GET /api/updates`), never from text supplied by the client.
+- `AcquisitionRequest` is the `internal/acqrequest` format.
+- `GET /api/updates` and `GET /api/endpoints/{id}/updates` now also link an app to a catalog MSI by normalised `package_name` when that package is newer than the installed version (product code first).

@@ -6,7 +6,7 @@ import { ErrorBanner, Mono, Pill, RelTime } from "./ui";
 
 /** Where an available update stands in the offline pipeline. */
 export function CatalogState({ link }: { link: CatalogLink | null }) {
-  if (!link) return <span className="muted" title="Not imported yet: add it to the acquisition run (pmctl fetch / acquire.json)">not imported</span>;
+  if (!link) return <span className="muted" title="Not imported yet: select it on the Updates page and export an acquisition request for pmctl auto">not imported</span>;
   const label = { approved: "in catalog · approved", quarantined: "in catalog · awaiting approval" }[link.state] ?? `in catalog · ${link.state}`;
   return <Link to={`/catalog/${enc(link.package_id)}`}><Pill state={link.state} label={label} /></Link>;
 }

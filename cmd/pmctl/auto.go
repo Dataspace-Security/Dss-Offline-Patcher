@@ -55,10 +55,14 @@ type autoConfig struct {
 	// and application versions) so the console can show what every endpoint
 	// is missing. Omit to skip; {} for the defaults.
 	Intel *intelOpts `json:"intel"`
+	// Requests: directory of acquisition requests exported from the
+	// console's Updates page (see requests.go). Overridden by -requests.
+	Requests string `json:"requests"`
 
 	// Advanced: alternative endpoints (tests, or an internal mirror).
-	CatalogURL string `json:"catalog_url"`
-	MSRCURL    string `json:"msrc_url"`
+	CatalogURL         string `json:"catalog_url"`
+	MSRCURL            string `json:"msrc_url"`
+	WingetManifestsURL string `json:"winget_manifests_url"` // default: the winget-pkgs repository
 }
 
 type autoMSProd struct {
@@ -168,8 +172,9 @@ func autoCmd(args []string) error {
 	fs := flag.NewFlagSet("auto", flag.ExitOnError)
 	cfgPath := fs.String("config", "acquire.json", "auto-acquisition config")
 	dry := fs.Bool("dry-run", false, "list what would be fetched; download and send nothing")
+	reqDir := fs.String("requests", "", "directory of acquisition requests exported from the console (default: \"requests\" in the config)")
 	fs.Parse(args)
-	rep, err := runAuto(context.Background(), *cfgPath, *dry)
+	rep, err := runAutoRequests(context.Background(), *cfgPath, *dry, *reqDir)
 	b, _ := json.MarshalIndent(rep, "", "  ")
 	fmt.Println(string(b))
 	if err != nil {
@@ -202,6 +207,7 @@ func loadAutoConfig(path string) (*autoConfig, error) {
 	}
 	c.WorkDir, c.SequenceState, c.Key, c.Pub = abs(c.WorkDir), abs(c.SequenceState), abs(c.Key), abs(c.Pub)
 	c.Send.To, c.Send.Log = abs(c.Send.To), abs(c.Send.Log)
+	c.Requests = abs(c.Requests)
 	if c.WorkDir == "" || c.Key == "" {
 		return nil, errors.New("config: work_dir and key are required")
 	}
@@ -305,13 +311,22 @@ func recentMonths(now time.Time, n int) []string {
 // autoWarn records a warning in the current run's report (set by runAuto).
 var autoWarn = func(string) {}
 
-func runAuto(ctx context.Context, cfgPath string, dry bool) (rep autoReport, err error) {
+func runAuto(ctx context.Context, cfgPath string, dry bool) (autoReport, error) {
+	return runAutoRequests(ctx, cfgPath, dry, "")
+}
+
+// runAutoRequests is runAuto with the requests directory overridden
+// (pmctl auto -requests).
+func runAutoRequests(ctx context.Context, cfgPath string, dry bool, requestsDir string) (rep autoReport, err error) {
 	autoWarn = func(s string) { rep.Warnings = append(rep.Warnings, s) }
 	defer func() { autoWarn = func(string) {} }()
 	rep = autoReport{StartedAt: autoNow().UTC().Format(time.RFC3339), DryRun: dry, Failures: map[string]string{}, New: []string{}}
 	c, err := loadAutoConfig(cfgPath)
 	if err != nil {
 		return rep, err
+	}
+	if requestsDir != "" {
+		c.Requests = requestsDir
 	}
 	downloads := filepath.Join(c.WorkDir, "downloads")
 	if err := os.MkdirAll(downloads, 0o750); err != nil {
@@ -465,10 +480,22 @@ func runAuto(ctx context.Context, cfgPath string, dry bool) (rep autoReport, err
 		rep.Feeds = append(rep.Feeds, f)
 	}
 
+	// ---- acquisition requests carried over from the console ----
+	var reqs []*loadedRequest
+	if c.Requests != "" {
+		reqs = processRequests(&requestRun{ctx: ctx, c: c, hc: hc, downloads: downloads, spec: spec, st: st, dry: dry, rep: &rep,
+			fail: fail, added: added, handled: map[string]bool{}}, c.Requests)
+	}
+
 	defer func() {
 		rep.Finished = autoNow().UTC().Format(time.RFC3339)
 		if err != nil {
 			rep.Error = err.Error()
+		}
+		// Done with a request once its packages are on their way (or there
+		// was nothing new to send); failed items keep it for the next run.
+		if !dry && err == nil && (rep.Sent || len(rep.New) == 0) {
+			archiveRequests(c.Requests, reqs, &rep)
 		}
 		if !dry && c.Intel != nil && !c.Intel.Disabled {
 			d, ierr := sendIntel(ctx, c)

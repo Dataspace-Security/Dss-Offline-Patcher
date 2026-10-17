@@ -206,3 +206,88 @@ On the isolated side:
 The isolated server cannot start a run (there is no reverse path), so **Refresh** only re-reads the latest report. To run now, start `pmctl auto` on the acquisition host, or `launchctl kickstart gui/$(id -u)/com.offpatch.acquire` for the launchd job installed by `packaging/acquisition/install-launchd.sh`.
 
 The console's **Server** page (`GET /api/system`) shows the management server's version, uptime, security mode, signing keys, intake state, storage, audit and agent settings. No secrets are included.
+
+## Acquisition requests from the console
+
+The console's **Updates** page lists everything the fleet is missing according to update intelligence: newer winget application versions and Windows cumulative updates. This includes updates that are not in the catalog yet ("not imported"). An acquisition request turns that list into work for `pmctl auto`, so nobody has to hand-write `fetch-url` specs or `apps` entries.
+
+**The boundary stays one-way.** The isolated server never sends anything out. The request leaves only as a file the operator downloads in the browser and carries to the acquisition zone on approved media.
+
+### Workflow
+
+1. **Select and export (isolated zone, role `operator`).** On **Updates**, tick the outdated apps and missing KBs that are not imported yet. "Select all" ticks every visible row that is not in the catalog. Click **Export acquisition request**. The browser saves `acq-request-<time>-<id>.json` (`POST /api/acquisition-requests`, see [05-api.md](05-api.md)). Every export is written to the audit log as `acquisition.request_exported`, with the user, the request id, every `winget_id@version` and every `KB/arch`.
+2. **Carry it across.** Move the file on approved media into the requests directory on the acquisition host: `"requests": "requests"` in `acquire.json`, or `pmctl auto -requests <dir>`.
+3. **Fetch (acquisition zone).** The next `pmctl auto` run reads every `*.json` in that directory:
+   - **Apps:** for each `winget_id` and each requested architecture (`x64`, `x86`, `arm64`, taken from the endpoints that have the app):
+     - pmctl downloads the per-version installer manifest from the winget community repository (`manifests/<l>/<Publisher>/<Name>/<version>/<id>.installer.yaml`, falling back to the singleton `<id>.yaml`) over HTTPS.
+     - It picks the **MSI** installer for that architecture (`InstallerType` `msi` or `wix`; machine scope and a neutral or en-US locale preferred).
+     - x64 endpoints fall back to a 32-bit MSI, with a warning, when no x64 MSI exists.
+     - It downloads the installer over HTTPS and accepts it only if it matches the manifest's `InstallerSha256`.
+     - It adds a spec entry: `kind: msi`, `product_code` from the manifest, `version` (the Apps & features `DisplayVersion` if the manifest gives one, else the winget version), and `package_name`.
+     - `package_name` is the Apps & features name: the manifest's `DisplayName` if present. Otherwise it is the name the endpoints report, when they agree and it contains no version. Otherwise it is the winget name.
+     - The package id is `<winget id>-<version>` (`-<arch>` when not x64).
+     - Ids with characters outside `[A-Za-z0-9._-]` (`Notepad++`) or longer than 64 characters get a short hash suffix, so two packages never share an id.
+   - **KBs:** each KB goes through the Update Catalog exactly like `pmctl fetch`, as `<KB>-<arch>`.
+     - The request lists a KB once per architecture that misses it (x64 and arm64 machines can need the same KB number).
+     - The catalog title from the intelligence selects the row.
+     - The build pins applicability, unless one KB serves several builds: then the build is left open (`build: 0`).
+   - The packages join the same signed bundle as the rest of the run and are sent automatically.
+4. **Approve (isolated zone).** The bundle arrives through intake. Its packages wait in the **Catalog** as quarantined, and the Updates page's **Catalog** column changes from "not imported" to "in catalog · awaiting approval". Approval and deployment work as for any other package.
+
+### Warnings, failures and the requests directory
+
+- **Warnings, not failures:** items offpatch cannot package are listed under `warnings` in the run report and status report, and are not retried. Examples:
+  - EXE, Inno, Nullsoft, Burn, MSIX or zip installers. offpatch deploys MSI packages only; there is no `exe` package kind.
+  - A manifest with no `ProductCode`. On a Windows acquisition host, pmctl reads it from the MSI instead.
+  - A version that is no longer in the winget repository.
+- **Failures (retried next run):**
+  - Network errors.
+  - Installers that do not match `InstallerSha256`.
+  - Manifests pmctl cannot parse. These are kept for retry; report them.
+- **Request files:**
+  - A request is moved to `<requests>/done/` once all its items were sent (or were sent earlier, or are warnings).
+  - A request with a failed item stays in place and is retried on the next run.
+  - A file that is not a valid request is moved to `<requests>/rejected/` with a warning.
+  - `-dry-run` lists the candidate packages and moves nothing.
+- **Status report:** each request appears as a feed of type `request` on the console's **Acquisition** page.
+- **Duplicates are fetched once:** packages already in `state.json`, or listed by more than one request, are not fetched again.
+
+### The request file
+
+Unsigned JSON, at most 1 MB and 500 items. `pmctl` parses it strictly: unknown fields are refused, and winget ids, versions, KBs, architectures and product codes are checked against fixed patterns.
+
+The file is **advisory**. pmctl only takes ids and versions from it. Every URL and hash comes from the vendor sources, and everything fetched still arrives in quarantine. A forged or edited request can at most make pmctl fetch genuine winget or Microsoft packages that someone then has to approve.
+
+The file contains no host names or endpoint ids. It carries only the ids, versions, installed product codes, names and versions, architectures and endpoint counts.
+
+```json
+{
+  "format": "offpatch.acquisition-request", "version": 1,
+  "request_id": "acq-request-20261017T101500Z-1a2b3c",
+  "created_at": "2026-10-17T10:15:00Z", "created_by": "user:otto",
+  "intel_generated_at": "2026-10-17T03:05:12Z",
+  "apps": [{"winget_id": "Google.Chrome", "name": "Google Chrome", "version": "155.0.8059.85",
+            "architectures": ["x64"], "endpoints": 12,
+            "installed": [{"product_code": "{0228B730-26AA-39E9-B2E1-0FC0E3EA58C8}", "name": "Google Chrome", "version": "155.0.8059.82"}]}],
+  "kbs": [{"kb": "KB5044280", "product": "Windows 11 Version 21H2",
+           "title": "2024-10 Cumulative Update for Windows 11 for x64-based Systems (KB5044280)",
+           "build": 22000, "arch": "x64", "endpoints": 3}]
+}
+```
+
+`acquire.json` keys:
+- `"requests"`: the directory, relative to the config file.
+- `"winget_manifests_url"`: optional. Defaults to `https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests`; set it to point at an internal mirror.
+
+### How the Catalog column finds imported packages
+
+- **Windows updates** match by KB.
+- **Applications** match by MSI product code, newest version first. This covers apps such as Chrome, whose enterprise MSI keeps its product code across versions.
+- **Otherwise by name:** many MSIs (for example 7-Zip) get a new product code with every version, so an application also matches by `package_name`. The name is compared after normalising it the same way the intelligence does (`7-Zip` matches `7-Zip 26.03 (x64 edition)`), and the package must be newer than the installed version.
+
+**Known gap:** an endpoint's own "available updates" list (catalog packages it needs) still compares `package_name` with the installed name **exactly**. An app whose Apps & features name contains its version (7-Zip) shows as "in catalog" on the Updates page, but is not offered automatically on the endpoint page; deploy it from the catalog.
+
+Tested:
+- `internal/acquire/winget_test.go`: recorded winget-pkgs manifests for Chrome, 7-Zip, VLC, Notepad++ and VS Code (MSI selection, root defaults, EXE/Inno-only warnings, manifest URLs, 404 fallback, https only).
+- `cmd/pmctl/requests_test.go`: a full `pmctl auto` run with a request. Chrome and 7-Zip MSIs and a KB go into one signed bundle. VS Code (Inno only) and an unknown id become warnings. The request is archived and a garbage file is rejected. A repeat is a no-op. A tampered installer fails and its request is kept. The tests use no live network.
+- `internal/e2e/acq_request_test.go`: export permissions, an audit record with who and what, a file that pmctl parses with no host names, unknown selections refused, and the Catalog link for winget-sourced Chrome (by product code) and 7-Zip (by name).

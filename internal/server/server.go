@@ -143,6 +143,7 @@ func (s *Server) Handler() http.Handler {
 	admin("viewer", "GET /api/endpoints/{id}/updates", s.endpointUpdates)
 	admin("viewer", "GET /api/updates", s.fleetUpdates)
 	admin("viewer", "GET /api/intel", s.intelStatus)
+	admin("operator", "POST /api/acquisition-requests", s.exportAcqRequest)
 	admin("viewer", "GET /api/packages-needs", s.packageNeeds)
 	admin("operator", "PATCH /api/endpoints/{id}", s.patchEndpoint)
 	admin("operator", "POST /api/endpoints/{id}/retire", s.retireEndpoint)

@@ -210,6 +210,12 @@ export type AppUpdate = {
   matched_by: "product_code" | "name"; product_code?: string; catalog: CatalogLink | null;
 };
 export type EndpointUpdates = { intel: IntelSummary | null; os: OSUpdate[]; apps: AppUpdate[]; current: number; unmatched: number };
+export type AcquisitionRequest = {
+  format: string; version: number; request_id: string; created_at: string; created_by: string; intel_generated_at?: string;
+  apps: { winget_id: string; name?: string; version: string; architectures: string[];
+    installed?: { product_code?: string; name: string; version: string }[]; endpoints: number }[];
+  kbs: { kb: string; product?: string; title?: string; build: number; arch: string; server?: boolean; endpoints: number }[];
+};
 export type FleetUpdates = {
   intel: IntelSummary | null;
   updates: { kind: "os" | "app"; key: string; name: string; latest: string; catalog: CatalogLink | null;
