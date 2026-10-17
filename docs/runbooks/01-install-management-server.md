@@ -15,21 +15,69 @@ metrics.
 
 | Item | Notes |
 |---|---|
-| Linux host in the isolated zone | systemd. A container image is also being prepared (`packaging/server/Dockerfile`). Windows (`pmserver.exe`) builds, but there is no service wrapper for it. |
+| Linux host in the isolated zone | Ubuntu 22.04 / 24.04 / 26.04 with systemd for the installer (method A). Other systemd Linux: method B. Container image: `packaging/server/Dockerfile` (see the comments in it). Windows (`pmserver.exe`) builds, but there is no service wrapper for it. |
 | OS administrator | Root on the host. Nothing here is done in the console. |
-| `pmserver` binary | Built in the build environment with **Go 1.27.2 or later** (`docs/security/README.md` §2.2), e.g. `make release VERSION=x.y.z`. Carry `dist/release/` and its `SHA256SUMS` across the boundary and verify the hashes. |
+| Release | Built in the build environment with **Go 1.27.2 or later** (`docs/security/README.md` §2.2): `make dist` (installer tarball, method A) or `make release VERSION=x.y.z` (method B). Carry it and its `SHA256SUMS` across the boundary and verify the hashes. |
 | `bundle.pub` | Public bundle signing key from the acquisition zone ([runbook 02](02-acquisition-zone-setup-and-monthly-run.md)). Public keys only — never copy a `.key` file into this zone. |
 | `root.pub` | Public **root** key for signed key rotation (runbook 02/03). Strongly recommended. |
 | DNS name / IP | The name(s) endpoints and admins use, e.g. `pm.corp.internal`. |
 | Transfer receiver | The diode/gateway must deliver files into `<data_dir>/inbox/`. |
 | For SSO | An OIDC client registered at your IdP, IdP reachable from the server, IdP groups per role. |
-| Audit export storage | A mount for `audit_export_dir` (see step 9). |
+| Audit export storage | A mount for `audit_export_dir` on separate / WORM storage (see step 9). |
+| Time source | An internal NTP server. The installer warns if the clock is not synchronized. |
 
-Paths below follow `packaging/server/` (files are being written; check that folder for the current
-versions): config `/etc/offpatch-server/pmserver.json`, PKI `/etc/offpatch-server/pki`, data
-`/var/lib/offpatch-server`.
+Two install methods. Their paths differ; see [Paths by install method](README.md#paths-by-install-method).
 
-## Steps
+| | Method A: `install-ubuntu.sh --role server` (recommended) | Method B: manual (`packaging/server/`) |
+|---|---|---|
+| Config | `/etc/offpatch/pmserver.json` | `/etc/offpatch-server/pmserver.json` |
+| PKI | `/etc/offpatch/pki` | `/etc/offpatch-server/pki` |
+| Public keys | `/etc/offpatch/keys/bundle.pub`, `root.pub` | `/etc/offpatch-server/bundle.pub`, `root.pub` |
+| Data | `/var/lib/offpatch-server` | `/var/lib/offpatch-server` |
+| Unit | `offpatch-server.service` (+ `offpatch-backup.timer`) | `pmserver.service` |
+
+## Method A: installer
+
+On the server, from the verified release tarball, with `bundle.pub` from the acquisition host and
+`root.pub` from the offline root key ceremony (runbook 02 A1/A2):
+
+```bash
+tar xzf offpatch-<version>-linux-amd64.tar.gz && cd offpatch-<version>-linux-amd64
+sudo ./install-ubuntu.sh --role server --hosts pm.corp.internal,10.20.0.5 \
+     --pubkey bundle.pub --root-pubkey root.pub \
+     --audit-dir /mnt/audit-worm/offpatch --allow-from 10.20.0.0/16
+```
+
+What it does (covers steps 1-5, 7 and 8 below, plus the daily backup of runbook 05):
+
+- Refuses to run if any `*.key` file is in `/etc/offpatch/keys`: the server holds public keys only.
+  It never generates signing keys. `--pubkey` is required on the first install. Existing `.pub`
+  files are never overwritten (rotate keys with runbook 03).
+- Creates the internal CA and server certificate for `--hosts` (step 2).
+- Creates the break-glass admin token and **prints it once**. Only its SHA-256 is stored, in
+  `pmserver.json`. Put the token in the safe. If it is lost, create a new one (step 4) and replace
+  `token_sha256`.
+- Writes `/etc/offpatch/pmserver.json` on the first install only and never changes it afterwards.
+  Edit it for SSO, notifications, metrics and so on (steps 5, 6, 10), then
+  `systemctl restart offpatch-server`.
+- Runs `offpatch-server.service` as user `offpatch` with the hardening of
+  `packaging/server/pmserver.service`. The unit gets no capabilities unless the port is below 1024.
+- Creates group `offpatch-inbox`. Add the transfer receiver's account to it. Only that group can
+  write `/var/lib/offpatch-server/inbox`.
+- Installs `offpatch-backup.timer`: a daily verified backup into `/var/lib/offpatch-backup`
+  (`--backup-dir`), keeping 14 (`--backup-keep`). See runbook 05.
+- ufw: opens the port only to each `--allow-from` CIDR (repeatable). Without it, the port is open
+  to any source and the installer warns.
+- Warns loudly if `--audit-dir` is on the same filesystem as the data, and if NTP is not synchronized.
+
+Upgrade: run the same command from the new release. It takes a verified pre-upgrade backup, keeps
+the previous binaries in `/opt/offpatch/bin.prev`, and keeps keys, PKI, token, config and data. Port,
+TLS mode and audit directory come from the existing `pmserver.json`; a conflicting flag is refused.
+
+Then continue with steps 6 (SSO), 9 (audit storage), 10 (metrics) and 11 (network) below, using the
+method A paths, and with the verification section.
+
+## Method B: manual install (`packaging/server/` layout)
 
 ### 1. Create the service user and directories
 
@@ -58,7 +106,7 @@ sudo -u offpatch /usr/local/bin/pmserver init-pki \
   sudo -u offpatch /usr/local/bin/pmserver reissue-server-cert \
     -dir /etc/offpatch-server/pki -hosts pm.corp.internal,10.20.0.5
   # new server certificate written to …/server.pem (previous kept as *.old); restart pmserver to use it
-  systemctl restart pmserver
+  systemctl restart pmserver        # method A: systemctl restart offpatch-server
   ```
 
   It needs `ca.pem` and `ca.key` in `-dir`, renames the current `server.pem`/`server.key` to
@@ -71,6 +119,9 @@ sudo -u offpatch /usr/local/bin/pmserver init-pki \
 ```bash
 install -o offpatch -m 0644 bundle.pub root.pub /etc/offpatch-server/
 ```
+
+Public keys only. If a `.key` file was copied here by mistake, remove it (`shred -u`) and treat it
+as exposed (runbook 04).
 
 ### 4. Create the break-glass admin token
 
@@ -97,6 +148,15 @@ Start from `packaging/server/pmserver.example.json`. Minimal production config:
   "audit_export_dir": "/mnt/audit-worm/offpatch",
   "metrics_token": "<random secret>"
 }
+```
+
+Replace every placeholder: `<from step 4>` with the `token_sha256`, and `<random secret>` with the
+output of `openssl rand -hex 32`. If you started from `pmserver.example.json`, also replace
+`REPLACE_with_random_secret`, the all-zero `token_sha256` and the example host names. The server does
+not reject these placeholders at startup, so check:
+
+```bash
+grep -nE 'REPLACE|0{64}|<[a-z_ ]+>' /etc/offpatch-server/pmserver.json   # must print nothing
 ```
 
 ```bash
@@ -209,7 +269,8 @@ Expect `pmserver listening … tls=true mtls_agents=true` and, with export confi
 `audit export enabled … verify_with=/var/lib/offpatch-server/audit-signing.pub`. The warning
 `audit_export_dir not set` means audit evidence lives only in the database.
 
-Configuration is read only at startup. **Every config change needs `systemctl restart pmserver`.**
+Configuration is read only at startup. **Every config change needs `systemctl restart pmserver`**
+(method A: `systemctl restart offpatch-server`).
 
 ### 8. Stage agent binaries for the console
 
@@ -228,7 +289,10 @@ console's **Agent setup** page lists them with size and SHA-256, plus the truste
 **appends** a signed line to `checkpoints.jsonl` every `audit_checkpoint_interval`. The storage must
 therefore allow creating, renaming and appending files by the `offpatch` user, while preventing
 modification and deletion by everyone else (WORM share with append semantics, or a local directory
-replicated to WORM storage). Export failures raise a critical `audit_export_failed` alert.
+replicated to WORM storage). Do not put it on the same filesystem as `data_dir`: a compromise or
+disk loss would take the evidence with it. Method A: pass `--audit-dir` on the first install (the
+unit gets it in `ReadWritePaths=`). To move it later, change `audit_export_dir` in `pmserver.json` and
+re-run the installer, which rewrites the unit from the config. Export failures raise a critical `audit_export_failed` alert.
 The checkpoint verification key `audit-signing.pub` is created in `data_dir`; copy it to the
 auditors' verification workstation (runbook 07).
 
@@ -263,6 +327,8 @@ target, `offpatch_targets_overdue{severity="critical"} > 0`. Also monitor disk s
 
 ## Verification
 
+Commands use method B paths; with method A, the CA is `/etc/offpatch/pki/ca.pem`.
+
 ```bash
 curl --cacert /etc/offpatch-server/pki/ca.pem https://pm.corp.internal:8443/auth/config
 # {"require_mfa":true,"sso":true,"static_tokens":true}
@@ -281,9 +347,14 @@ curl --cacert /etc/offpatch-server/pki/ca.pem -H "Authorization: Bearer <metrics
 
 ## Rollback / escape hatch
 
-- Server does not start: `journalctl -u pmserver` shows the `config:` error. Fix and restart.
+- Server does not start: `journalctl -u pmserver` (method A: `journalctl -u offpatch-server`) shows
+  the `config:` error. Fix and restart.
+- Method A upgrade went wrong: `systemctl stop offpatch-server`,
+  `cp -a /opt/offpatch/bin.prev/. /opt/offpatch/bin/`, start again. If the new version has already
+  changed the database, restore the `pre-upgrade-*` backup as well (runbook 05).
 - SSO broken: sign in with the break-glass token (Bearer) and fix `oidc`.
-- Abandon an install: `systemctl disable --now pmserver`; the data and PKI directories hold all
+- Abandon an install: `systemctl disable --now pmserver` (method A: `sudo ./install-ubuntu.sh
+  --uninstall`, which lists the secrets left on disk). The data and PKI directories hold all
   state. Do not reuse a CA you have discarded: endpoints pin it.
 
 ## Evidence to keep

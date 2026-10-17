@@ -45,13 +45,45 @@ tested restore in a non-production environment is part of the **Phase 7 exit gat
 | Backup target | Separate disk/host, encrypted. A backup with PKI contains the CA private key. |
 | Restore host | Same or newer `pmserver` version, same paths as in the config. |
 
-## Backup procedure
+Commands below use the installer layout (config `/etc/offpatch/pmserver.json`, unit
+`offpatch-server`). Manual install: `/etc/offpatch-server/pmserver.json` and unit `pmserver`; see
+[Paths by install method](README.md#paths-by-install-method).
+
+## Scheduled backups (installer)
+
+`install-ubuntu.sh --role server` (and `--role all`) installs:
+
+| Unit / file | What it does |
+|---|---|
+| `offpatch-backup.timer` | Daily at 02:30 (random delay up to 15 min, catches up after downtime). |
+| `offpatch-backup.service` | Runs `/opt/offpatch/bin/offpatch-backup` as `offpatch`: checks free space, then `pmserver backup -config /etc/offpatch/pmserver.json -dir <backup-dir>/<UTC timestamp>` and `pmserver verify-backup`. An incomplete or unverified backup is deleted and the run fails. |
+| Retention | Keeps the newest **14** verified scheduled backups (`--backup-keep N`), deletes older ones. |
+| `offpatch-backup-failed.service` | `OnFailure=`: logs `offpatch-backup.service FAILED` at `daemon.err` (syslog / journal, tag `offpatch-backup`) and writes `<backup-dir>/last-failure`. |
+| `<backup-dir>/last-success` | Time and path of the last verified backup. `install-ubuntu.sh --status` shows it. |
+| `<backup-dir>/pre-upgrade-*` | Taken by the installer before every server upgrade (newest 3 kept; `--skip-backup` skips it). |
+
+Default `<backup-dir>` is `/var/lib/offpatch-backup` (`--backup-dir`, mode 0700, owner `offpatch`).
+Each backup is a **full copy** of the repository, so size the disk for about 15 times `data_dir`, or
+lower `--backup-keep`. The installer warns when the backup directory is on the same filesystem as
+the data. Either way, **copy each backup off the machine** (encrypted: it holds the CA key).
+
+Watch for failures: alert on `offpatch-backup` errors in syslog/journal, on a `last-failure` newer
+than `last-success`, or on `last-success` older than 26 hours. The server does not alert on a missing
+backup itself.
+
+```bash
+systemctl list-timers offpatch-backup.timer
+journalctl -u offpatch-backup -n 20
+sudo systemctl start offpatch-backup.service    # take one now (e.g. before a config change)
+```
+
+## Backup procedure (manual / on demand)
 
 1. Run (safe while the server is running):
 
    ```bash
    DIR=/srv/backup/offpatch/$(date -u +%Y%m%dT%H%M%SZ)
-   sudo -u offpatch /usr/local/bin/pmserver backup -config /etc/offpatch-server/pmserver.json -dir "$DIR"
+   sudo -u offpatch /usr/local/bin/pmserver backup -config /etc/offpatch/pmserver.json -dir "$DIR"
    # WARNING: backup contains the CA private key — store it encrypted and access-controlled
    # backup written to …: N files, audit seq 12345
    ```
@@ -70,7 +102,8 @@ tested restore in a non-production environment is part of the **Phase 7 exit gat
 3. Copy the directory to the backup target and encrypt it. Back up the files listed under "Not
    included" with it.
 
-**Schedule.** Daily, plus before upgrades and config changes. Example systemd timer service:
+**Schedule (manual install only; the installer already set this up).** Daily, plus before upgrades
+and config changes. Example systemd timer service:
 
 ```ini
 # /etc/systemd/system/pmserver-backup.service
@@ -86,33 +119,34 @@ Persistent=true
 WantedBy=timers.target
 ```
 
-(`/srv/backup` must be writable by `offpatch`.) Alert if the job fails. Retention of backup copies is
-your policy; nothing is pruned by `pmserver`.
+(`/srv/backup` must be writable by `offpatch`.) Alert if the job fails. `pmserver` itself prunes
+nothing; the installer's `offpatch-backup` script does the retention described above.
 
-Container deployments (`packaging/server/Dockerfile`, being written): the image's entrypoint already
+Container deployments (`packaging/server/Dockerfile`): the image's entrypoint already
 passes `-config`, so run subcommands with `docker exec <container> /usr/local/bin/pmserver backup
 -config /etc/offpatch-server/pmserver.json -dir <dir inside a mounted volume>`.
 
 ## Restore procedure
 
-R1. **Stop the server** (if it is running): `systemctl stop pmserver`.
+R1. **Stop the server and the backup timer** (if running):
+`systemctl stop offpatch-backup.timer offpatch-server` (manual install: `systemctl stop pmserver`).
 
 R2. **Put the config in place.** Copy `config/pmserver.json` from the backup (or your current
-reviewed version) to `/etc/offpatch-server/pmserver.json`, plus the external files listed under
-"Not included" (`bundle.pub`, `root.pub`, IdP CA, …). `restore` reads `data_dir` and `pki_dir`
-from this config.
+reviewed version) to `/etc/offpatch/pmserver.json`, plus the external files listed under
+"Not included" (`/etc/offpatch/keys/bundle.pub`, `root.pub`, IdP CA, …). `restore` reads `data_dir`
+and `pki_dir` from this config.
 
 R3. **Verify the backup** you are about to restore:
 
 ```bash
-/usr/local/bin/pmserver verify-backup -dir /srv/backup/offpatch/20261116T023000Z
+/usr/local/bin/pmserver verify-backup -dir /var/lib/offpatch-backup/20261116T023000Z
 ```
 
 R4. **Restore:**
 
 ```bash
-sudo -u offpatch /usr/local/bin/pmserver restore -config /etc/offpatch-server/pmserver.json \
-  -dir /srv/backup/offpatch/20261116T023000Z
+sudo -u offpatch /usr/local/bin/pmserver restore -config /etc/offpatch/pmserver.json \
+  -dir /var/lib/offpatch-backup/20261116T023000Z
 # restored N files into /var/lib/offpatch-server; audit chain verified to seq 12345; approved content verified
 ```
 
@@ -133,11 +167,15 @@ backup?)" and raises the critical alert `audit_export_failed`. No new evidence l
 retention pruning stops until you act.
 
 Before starting the server, set `audit_export_dir` to a **new empty directory** (e.g.
-`/mnt/audit-worm/offpatch/after-restore-20261116`; add it to `ReadWritePaths=` in the systemd unit)
+`/mnt/audit-worm/offpatch/after-restore-20261116`). Installer: change `audit_export_dir` in
+`pmserver.json` and re-run the installer with the same `--role` (it rewrites `ReadWritePaths=` from
+the config; use `--skip-backup` if the database is the restored one you just verified). Manual
+install: add it to `ReadWritePaths=` in the unit)
 and keep the old one unchanged as evidence. If you started without doing this, change the config,
 restart, and acknowledge the alert.
 
-R6. **Start:** `systemctl start pmserver`; check `journalctl -u pmserver`.
+R6. **Start:** `systemctl start offpatch-server offpatch-backup.timer`; check
+`journalctl -u offpatch-server` (manual install: unit `pmserver`).
 
 ## After a restore: what changed since the backup is lost
 
@@ -155,9 +193,11 @@ R6. **Start:** `systemctl start pmserver`; check `journalctl -u pmserver`.
 Run on a separate, non-production host at least before the pilot, then on your DR schedule.
 
 1. Take a fresh backup on production and `verify-backup` it. Note the audit seq.
-2. On the test host: install the same `pmserver` version (runbook 01 steps 1 and 7, **not**
-   `init-pki`), put the config in place with `listen` on the test host and `audit_export_dir`
-   pointing to a scratch directory.
+2. On the test host: install the same `pmserver` version, **without** creating a new CA: copy the
+   binaries to `/opt/offpatch/bin` (or runbook 01 method B steps 1 and 7, not `init-pki`), put the
+   config in place with `listen` on the test host and `audit_export_dir` pointing to a scratch
+   directory. (Running the installer would create a new CA and token; restore overwrites the PKI,
+   but use a clean host so nothing is mixed.)
 3. Restore (R3–R4). Record the duration.
 4. Before starting the server, cross-check against a copy of production's audit export:
    `pmserver verify-audit -export <copy of production audit_export_dir> -pub /var/lib/offpatch-server/audit-signing.pub

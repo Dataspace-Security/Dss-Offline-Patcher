@@ -1,41 +1,59 @@
 #!/usr/bin/env bash
-# offpatch — one-command setup for Ubuntu (22.04 / 24.04 / 26.04, amd64 or arm64).
+# offpatch setup for Ubuntu (22.04 / 24.04 / 26.04, amd64 or arm64). --role is required.
 #
-#   sudo ./install-ubuntu.sh                       # server + acquisition on this machine (endpoints enroll separately)
-#   sudo ./install-ubuntu.sh --role server         # isolated-zone management server only
-#   sudo ./install-ubuntu.sh --role acquisition    # connected-zone downloader (pmctl auto) only
-#   sudo ./install-ubuntu.sh --role agent --server https://pm.example:8443 --token enr_... \
-#        --ca ca.pem --pubkey bundle.pub [--root-pubkey root.pub]
-#   sudo ./install-ubuntu.sh --status              # show what is installed and running
-#   sudo ./install-ubuntu.sh --uninstall           # stop and remove services (keeps data unless --purge)
+# Production: one role per machine (see README "Install").
+#   isolated zone   sudo ./install-ubuntu.sh --role server --hosts pm.corp.local,10.0.0.5 \
+#                        --pubkey bundle.pub --root-pubkey root.pub --allow-from 10.0.0.0/16
+#   connected zone  sudo ./install-ubuntu.sh --role acquisition
+#   endpoint        sudo ./install-ubuntu.sh --role agent --server https://pm.example:8443 \
+#                        --token enr_... --ca ca.pem --pubkey bundle.pub [--root-pubkey root.pub]
+# Single-box LAB only (internet downloader + signing keys + root key + server on one machine):
+#                   sudo ./install-ubuntu.sh --role all [--hosts ...] [--with-agent]
 #
-# Options: --hosts "pm.corp.local,10.0.0.5"  extra names/IPs for the server TLS certificate
-#          --port 8443                        server port
-#          --insecure-lab                     plain HTTP (isolated lab only; NOT for production)
-#          --with-agent                       also enroll this Linux machine as a managed endpoint
-#          --go-version 1.27.2                Go toolchain to install if needed
+#   sudo ./install-ubuntu.sh --status
+#   sudo ./install-ubuntu.sh --uninstall [--purge [--yes]]
 #
-# Safe to re-run (also how you upgrade): existing keys, certificates, tokens and data are kept.
-# Run it from an unpacked release tarball (`make dist`: prebuilt, works offline) or from the
-# repository root (builds from source; downloads Go if needed).
+# Options:
+#   --hosts "pm.corp.local,10.0.0.5"  extra names/IPs for the server certificate (first install)
+#   --port 8443                       server port (first install; re-runs use pmserver.json)
+#   --pubkey FILE / --root-pubkey FILE  role server: public keys from the acquisition host and the
+#                                     offline root key (first install; never overwritten later)
+#   --audit-dir PATH                  audit export dir (first install). Use separate / WORM storage
+#   --allow-from CIDR                 ufw: allow the server port only from CIDR (repeatable)
+#   --backup-dir PATH                 daily backups (default /var/lib/offpatch-backup)
+#   --backup-keep N                   scheduled backups to keep (default 14)
+#   --skip-backup                     upgrade without the automatic pre-upgrade backup
+#   --insecure-lab                    plain HTTP (first install, isolated lab only)
+#   --with-agent                      role all: also enroll this machine as a managed endpoint
+#   --go-version 1.27.2               Go toolchain to install when building from source
+#
+# Re-running with the same --role upgrades: keys, certificates, tokens, config and data are kept;
+# a verified backup is taken first and the previous binaries are kept in /opt/offpatch/bin.prev.
 set -euo pipefail
 
 # ---------------------------------------------------------------- settings
-ROLE="all"
-PORT=8443
+ROLE=""
+PORT=8443 PORT_SET=0
 EXTRA_HOSTS=""
-INSECURE=0
+INSECURE=0 INSECURE_SET=0
 WITH_AGENT=0
 GO_VERSION="1.27.2"
-AGENT_SERVER="" AGENT_TOKEN="" AGENT_CA="" AGENT_PUB="" AGENT_ROOT=""
-UNINSTALL=0 PURGE=0 STATUS=0
+AGENT_SERVER="" AGENT_TOKEN="" AGENT_CA="" PUBKEY_IN="" ROOTPUB_IN=""
+AUDIT_DIR_IN="" BACKUP_DIR_IN="" BACKUP_KEEP_IN="" SKIP_BACKUP=0
+ALLOW_FROM=()
+UNINSTALL=0 PURGE=0 STATUS=0 YES=0
 
 PREFIX=/opt/offpatch                 # binaries
 ETC=/etc/offpatch                    # config, PKI, keys
 SRV_DATA=/var/lib/offpatch-server    # server data (db, inbox, repository)
 ACQ_DATA=/var/lib/offpatch-acq       # acquisition work dir
 AGENT_STATE=/var/lib/offpatch        # local agent identity
-SVC_USER=offpatch
+SVC_USER=offpatch                    # runs pmserver
+ACQ_USER=offpatch-acq                # runs pmctl auto (internet + bundle signing key)
+XFER_GROUP=offpatch-inbox            # may drop files into the server inbox
+STATE_FILE=$ETC/install.state        # choices remembered for re-runs
+DEFAULT_BACKUP_DIR=/var/lib/offpatch-backup
+DEFAULT_BACKUP_KEEP=14
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
 
@@ -44,25 +62,41 @@ step() { printf '\n%s==> %s%s\n' "$c_blue" "$*" "$c_off"; }
 ok()   { printf '%s  ✔ %s%s\n' "$c_green" "$*" "$c_off"; }
 warn() { printf '%s  ! %s%s\n' "$c_yellow" "$*" "$c_off"; }
 die()  { printf '%s  ✘ %s%s\n' "$c_red" "$*" "$c_off" >&2; exit 1; }
+banner() { # loud multi-line warning
+  printf '\n%s' "$c_red"
+  printf '  ************************************************************************\n'
+  for l in "$@"; do printf '  * %s\n' "$l"; done
+  printf '  ************************************************************************%s\n' "$c_off"
+}
 
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; exit "${1:-0}"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --role|--port|--hosts|--go-version|--server|--token|--ca|--pubkey|--root-pubkey|--audit-dir|--allow-from|--backup-dir|--backup-keep)
+      [ $# -ge 2 ] || die "$1 needs a value" ;;
+  esac
+  case "$1" in
     --role) ROLE="$2"; shift ;;
-    --port) PORT="$2"; shift ;;
+    --port) PORT="$2"; PORT_SET=1; shift ;;
     --hosts) EXTRA_HOSTS="$2"; shift ;;
-    --insecure-lab) INSECURE=1 ;;
+    --insecure-lab) INSECURE=1; INSECURE_SET=1 ;;
     --with-agent) WITH_AGENT=1 ;;
     --no-agent) WITH_AGENT=0 ;;   # default; kept for older scripts
     --go-version) GO_VERSION="$2"; shift ;;
     --server) AGENT_SERVER="$2"; shift ;;
     --token) AGENT_TOKEN="$2"; shift ;;
     --ca) AGENT_CA="$2"; shift ;;
-    --pubkey) AGENT_PUB="$2"; shift ;;
-    --root-pubkey) AGENT_ROOT="$2"; shift ;;
+    --pubkey) PUBKEY_IN="$2"; shift ;;
+    --root-pubkey) ROOTPUB_IN="$2"; shift ;;
+    --audit-dir) AUDIT_DIR_IN="$2"; shift ;;
+    --allow-from) ALLOW_FROM+=("$2"); shift ;;
+    --backup-dir) BACKUP_DIR_IN="$2"; shift ;;
+    --backup-keep) BACKUP_KEEP_IN="$2"; shift ;;
+    --skip-backup) SKIP_BACKUP=1 ;;
     --uninstall) UNINSTALL=1 ;;
     --purge) PURGE=1 ;;
+    --yes) YES=1 ;;
     --status) STATUS=1 ;;
     -h|--help) usage 0 ;;
     *) echo "unknown option: $1"; usage 1 ;;
@@ -70,43 +104,111 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-case "$ROLE" in all|server|acquisition|agent) ;; *) die "--role must be all, server, acquisition or agent" ;; esac
+if [ $STATUS = 0 ] && [ $UNINSTALL = 0 ]; then
+  [ -n "$ROLE" ] || die "--role is required: server | acquisition | agent (production, one per machine) or all (single-box lab). See --help"
+  case "$ROLE" in all|server|acquisition|agent) ;; *) die "--role must be server, acquisition, agent or all" ;; esac
+  [ $WITH_AGENT = 0 ] || [ "$ROLE" = all ] || die "--with-agent is only for --role all; on other machines use --role agent"
+fi
 [ "$(id -u)" -eq 0 ] || die "run as root: sudo $0 $*"
+
+# Values end up in JSON, systemd units and ufw rules: accept plain paths / numbers / CIDRs only.
+safe_path() { [[ "$1" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "$2 must be an absolute path of letters, digits, . _ - / (got: $1)"; }
+[[ "$PORT" =~ ^[0-9]+$ ]] && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || die "--port must be 1-65535"
+[ -z "$AUDIT_DIR_IN" ] || safe_path "$AUDIT_DIR_IN" --audit-dir
+[ -z "$BACKUP_DIR_IN" ] || safe_path "$BACKUP_DIR_IN" --backup-dir
+[ -z "$BACKUP_KEEP_IN" ] || { [[ "$BACKUP_KEEP_IN" =~ ^[0-9]+$ ]] && [ "$BACKUP_KEEP_IN" -ge 1 ]; } || die "--backup-keep must be a number >= 1"
+state_get() { [ -f "$STATE_FILE" ] && sed -n "s/^$1=//p" "$STATE_FILE" | tail -n 1; return 0; }
+# ufw sources given on an earlier run stay in force unless new --allow-from values are given.
+if [ ${#ALLOW_FROM[@]} -eq 0 ]; then read -r -a ALLOW_FROM <<< "$(state_get ALLOW_FROM)"; fi
+for c in ${ALLOW_FROM[@]+"${ALLOW_FROM[@]}"}; do
+  [[ "$c" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ || "$c" =~ ^[0-9A-Fa-f:]+(/[0-9]{1,3})?$ ]] || die "--allow-from: not an IPv4/IPv6 address or CIDR: $c"
+done
 
 HAVE_SYSTEMD=0
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null; then HAVE_SYSTEMD=1; fi
 
-# ---------------------------------------------------------------- status / uninstall
+# Read a top-level key from an existing pmserver.json (booleans print as true/false).
+cfg_get() {
+  local f="$ETC/pmserver.json"
+  [ -f "$f" ] || return 0
+  if command -v python3 >/dev/null; then
+    python3 -c 'import json,sys
+v = json.load(open(sys.argv[1])).get(sys.argv[2])
+print("" if v is None else (str(v).lower() if isinstance(v, bool) else v))' "$f" "$1" 2>/dev/null || true
+  else
+    sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([^\",}]*\)\"\{0,1\}.*/\1/p" "$f" | head -n 1
+  fi
+}
+cfg_path() { local v; v=$(cfg_get "$1"); case "$v" in ""|/*) echo "$v" ;; *) echo "$ETC/$v" ;; esac; }
+
+BACKUP_DIR=${BACKUP_DIR_IN:-$(state_get BACKUP_DIR)}; BACKUP_DIR=${BACKUP_DIR:-$DEFAULT_BACKUP_DIR}
+BACKUP_KEEP=${BACKUP_KEEP_IN:-$(state_get BACKUP_KEEP)}; BACKUP_KEEP=${BACKUP_KEEP:-$DEFAULT_BACKUP_KEEP}
+
+# ---------------------------------------------------------------- status
 svc_state() { if [ $HAVE_SYSTEMD = 1 ]; then systemctl is-active "$1" 2>/dev/null || true; else pgrep -f "$2" >/dev/null && echo "running (no systemd)" || echo "not running"; fi; }
 
 if [ $STATUS = 1 ]; then
+  echo "installed role:    $(state_get ROLE || true)"
   echo "pmserver:          $(svc_state offpatch-server 'offpatch/bin/pmserver')"
   echo "agent:             $(svc_state offpatch-agent 'offpatch/bin/pmagent run')"
   echo "acquisition timer: $( [ $HAVE_SYSTEMD = 1 ] && systemctl is-active offpatch-acquire.timer 2>/dev/null || echo 'cron/manual')"
-  [ -f "$ETC/admin-token.txt" ] && echo "admin token:       $ETC/admin-token.txt"
+  echo "backup timer:      $( [ $HAVE_SYSTEMD = 1 ] && systemctl is-active offpatch-backup.timer 2>/dev/null || echo 'cron/manual')"
+  [ -f "$BACKUP_DIR/last-success" ] && echo "last good backup:  $(head -n 1 "$BACKUP_DIR/last-success")"
+  [ -f "$BACKUP_DIR/last-failure" ] && echo "last FAILED backup: $(cat "$BACKUP_DIR/last-failure")"
+  [ -f "$ETC/admin-token.txt" ] && echo "admin token file:  $ETC/admin-token.txt (lab; remove on production machines)"
   [ -f "$ETC/console-url.txt" ] && echo "console:           $(cat "$ETC/console-url.txt")"
   exit 0
 fi
 
+# ---------------------------------------------------------------- uninstall
+list_secrets() {
+  local f
+  for f in "$ETC"/keys/*.key "$ETC/pki/ca.key" "$ETC/pki/server.key" "$ETC/admin-token.txt" "$SRV_DATA/audit-signing.key" "$AGENT_STATE"/*; do
+    [ -e "$f" ] && warn "  still on disk: $f"
+  done
+  return 0
+}
+
 if [ $UNINSTALL = 1 ]; then
+  AUDIT_LEFT=$(cfg_path audit_export_dir)
+  if [ $PURGE = 1 ] && [ $YES = 0 ]; then
+    [ -t 0 ] || die "--purge deletes signing keys, the CA key, tokens and all data. Non-interactive: add --yes"
+    banner "--purge deletes $ETC (signing keys, CA key, tokens, config)," \
+           "$SRV_DATA (database, repository, audit export), $ACQ_DATA and $AGENT_STATE." \
+           "Backups in $BACKUP_DIR are NOT deleted."
+    printf 'Type PURGE to continue: '; read -r answer
+    [ "$answer" = PURGE ] || die "aborted; nothing was removed"
+  fi
   step "Stopping and removing offpatch services"
   if [ $HAVE_SYSTEMD = 1 ]; then
-    systemctl disable --now offpatch-server offpatch-acquire.timer 2>/dev/null || true
+    systemctl disable --now offpatch-server offpatch-acquire.timer offpatch-backup.timer 2>/dev/null || true
+    systemctl stop offpatch-acquire.service offpatch-backup.service 2>/dev/null || true
     [ -x $PREFIX/bin/pmagent ] && $PREFIX/bin/pmagent service uninstall 2>/dev/null || true
-    rm -f /etc/systemd/system/offpatch-server.service /etc/systemd/system/offpatch-acquire.service /etc/systemd/system/offpatch-acquire.timer
+    for u in offpatch-server.service offpatch-acquire.service offpatch-acquire.timer offpatch-backup.service offpatch-backup.timer offpatch-backup-failed.service; do
+      rm -f "/etc/systemd/system/$u"
+    done
     systemctl daemon-reload
   else
     pkill -f 'offpatch/bin/pmserver' 2>/dev/null || true
     pkill -f 'offpatch/bin/pmagent run' 2>/dev/null || true
   fi
+  for b in pmserver pmctl pmagent; do
+    [ "$(readlink "/usr/local/bin/$b" 2>/dev/null)" = "$PREFIX/bin/$b" ] && rm -f "/usr/local/bin/$b"
+  done
+  rm -f /etc/logrotate.d/offpatch
   rm -rf "$PREFIX"
   if [ $PURGE = 1 ]; then
     rm -rf "$ETC" "$SRV_DATA" "$ACQ_DATA" "$AGENT_STATE"
-    userdel "$SVC_USER" 2>/dev/null || true
+    for u in "$SVC_USER" "$ACQ_USER"; do userdel "$u" 2>/dev/null || true; done
+    groupdel "$XFER_GROUP" 2>/dev/null || true
     ok "removed binaries, services, configuration, keys and all data"
   else
     ok "removed binaries and services; kept $ETC and data (use --purge to delete them)"
+    warn "secrets that remain (delete them per your key-destruction procedure, or keep them for a reinstall):"
+    list_secrets
   fi
+  [ -d "$BACKUP_DIR" ] && warn "backups kept in $BACKUP_DIR: they contain the CA private key and the database"
+  case "$AUDIT_LEFT" in ""|"$SRV_DATA"/*) ;; *) [ -d "$AUDIT_LEFT" ] && warn "audit export kept in $AUDIT_LEFT" ;; esac
   exit 0
 fi
 
@@ -129,7 +231,110 @@ else
   [ -f "$SRC/go.mod" ] && [ -d "$SRC/cmd/pmserver" ] || die "run this from the offpatch repository root or an unpacked release tarball"
 fi
 ok "${PRETTY_NAME:-Linux} ($GOARCH), systemd: $([ $HAVE_SYSTEMD = 1 ] && echo yes || echo 'no — processes will be started directly'), install from: $MODE"
+if command -v timedatectl >/dev/null; then
+  ntp=$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)
+  if [ "$ntp" = yes ]; then ok "clock synchronized (NTP)"; else
+    warn "clock NOT synchronized (NTPSynchronized=${ntp:-unknown}). Bundles dated >10 min in the future are rejected,"
+    warn "and TLS, approvals and audit timestamps depend on it: configure an internal NTP source (chrony / timedatectl set-ntp true)"
+  fi
+fi
 
+PREV_ROLE=$(state_get ROLE)
+[ -z "$PREV_ROLE" ] || [ "$PREV_ROLE" = "$ROLE" ] || warn "this machine was installed with --role $PREV_ROLE; now --role $ROLE"
+
+check_pub() { # file label
+  [ -f "$1" ] || die "$2: $1 not found"
+  if grep -q 'PRIVATE KEY' "$1"; then die "$2: $1 contains a PRIVATE key. Never copy private keys to this machine"; fi
+  grep -q 'BEGIN OFFPATCH ED25519 PUBLIC KEY' "$1" || die "$2: $1 is not an offpatch public key (pmctl keygen writes <name>.pub)"
+}
+
+IS_SERVER=0; { [ "$ROLE" = all ] || [ "$ROLE" = server ]; } && IS_SERVER=1
+IS_ACQ=0;    { [ "$ROLE" = all ] || [ "$ROLE" = acquisition ]; } && IS_ACQ=1
+
+if [ "$ROLE" = server ]; then
+  if compgen -G "$ETC/keys/*.key" >/dev/null; then
+    die "role=server: private keys found in $ETC/keys: $(cd "$ETC/keys" && echo ./*.key). The management server must hold PUBLIC keys only.
+     Move bundle.key to the acquisition host and root.key to offline custody (runbook 02 A1/A2), then remove them here:
+       sudo shred -u $ETC/keys/*.key
+     and re-run this command."
+  fi
+  if [ ! -f "$ETC/keys/bundle.pub" ] && [ -z "$PUBKEY_IN" ]; then
+    die "role=server: first install needs --pubkey <bundle.pub> (from the acquisition host: $ETC/keys/bundle.pub) and, recommended, --root-pubkey <root.pub> (from the offline root key ceremony)"
+  fi
+  [ -z "$PUBKEY_IN" ] || check_pub "$PUBKEY_IN" --pubkey
+  [ -z "$ROOTPUB_IN" ] || check_pub "$ROOTPUB_IN" --root-pubkey
+fi
+if [ "$ROLE" = agent ]; then
+  [ -n "$AGENT_SERVER" ] && [ -n "$AGENT_TOKEN" ] && [ -n "$PUBKEY_IN" ] || [ -f "$AGENT_STATE/agent.json" ] || die "--role agent needs --server, --token and --pubkey (and --ca for https)"
+  [ -z "$PUBKEY_IN" ] || check_pub "$PUBKEY_IN" --pubkey
+  [ -z "$ROOTPUB_IN" ] || check_pub "$ROOTPUB_IN" --root-pubkey
+fi
+
+# Re-runs: listener and TLS mode come from the existing pmserver.json (it is never rewritten).
+SERVER_CONFIGURED=0
+LISTEN_HOST=""
+if [ $IS_SERVER = 1 ] && [ -f "$ETC/pmserver.json" ]; then
+  SERVER_CONFIGURED=1
+  listen=$(cfg_get listen); listen=${listen:-127.0.0.1:8080}
+  cfg_port=${listen##*:}; LISTEN_HOST=${listen%:*}
+  [[ "$cfg_port" =~ ^[0-9]+$ ]] || die "cannot read the port from \"listen\": \"$listen\" in $ETC/pmserver.json"
+  [ $PORT_SET = 0 ] || [ "$PORT" = "$cfg_port" ] || die "--port $PORT conflicts with $ETC/pmserver.json (listen $listen). Change \"listen\" there and re-run without --port"
+  PORT=$cfg_port
+  if [ "$(cfg_get insecure_http)" = true ]; then
+    INSECURE=1
+  elif [ $INSECURE_SET = 1 ]; then
+    die "--insecure-lab conflicts with $ETC/pmserver.json (TLS is configured). Re-run without --insecure-lab"
+  fi
+  AUDIT_DIR=$(cfg_path audit_export_dir)
+  [ -z "$AUDIT_DIR_IN" ] || [ "$AUDIT_DIR_IN" = "$AUDIT_DIR" ] || die "--audit-dir $AUDIT_DIR_IN conflicts with audit_export_dir \"$AUDIT_DIR\" in $ETC/pmserver.json. Change it there (see runbook 05 R5) and re-run without --audit-dir"
+else
+  AUDIT_DIR=${AUDIT_DIR_IN:-$SRV_DATA/audit-export}
+fi
+
+if [ "$ROLE" = all ]; then
+  banner "--role all = SINGLE-BOX LAB. The internet-facing downloader, the bundle signing key," \
+         "the root key and the management server share one machine. A compromise of the" \
+         "downloader exposes the signing keys. NOT for production: use --role server and" \
+         "--role acquisition on separate machines (README, Install)."
+fi
+
+# ---------------------------------------------------------------- users
+ensure_user() { id "$1" >/dev/null 2>&1 || useradd --system --user-group --home "$2" --shell /usr/sbin/nologin "$1"; }
+if [ $IS_SERVER = 1 ]; then
+  ensure_user "$SVC_USER" "$SRV_DATA"
+  getent group "$XFER_GROUP" >/dev/null || groupadd --system "$XFER_GROUP"
+  usermod -aG "$XFER_GROUP" "$SVC_USER"
+fi
+if [ $IS_ACQ = 1 ]; then
+  ensure_user "$ACQ_USER" "$ACQ_DATA"
+  [ "$ROLE" = all ] && usermod -aG "$XFER_GROUP" "$ACQ_USER"
+fi
+
+# ---------------------------------------------------------------- before upgrading
+if [ -d "$PREFIX/bin" ]; then
+  rm -rf "$PREFIX/bin.prev" && cp -a "$PREFIX/bin" "$PREFIX/bin.prev"
+  ok "previous binaries kept in $PREFIX/bin.prev (roll back: stop the services, copy them back, start)"
+fi
+if [ $IS_SERVER = 1 ] && [ $SERVER_CONFIGURED = 1 ] && [ -f "$SRV_DATA/pm.db" ] && [ -x "$PREFIX/bin/pmserver" ]; then
+  step "Pre-upgrade backup"
+  if [ $SKIP_BACKUP = 1 ]; then
+    warn "--skip-backup: upgrading without a pre-upgrade backup"
+  else
+    install -d -m 0700 -o "$SVC_USER" -g "$SVC_USER" "$BACKUP_DIR"
+    pre="$BACKUP_DIR/pre-upgrade-$(date -u +%Y%m%dT%H%M%SZ)"
+    if ( cd / && runuser -u "$SVC_USER" -- "$PREFIX/bin/pmserver" backup -config "$ETC/pmserver.json" -dir "$pre" >/dev/null \
+         && runuser -u "$SVC_USER" -- "$PREFIX/bin/pmserver" verify-backup -dir "$pre" >/dev/null ); then
+      ok "verified backup of the running version → $pre"
+    else
+      rm -rf "$pre"
+      die "pre-upgrade backup failed (see above); nothing was changed. Fix it, or re-run with --skip-backup"
+    fi
+    # keep the 3 newest pre-upgrade backups; scheduled ones have their own retention
+    find "$BACKUP_DIR" -maxdepth 1 -type d -name 'pre-upgrade-*' | sort -r | tail -n +4 | while IFS= read -r old; do rm -rf "$old"; done
+  fi
+fi
+
+# ---------------------------------------------------------------- binaries
 need() { command -v "$1" >/dev/null; }
 if [ $MODE = source ] || ! need curl || ! need tar; then
   step "Installing prerequisites"
@@ -142,94 +347,143 @@ if [ $MODE = source ] || ! need curl || ! need tar; then
   ok "curl, tar, CA certificates"
 fi
 
+STAGE=$(mktemp -d); trap 'rm -rf "$STAGE"' EXIT
 if [ $MODE = prebuilt ]; then
-  step "Installing prebuilt binaries"
+  step "Checking prebuilt binaries"
   VERSION=$(cat "$SRC/VERSION" 2>/dev/null || echo dev)
   # Integrity of the unpacked files. Authenticity comes from checking the tarball
   # against the published offpatch-<version>.SHA256SUMS before unpacking it.
   [ -f "$SRC/SHA256SUMS" ] || die "SHA256SUMS missing from the release folder"
   ( cd "$SRC" && sha256sum -c --quiet SHA256SUMS ) || die "release files failed their SHA-256 check (SHA256SUMS)"
   ok "release checksums verified"
-  mkdir -p "$PREFIX/bin"
-  for b in pmserver pmctl pmagent; do install -m 0755 "$PREBUILT/$b" "$PREFIX/bin/$b"; done
-  ln -sf "$PREFIX/bin/pmserver" /usr/local/bin/pmserver
-  ln -sf "$PREFIX/bin/pmctl" /usr/local/bin/pmctl
-  ln -sf "$PREFIX/bin/pmagent" /usr/local/bin/pmagent
-  ok "pmserver, pmctl, pmagent → $PREFIX/bin (version $VERSION)"
+  for b in pmserver pmctl pmagent; do cp "$PREBUILT/$b" "$STAGE/$b"; done
+  AGENT_VER=$(cat "$SRC/AGENT_VERSION" 2>/dev/null || "$STAGE/pmagent" version)
 else
+  need_go=1
+  for g in go /usr/local/go/bin/go; do
+    [ $need_go = 1 ] && command -v "$g" >/dev/null || continue
+    have=$("$g" env GOVERSION | sed 's/^go//')
+    if [ "$(printf '%s\n%s\n' "1.27.1" "$have" | sort -V | head -1)" = "1.27.1" ]; then need_go=0; GO=$g; ok "Go $have already installed"; fi
+  done
+  if [ $need_go = 1 ]; then
+    tgz="go${GO_VERSION}.linux-${GOARCH}.tar.gz"
+    echo "  downloading $tgz from go.dev …"
+    # The JSON is pretty-printed: flatten it, then split per file object.
+    sha=$(curl -fsSL "https://go.dev/dl/?mode=json&include=all" | tr -d '\n ' | tr '{' '\n' | grep "\"filename\":\"$tgz\"" | grep -o '"sha256":"[0-9a-f]*"' | cut -d'"' -f4 | head -1 || true)
+    [ -n "$sha" ] || die "could not find the published checksum for $tgz"
+    tmp=$(mktemp -d)
+    curl -fsSL -o "$tmp/$tgz" "https://go.dev/dl/$tgz"
+    echo "$sha  $tmp/$tgz" | sha256sum -c --quiet - || die "Go download failed its SHA-256 check"
+    rm -rf /usr/local/go && tar -C /usr/local -xzf "$tmp/$tgz" && rm -rf "$tmp"
+    GO=/usr/local/go/bin/go
+    ok "installed Go $GO_VERSION (SHA-256 verified)"
+  fi
+  step "Building offpatch"
+  VERSION=$(cd "$SRC" && git describe --tags --always 2>/dev/null || echo dev)
+  AGENT_VER=$(cat "$SRC/AGENT_VERSION" 2>/dev/null || sed -n 's/^var Version = "\(.*\)"$/\1/p' "$SRC/internal/agent/agent.go" | head -n 1)
+  AGENT_VER=${AGENT_VER:-0.0.0-dev}
+  export GOFLAGS=-trimpath CGO_ENABLED=0
+  ( cd "$SRC"
+    $GO build -ldflags "-s -w -X offpatch/internal/agent.Version=$AGENT_VER -X offpatch/internal/server.Version=$VERSION" -o "$STAGE/pmserver" ./cmd/pmserver
+    $GO build -ldflags "-s -w" -o "$STAGE/pmctl" ./cmd/pmctl
+    $GO build -ldflags "-s -w -X offpatch/internal/agent.Version=$AGENT_VER" -o "$STAGE/pmagent" ./cmd/pmagent )
+fi
 
-need_go=1
-if command -v go >/dev/null; then
-  have=$(go env GOVERSION | sed 's/^go//')
-  if [ "$(printf '%s\n%s\n' "1.27.1" "$have" | sort -V | head -1)" = "1.27.1" ]; then need_go=0; GO=go; ok "Go $have already installed"; fi
-fi
-if [ $need_go = 1 ] && [ -x /usr/local/go/bin/go ]; then
-  have=$(/usr/local/go/bin/go env GOVERSION | sed 's/^go//')
-  if [ "$(printf '%s\n%s\n' "1.27.1" "$have" | sort -V | head -1)" = "1.27.1" ]; then need_go=0; GO=/usr/local/go/bin/go; ok "Go $have already installed"; fi
-fi
-if [ $need_go = 1 ]; then
-  tgz="go${GO_VERSION}.linux-${GOARCH}.tar.gz"
-  echo "  downloading $tgz from go.dev …"
-  # The JSON is pretty-printed: flatten it, then split per file object.
-  sha=$(curl -fsSL "https://go.dev/dl/?mode=json&include=all" | tr -d '\n ' | tr '{' '\n' | grep "\"filename\":\"$tgz\"" | grep -o '"sha256":"[0-9a-f]*"' | cut -d'"' -f4 | head -1 || true)
-  [ -n "$sha" ] || die "could not find the published checksum for $tgz"
-  tmp=$(mktemp -d)
-  curl -fsSL -o "$tmp/$tgz" "https://go.dev/dl/$tgz"
-  echo "$sha  $tmp/$tgz" | sha256sum -c --quiet - || die "Go download failed its SHA-256 check"
-  rm -rf /usr/local/go && tar -C /usr/local -xzf "$tmp/$tgz" && rm -rf "$tmp"
-  GO=/usr/local/go/bin/go
-  ok "installed Go $GO_VERSION (SHA-256 verified)"
-fi
-
-# ---------------------------------------------------------------- build
-step "Building offpatch"
+# Never downgrade a local agent that has self-upgraded past this release.
+ver_gt() { [[ "${1#v}" =~ ^[0-9]+(\.[0-9]+)*$ && "${2#v}" =~ ^[0-9]+(\.[0-9]+)*$ ]] && [ "${1#v}" != "${2#v}" ] \
+           && [ "$(printf '%s\n%s\n' "${1#v}" "${2#v}" | sort -V | tail -n 1)" = "${1#v}" ]; }
+AGENT_UPGRADED=0
 mkdir -p "$PREFIX/bin"
-VERSION=$(cd "$SRC" && git describe --tags --always 2>/dev/null || echo dev)
-export GOFLAGS=-trimpath CGO_ENABLED=0
-( cd "$SRC"
-  $GO build -ldflags "-s -w -X offpatch/internal/agent.Version=0.1.0 -X offpatch/internal/server.Version=$VERSION" -o "$PREFIX/bin/pmserver" ./cmd/pmserver
-  $GO build -ldflags "-s -w" -o "$PREFIX/bin/pmctl" ./cmd/pmctl
-  $GO build -ldflags "-s -w -X offpatch/internal/agent.Version=0.1.0" -o "$PREFIX/bin/pmagent" ./cmd/pmagent )
-ln -sf "$PREFIX/bin/pmserver" /usr/local/bin/pmserver
-ln -sf "$PREFIX/bin/pmctl" /usr/local/bin/pmctl
-ln -sf "$PREFIX/bin/pmagent" /usr/local/bin/pmagent
-ok "pmserver, pmctl, pmagent → $PREFIX/bin (version $VERSION)"
-fi
+for b in pmserver pmctl pmagent; do
+  if [ $b = pmagent ] && [ -x "$PREFIX/bin/pmagent" ]; then
+    old_ver=$("$PREFIX/bin/pmagent" version 2>/dev/null || true)
+    if ver_gt "$old_ver" "$AGENT_VER"; then warn "keeping the local pmagent $old_ver (newer than this release's $AGENT_VER)"; continue; fi
+    cmp -s "$STAGE/pmagent" "$PREFIX/bin/pmagent" || AGENT_UPGRADED=1
+  fi
+  install -m 0755 "$STAGE/$b" "$PREFIX/bin/$b"
+  ln -sf "$PREFIX/bin/$b" "/usr/local/bin/$b"
+done
+ok "pmserver, pmctl, pmagent → $PREFIX/bin (version $VERSION, agent $AGENT_VER)"
 
-id "$SVC_USER" >/dev/null 2>&1 || useradd --system --home "$SRV_DATA" --shell /usr/sbin/nologin "$SVC_USER"
-install -d -m 0750 -o root -g "$SVC_USER" "$ETC"
+# ---------------------------------------------------------------- configuration directory
+# server: group offpatch; acquisition: group offpatch-acq; lab (all): the shared group, so
+# both service users can reach their own files (each file below is restricted further).
+case "$ROLE" in
+  server) ETC_GROUP=$SVC_USER ;;
+  acquisition) ETC_GROUP=$ACQ_USER ;;
+  all) ETC_GROUP=$XFER_GROUP ;;
+  agent) ETC_GROUP=root ;;
+esac
+if [ "$ROLE" = agent ]; then
+  [ -d "$ETC" ] || install -d -m 0755 -o root -g root "$ETC"
+else
+  install -d -m 0750 -o root -g "$ETC_GROUP" "$ETC"
+fi
 
 SCHEME=https; [ $INSECURE = 1 ] && SCHEME=http
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 HOSTS=$(printf '%s\n' "$(hostname)" localhost 127.0.0.1 "$IP" "$EXTRA_HOSTS" | tr ',' '\n' | awk 'NF && !seen[$0]++' | paste -sd, -)
-URL_LOCAL="$SCHEME://127.0.0.1:$PORT"
+case "$LISTEN_HOST" in ""|0.0.0.0|"::"|"[::]") LOCAL_HOST=127.0.0.1 ;; *) LOCAL_HOST=$LISTEN_HOST ;; esac
+URL_LOCAL="$SCHEME://$LOCAL_HOST:$PORT"
 URL_PUBLIC="$SCHEME://${IP:-$(hostname)}:$PORT"
 
 # ---------------------------------------------------------------- keys
-if [ "$ROLE" = all ] || [ "$ROLE" = acquisition ] || [ "$ROLE" = server ]; then
+install_pub() { # source-file name
+  local dst="$ETC/keys/$2"
+  if [ -f "$dst" ]; then
+    if [ -n "$1" ] && ! cmp -s "$1" "$dst"; then
+      warn "keeping existing $dst (differs from $1): the installer never replaces a trusted key. Rotate with a signed trust document (runbook 03)"
+    else
+      ok "keeping $dst"
+    fi
+  elif [ -n "$1" ]; then
+    install -m 0644 -o root -g root "$1" "$dst" && ok "installed $dst"
+  fi
+}
+keygen() { ( cd "$ETC/keys" && "$PREFIX/bin/pmctl" keygen -out "$1" | sed 's/^/      /' ); }
+
+if [ "$ROLE" != agent ]; then
   step "Signing keys"
-  install -d -m 0750 -o root -g "$SVC_USER" "$ETC/keys"
-  if [ ! -f "$ETC/keys/bundle.key" ]; then
-    ( cd "$ETC/keys" && "$PREFIX/bin/pmctl" keygen -out bundle >/dev/null && "$PREFIX/bin/pmctl" keygen -out root >/dev/null )
-    ok "created bundle signing key and root key in $ETC/keys"
-  else
-    ok "keeping existing keys in $ETC/keys"
-  fi
-  chown root:"$SVC_USER" "$ETC/keys"/*; chmod 0640 "$ETC/keys"/*.key; chmod 0644 "$ETC/keys"/*.pub
-  # Only `pmctl trust` needs the root key; no service may read it.
-  chown root:root "$ETC/keys/root.key"; chmod 0600 "$ETC/keys/root.key"
-  if [ "$ROLE" = server ]; then
-    warn "role=server: replace $ETC/keys/bundle.pub and root.pub with the PUBLIC keys from your acquisition host, then restart"
-  fi
-  if [ "$ROLE" = all ]; then
-    warn "lab: the root key lives on this box. In production keep root.key OFFLINE (USB in a safe / HSM)"
-  fi
+  install -d -m 0750 -o root -g "$ETC_GROUP" "$ETC/keys"
+  case "$ROLE" in
+    server)
+      install_pub "$PUBKEY_IN" bundle.pub
+      install_pub "$ROOTPUB_IN" root.pub
+      if [ ! -f "$ETC/keys/root.pub" ]; then
+        warn "no root.pub: signed key rotation/revocation is disabled. Strongly recommended: generate the root key offline (runbook 02 A2) and re-run with --root-pubkey root.pub"
+      elif [ $SERVER_CONFIGURED = 1 ] && [ -z "$(cfg_get root_public_key_file)" ]; then
+        warn "$ETC/pmserver.json does not use root.pub yet: add  \"root_public_key_file\": \"$ETC/keys/root.pub\",  and restart offpatch-server"
+      fi
+      ;;
+    acquisition)
+      if [ ! -f "$ETC/keys/bundle.key" ]; then keygen bundle; ok "created the bundle signing key in $ETC/keys"; else ok "keeping $ETC/keys/bundle.key"; fi
+      [ -f "$ETC/keys/root.key" ] && banner "$ETC/keys/root.key is on an internet-connected host. Move it to offline custody" \
+                                           "(encrypted media in a safe / HSM) and shred it here: sudo shred -u $ETC/keys/root.key"
+      ;;
+    all)
+      if [ ! -f "$ETC/keys/bundle.key" ]; then keygen bundle; ok "created the bundle signing key"; fi
+      if [ ! -f "$ETC/keys/root.key" ] && [ ! -f "$ETC/keys/root.pub" ]; then keygen root; ok "created the root key (lab only)"; fi
+      ok "keys in $ETC/keys"
+      warn "lab: the root key lives on this box. In production generate it offline and never put root.key on a server or acquisition host"
+      ;;
+  esac
+  # Public keys: world-readable. Signing keys: only the acquisition user. Root key: root only
+  # (only `pmctl trust` uses it; no service may read it).
+  for f in "$ETC/keys"/*.pub; do [ -e "$f" ] && { chown root:root "$f"; chmod 0644 "$f"; }; done
+  for f in "$ETC/keys"/*.key; do
+    [ -e "$f" ] || continue
+    if [ "$(basename "$f")" = root.key ]; then chown root:root "$f"; chmod 0600 "$f"
+    else chown root:"$ACQ_USER" "$f"; chmod 0640 "$f"; fi
+  done
 fi
 
 # ---------------------------------------------------------------- server
-start_server() {
-  if [ $HAVE_SYSTEMD = 1 ]; then
-    cat > /etc/systemd/system/offpatch-server.service <<EOF
+write_server_unit() {
+  local caps rw="$SRV_DATA -$ETC/pki"
+  if [ "$PORT" -lt 1024 ]; then caps=$'CapabilityBoundingSet=CAP_NET_BIND_SERVICE\nAmbientCapabilities=CAP_NET_BIND_SERVICE'
+  else caps='CapabilityBoundingSet='; fi
+  case "$AUDIT_DIR" in ""|"$SRV_DATA"/*) ;; *) rw="$rw -$AUDIT_DIR" ;; esac
+  cat > /etc/systemd/system/offpatch-server.service <<EOF
 [Unit]
 Description=offpatch management server
 After=network-online.target
@@ -238,6 +492,7 @@ Wants=network-online.target
 [Service]
 User=$SVC_USER
 Group=$SVC_USER
+SupplementaryGroups=$XFER_GROUP
 ExecStart=$PREFIX/bin/pmserver -config $ETC/pmserver.json
 Restart=on-failure
 RestartSec=5
@@ -245,93 +500,262 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=$SRV_DATA $ETC/pki
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-UMask=0027
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+# Remove if scan_command runs a scanner that needs a JIT (W+X memory).
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+$caps
+ReadWritePaths=$rw
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
 EOF
+}
+
+start_server() {
+  if [ $HAVE_SYSTEMD = 1 ]; then
+    write_server_unit
     systemctl daemon-reload
     systemctl enable offpatch-server >/dev/null 2>&1
     systemctl restart offpatch-server
   else
     pkill -f "$PREFIX/bin/pmserver" 2>/dev/null || true
+    [ -f "$SRV_DATA/pmserver.log" ] || install -m 0640 -o "$SVC_USER" -g "$SVC_USER" /dev/null "$SRV_DATA/pmserver.log"
     runuser -u "$SVC_USER" -- nohup "$PREFIX/bin/pmserver" -config "$ETC/pmserver.json" >> "$SRV_DATA/pmserver.log" 2>&1 &
   fi
 }
 
+same_fs() { [ "$(stat -c %d "$1")" = "$(stat -c %d "$2")" ]; }
+
+install_backup() {
+  install -d -m 0700 -o "$SVC_USER" -g "$SVC_USER" "$BACKUP_DIR"
+  cat > "$PREFIX/bin/offpatch-backup" <<'EOF'
+#!/bin/sh
+# Scheduled offpatch server backup (written by install-ubuntu.sh; runs as the server user).
+# pmserver backup + verify-backup into a new timestamped directory, then keeps the newest @KEEP@.
+set -eu
+DIR=@BACKUP_DIR@
+dest="$DIR/$(date -u +%Y%m%dT%H%M%SZ)"
+need=$(du -sk --exclude=inbox @SRV_DATA@ 2>/dev/null | awk '{print $1}')
+avail=$(df -Pk "$DIR" | awk 'NR==2 {print $4}')
+if [ -n "$need" ] && [ -n "$avail" ] && [ "$avail" -lt "$need" ]; then
+  echo "offpatch-backup: not enough space in $DIR (need ~${need} KiB, ${avail} KiB free)" >&2
+  exit 1
+fi
+if ! @PREFIX@/bin/pmserver backup -config @CONFIG@ -dir "$dest" || ! @PREFIX@/bin/pmserver verify-backup -dir "$dest"; then
+  echo "offpatch-backup: backup or verification FAILED; removing the incomplete $dest" >&2
+  rm -rf -- "$dest"
+  exit 1
+fi
+printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$dest" > "$DIR/last-success"
+find "$DIR" -maxdepth 1 -type d -name '[0-9]*T*Z' | sort -r | tail -n +$((@KEEP@ + 1)) | while IFS= read -r old; do
+  rm -rf -- "$old" && echo "offpatch-backup: pruned $old"
+done
+EOF
+  sed -i -e "s|@BACKUP_DIR@|$BACKUP_DIR|g" -e "s|@SRV_DATA@|$SRV_DATA|g" -e "s|@PREFIX@|$PREFIX|g" \
+         -e "s|@CONFIG@|$ETC/pmserver.json|g" -e "s|@KEEP@|$BACKUP_KEEP|g" "$PREFIX/bin/offpatch-backup"
+  chmod 0755 "$PREFIX/bin/offpatch-backup"
+  if [ $HAVE_SYSTEMD = 0 ]; then
+    warn "no systemd: schedule daily backups from cron:  runuser -u $SVC_USER -- $PREFIX/bin/offpatch-backup"
+    return 0
+  fi
+  cat > /etc/systemd/system/offpatch-backup.service <<EOF
+[Unit]
+Description=offpatch server backup (pmserver backup + verify-backup, keep newest $BACKUP_KEEP)
+After=offpatch-server.service
+OnFailure=offpatch-backup-failed.service
+
+[Service]
+Type=oneshot
+User=$SVC_USER
+Group=$SVC_USER
+SupplementaryGroups=$XFER_GROUP
+ExecStart=$PREFIX/bin/offpatch-backup
+TimeoutStartSec=6h
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=$SRV_DATA $BACKUP_DIR
+UMask=0077
+EOF
+  cat > /etc/systemd/system/offpatch-backup-failed.service <<EOF
+[Unit]
+Description=Record a failed offpatch backup
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/logger -p daemon.err -t offpatch-backup "offpatch-backup.service FAILED: no new verified backup. Check: journalctl -u offpatch-backup"
+ExecStart=/bin/sh -c 'date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ > $BACKUP_DIR/last-failure'
+EOF
+  cat > /etc/systemd/system/offpatch-backup.timer <<EOF
+[Unit]
+Description=Daily offpatch server backup
+
+[Timer]
+OnCalendar=*-*-* 02:30
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now offpatch-backup.timer >/dev/null 2>&1
+  ok "daily verified backup at 02:30 → $BACKUP_DIR (keeps $BACKUP_KEEP; failures logged as offpatch-backup errors)"
+  if same_fs "$BACKUP_DIR" "$SRV_DATA"; then
+    warn "backups are on the same filesystem as the data: copy $BACKUP_DIR off the machine (encrypted; it holds the CA key), or use --backup-dir on other storage"
+  fi
+}
+
 CURL_CA=()
-if [ "$ROLE" = all ] || [ "$ROLE" = server ]; then
+NEW_TOKEN=""
+if [ $IS_SERVER = 1 ]; then
   step "Management server"
-  install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$SRV_DATA" "$SRV_DATA/inbox" "$SRV_DATA/agent-dist" "$SRV_DATA/audit-export"
-  chmod 0770 "$SRV_DATA/inbox"   # the local acquisition job (group offpatch) drops bundles here
+  install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$SRV_DATA" "$SRV_DATA/inbox" "$SRV_DATA/agent-dist"
   if [ $INSECURE = 0 ] && [ ! -f "$ETC/pki/ca.pem" ]; then
     "$PREFIX/bin/pmserver" init-pki -dir "$ETC/pki" -hosts "$HOSTS" >/dev/null
     ok "created internal CA and server certificate for: $HOSTS"
+  elif [ -n "$EXTRA_HOSTS" ] && [ -f "$ETC/pki/ca.pem" ]; then
+    ok "keeping the existing server certificate (--hosts applies to the first install; to change names: sudo -u $SVC_USER $PREFIX/bin/pmserver reissue-server-cert -dir $ETC/pki -hosts ...)"
   fi
   [ -d "$ETC/pki" ] && { chown -R "$SVC_USER":"$SVC_USER" "$ETC/pki"; chmod 0700 "$ETC/pki"; chmod 0644 "$ETC/pki/ca.pem"; }
-  if [ ! -f "$ETC/admin-token.txt" ]; then
+
+  # Break-glass admin token: only its SHA-256 is stored. Production roles show the token once;
+  # the lab keeps it in a root-only file so --with-agent and re-runs can use it.
+  if [ ! -f "$ETC/admin-token.sha256" ]; then
     out=$("$PREFIX/bin/pmserver" new-token)
     tok=$(echo "$out" | awk '/^token:/{print $2}'); sha=$(echo "$out" | awk '/^token_sha256:/{print $2}')
-    printf '%s\n' "$tok" > "$ETC/admin-token.txt"; chmod 0600 "$ETC/admin-token.txt"
-    printf '%s\n' "$sha" > "$ETC/admin-token.sha256"
-    ok "created break-glass admin token → $ETC/admin-token.txt"
+    [ -n "$tok" ] && [ -n "$sha" ] || die "pmserver new-token returned no token"
+    ( umask 077; printf '%s\n' "$sha" > "$ETC/admin-token.sha256" )
+    if [ "$ROLE" = all ]; then
+      ( umask 077; printf '%s\n' "$tok" > "$ETC/admin-token.txt" )
+      ok "created break-glass admin token → $ETC/admin-token.txt (root only, 0600; lab)"
+    else
+      NEW_TOKEN=$tok
+      banner "Break-glass admin token (shown ONCE, not stored on this machine):" "" "  $tok" "" \
+             "Put it in the safe now. Lost it? pmserver new-token, replace token_sha256 in" "$ETC/pmserver.json and restart offpatch-server."
+    fi
   fi
+  if [ -f "$ETC/admin-token.txt" ]; then
+    chown root:root "$ETC/admin-token.txt"; chmod 0600 "$ETC/admin-token.txt"
+    if [ "$ROLE" = all ]; then ok "lab: break-glass token kept in $ETC/admin-token.txt (root only, 0600)"
+    else warn "$ETC/admin-token.txt holds the break-glass token in clear text. Move it to the safe, then: sudo shred -u $ETC/admin-token.txt"; fi
+  fi
+  chown root:root "$ETC/admin-token.sha256"; chmod 0600 "$ETC/admin-token.sha256"
   sha=$(cat "$ETC/admin-token.sha256")
-  if [ ! -f "$ETC/pmserver.json" ]; then
+
+  if [ -z "$AUDIT_DIR" ]; then
+    warn "audit_export_dir is not set in $ETC/pmserver.json: audit evidence lives only in the database"
+  elif [ ! -d "$AUDIT_DIR" ]; then install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$AUDIT_DIR"
+  elif ! runuser -u "$SVC_USER" -- test -w "$AUDIT_DIR"; then warn "$AUDIT_DIR is not writable by $SVC_USER: audit export will fail"; fi
+  if [ -n "$AUDIT_DIR" ] && same_fs "$AUDIT_DIR" "$SRV_DATA"; then
+    banner "audit_export_dir ($AUDIT_DIR) is on the SAME filesystem as the data ($SRV_DATA)." \
+           "Off-box audit evidence must survive loss or tampering of this server: use a WORM" \
+           "share or a separately replicated mount (--audit-dir on first install; runbook 01 step 9)."
+  fi
+
+  if [ $SERVER_CONFIGURED = 0 ]; then
     if [ $INSECURE = 1 ]; then tlsline='"insecure_http": true,'; else tlsline="\"pki_dir\": \"$ETC/pki\","; fi
+    rootline=""; [ -f "$ETC/keys/root.pub" ] && rootline=$'\n'"  \"root_public_key_file\": \"$ETC/keys/root.pub\","
     cat > "$ETC/pmserver.json" <<EOF
 {
   "listen": "0.0.0.0:$PORT",
   $tlsline
   "data_dir": "$SRV_DATA",
-  "trusted_keys": [{"public_key_file": "$ETC/keys/bundle.pub", "sources": ["acq-zone-1"]}],
-  "root_public_key_file": "$ETC/keys/root.pub",
+  "trusted_keys": [{"public_key_file": "$ETC/keys/bundle.pub", "sources": ["acq-zone-1"]}],${rootline}
   "admin_tokens": [{"user": "admin", "role": "admin", "token_sha256": "$sha"}],
-  "audit_export_dir": "$SRV_DATA/audit-export",
+  "audit_export_dir": "$AUDIT_DIR",
   "audit_checkpoint_interval": "1h",
   "intake_interval": "5s",
   "checkin_interval_seconds": 60
 }
 EOF
-    chown root:"$SVC_USER" "$ETC/pmserver.json"; chmod 0640 "$ETC/pmserver.json"
     ok "wrote $ETC/pmserver.json"
   else
-    ok "keeping existing $ETC/pmserver.json"
+    ok "keeping existing $ETC/pmserver.json (listen port $PORT, $SCHEME)"
   fi
+  chown root:"$SVC_USER" "$ETC/pmserver.json"; chmod 0640 "$ETC/pmserver.json"
+
   # Offer agent binaries for download in the console (Agent setup page and the
   # one-command Windows install).
   if [ $MODE = prebuilt ]; then
     cp -f "$SRC/bin/agent-dist/"* "$SRV_DATA/agent-dist/" || die "bin/agent-dist missing from the release folder"
-    ok "agent binaries staged for the console's Agent setup page"
+    ok "agent binaries ($AGENT_VER) staged for the console's Agent setup page"
   else
     ( cd "$SRC" && for t in windows/amd64:pmagent.exe linux/amd64:pmagent-linux-amd64 linux/arm64:pmagent-linux-arm64 darwin/arm64:pmagent-macos-arm64; do
         os=${t%%/*}; rest=${t#*/}; arch=${rest%%:*}; name=${rest#*:}
-        GOOS=$os GOARCH=$arch $GO build -ldflags "-s -w -X offpatch/internal/agent.Version=0.1.0" -o "$SRV_DATA/agent-dist/$name" ./cmd/pmagent || exit 1
-      done ) && ok "agent binaries for Windows, Linux and macOS staged for the console's Agent setup page"
+        GOOS=$os GOARCH=$arch $GO build -ldflags "-s -w -X offpatch/internal/agent.Version=$AGENT_VER" -o "$SRV_DATA/agent-dist/$name" ./cmd/pmagent || exit 1
+      done ) && ok "agent binaries ($AGENT_VER) for Windows, Linux and macOS staged for the console's Agent setup page"
   fi
-  chown -R "$SVC_USER":"$SVC_USER" "$SRV_DATA"; chmod 0770 "$SRV_DATA/inbox"
+  chown -R "$SVC_USER":"$SVC_USER" "$SRV_DATA"
+  # Inbox: whoever delivers bundles (the transfer receiver, or the lab's acquisition user) must be
+  # in group offpatch-inbox. setgid keeps dropped files readable by the server via that group.
+  chgrp "$XFER_GROUP" "$SRV_DATA" "$SRV_DATA/inbox"
+  chmod 0710 "$SRV_DATA"; chmod 2770 "$SRV_DATA/inbox"
   start_server
   [ $INSECURE = 0 ] && CURL_CA=(--cacert "$ETC/pki/ca.pem")
-  for i in $(seq 1 30); do
-    curl -fs -o /dev/null "${CURL_CA[@]}" "$URL_LOCAL/" && break
+  for _ in $(seq 1 30); do
+    curl -fs -o /dev/null ${CURL_CA[@]+"${CURL_CA[@]}"} "$URL_LOCAL/" && break
     sleep 1
   done
-  curl -fs -o /dev/null "${CURL_CA[@]}" "$URL_LOCAL/" || die "server did not start; check: journalctl -u offpatch-server (or $SRV_DATA/pmserver.log)"
+  curl -fs -o /dev/null ${CURL_CA[@]+"${CURL_CA[@]}"} "$URL_LOCAL/" || die "server did not start; check: journalctl -u offpatch-server (or $SRV_DATA/pmserver.log)"
   echo "$URL_PUBLIC" > "$ETC/console-url.txt"
   ok "server running at $URL_PUBLIC"
+  install_backup
   if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
-    ufw allow "$PORT"/tcp >/dev/null && ok "opened port $PORT in ufw"
+    if [ ${#ALLOW_FROM[@]} -gt 0 ]; then
+      for c in "${ALLOW_FROM[@]}"; do ufw allow proto tcp from "$c" to any port "$PORT" >/dev/null && ok "ufw: port $PORT open from $c"; done
+      if ufw status | grep -Eq "^$PORT/tcp( \(v6\))? +ALLOW +Anywhere"; then
+        ufw delete allow "$PORT/tcp" >/dev/null && ok "ufw: removed the earlier open-to-anywhere rule for $PORT/tcp"
+      fi
+    else
+      ufw allow "$PORT"/tcp >/dev/null && warn "ufw: port $PORT open to ANY source. Restrict it: re-run with --allow-from <endpoint/admin CIDR> (repeatable)"
+    fi
+  else
+    warn "ufw is not active: restrict port $PORT to endpoint and admin networks in your firewall"
   fi
 fi
 
 # ---------------------------------------------------------------- acquisition (connected zone)
-if [ "$ROLE" = all ] || [ "$ROLE" = acquisition ]; then
-  step "Acquisition (pmctl auto)"
-  install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$ACQ_DATA"
-  DROP="$SRV_DATA/inbox"
-  [ "$ROLE" = acquisition ] && { DROP="$ACQ_DATA/outbox"; install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$DROP"; }
+if [ $IS_ACQ = 1 ]; then
+  step "Acquisition (pmctl auto, user $ACQ_USER)"
+  if [ -d "$ACQ_DATA" ] && [ "$(stat -c %U "$ACQ_DATA")" != "$ACQ_USER" ]; then
+    warn "moving acquisition from user $(stat -c %U "$ACQ_DATA") to its own user $ACQ_USER"
+    if [ $HAVE_SYSTEMD = 1 ] && systemctl is-active --quiet offpatch-acquire.service; then
+      warn "an acquisition run is in progress; stopping it (the next timer run starts over)"
+      systemctl stop offpatch-acquire.service
+    fi
+  fi
+  install -d -m 0750 -o "$ACQ_USER" -g "$ACQ_USER" "$ACQ_DATA"
+  chown -R "$ACQ_USER":"$ACQ_USER" "$ACQ_DATA"
+  if [ "$ROLE" = all ]; then
+    DROP="$SRV_DATA/inbox"
+  else
+    DROP="$ACQ_DATA/outbox"; install -d -m 0750 -o "$ACQ_USER" -g "$ACQ_USER" "$DROP"
+  fi
   if [ ! -f "$ETC/acquire.json" ]; then
     cat > "$ETC/acquire.json" <<EOF
 {
@@ -353,7 +777,6 @@ if [ "$ROLE" = all ] || [ "$ROLE" = acquisition ]; then
   "apps": []
 }
 EOF
-    chown root:"$SVC_USER" "$ETC/acquire.json"; chmod 0640 "$ETC/acquire.json"
     ok "wrote $ETC/acquire.json (Windows 11 24H2 critical updates; apps come from the console's acquisition requests) — edit it for your fleet"
   else
     ok "keeping existing $ETC/acquire.json"
@@ -387,9 +810,11 @@ PY
       fi
     fi
   fi
+  chown root:"$ACQ_USER" "$ETC/acquire.json"; chmod 0640 "$ETC/acquire.json"
   # Acquisition requests exported from the console's Updates page go here.
-  install -d -m 0770 -o "$SVC_USER" -g "$SVC_USER" "$ACQ_DATA/requests"
+  install -d -m 0770 -o "$ACQ_USER" -g "$ACQ_USER" "$ACQ_DATA/requests"
   if [ $HAVE_SYSTEMD = 1 ]; then
+    groups_line=""; [ "$ROLE" = all ] && groups_line="SupplementaryGroups=$XFER_GROUP"
     cat > /etc/systemd/system/offpatch-acquire.service <<EOF
 [Unit]
 Description=offpatch unattended patch acquisition
@@ -398,7 +823,9 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-User=$SVC_USER
+User=$ACQ_USER
+Group=$ACQ_USER
+$groups_line
 ExecStart=$PREFIX/bin/pmctl auto -config $ETC/acquire.json
 SuccessExitStatus=2
 TimeoutStartSec=4h
@@ -406,7 +833,15 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
 ReadWritePaths=$ACQ_DATA $DROP
+UMask=0027
 EOF
     cat > /etc/systemd/system/offpatch-acquire.timer <<EOF
 [Unit]
@@ -422,20 +857,19 @@ WantedBy=timers.target
 EOF
     systemctl daemon-reload
     systemctl enable --now offpatch-acquire.timer >/dev/null 2>&1
-    ok "daily acquisition at 07:00 (systemd timer offpatch-acquire.timer)"
+    ok "daily acquisition at 07:00 as $ACQ_USER (systemd timer offpatch-acquire.timer)"
     # First update-intelligence run now, so the console's Updates page fills
     # immediately (needs internet; harmless if it fails — the timer retries).
     if [ "$ROLE" = all ]; then
-      if out=$(cd "$ACQ_DATA" && runuser -u "$SVC_USER" -- "$PREFIX/bin/pmctl" intel -key "$ETC/keys/bundle.key" -out "$ACQ_DATA/intel" -to "$DROP" 2>&1); then
+      if out=$(cd "$ACQ_DATA" && runuser -u "$ACQ_USER" -- "$PREFIX/bin/pmctl" intel -key "$ETC/keys/bundle.key" -out "$ACQ_DATA/intel" -to "$DROP" 2>&1); then
         ok "update intelligence sent (newest Windows updates and app versions)"
       else
         warn "update intelligence not collected now; the daily run will retry. Reason:"
-        printf '%s
-' "$out" | tail -n 3 | sed 's/^/      /'
+        printf '%s\n' "$out" | tail -n 3 | sed 's/^/      /'
       fi
     fi
   else
-    warn "no systemd: run acquisition manually or from cron: $PREFIX/bin/pmctl auto -config $ETC/acquire.json"
+    warn "no systemd: run acquisition from cron as $ACQ_USER: $PREFIX/bin/pmctl auto -config $ETC/acquire.json >> /var/log/offpatch-acquire.log 2>&1"
   fi
   [ "$ROLE" = acquisition ] && warn "role=acquisition: bundles are written to $DROP — point send.to / send.command at your transfer gateway"
 fi
@@ -458,9 +892,8 @@ start_agent() {
 
 if [ "$ROLE" = agent ]; then
   step "Endpoint agent"
-  [ -n "$AGENT_SERVER" ] && [ -n "$AGENT_TOKEN" ] && [ -n "$AGENT_PUB" ] || die "--role agent needs --server, --token and --pubkey (and --ca for https)"
   if [ ! -f "$AGENT_STATE/agent.json" ]; then
-    enroll_agent "$AGENT_SERVER" "$AGENT_TOKEN" "$AGENT_CA" "$AGENT_PUB" "$AGENT_ROOT"
+    enroll_agent "$AGENT_SERVER" "$AGENT_TOKEN" "$AGENT_CA" "$PUBKEY_IN" "$ROOTPUB_IN"
   else
     ok "already enrolled ($AGENT_STATE/agent.json)"
   fi
@@ -471,12 +904,18 @@ fi
 if [ "$ROLE" = all ] && [ $WITH_AGENT = 1 ]; then
   step "Local agent (this machine as a managed endpoint)"
   if [ ! -f "$AGENT_STATE/agent.json" ]; then
-    tokjson=$(curl -fs "${CURL_CA[@]}" -H "Authorization: Bearer $(cat "$ETC/admin-token.txt")" -H 'Content-Type: application/json' \
-      -X POST "$URL_LOCAL/api/enrollment-tokens" -d '{"groups":["linux","lab"],"site":"lab","expires_in_hours":1}')
+    [ -f "$ETC/admin-token.txt" ] || die "--with-agent needs $ETC/admin-token.txt; or create an enrollment token in the console and use --role agent"
+    # The admin token goes to curl through a 0600 header file, never on a command line.
+    hdr=$(mktemp); chmod 0600 "$hdr"
+    printf 'Authorization: Bearer %s\n' "$(cat "$ETC/admin-token.txt")" > "$hdr"
+    tokjson=$(curl -fs ${CURL_CA[@]+"${CURL_CA[@]}"} -H @"$hdr" -H 'Content-Type: application/json' \
+      -X POST "$URL_LOCAL/api/enrollment-tokens" -d '{"groups":["linux","lab"],"site":"lab","expires_in_hours":1}' || true)
+    rm -f "$hdr"
     etok=$(echo "$tokjson" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
     [ -n "$etok" ] || die "could not create an enrollment token: $tokjson"
     ca=""; [ $INSECURE = 0 ] && ca="$ETC/pki/ca.pem"
-    enroll_agent "$URL_LOCAL" "$etok" "$ca" "$ETC/keys/bundle.pub" "$ETC/keys/root.pub" >/dev/null
+    rootpub=""; [ -f "$ETC/keys/root.pub" ] && rootpub="$ETC/keys/root.pub"
+    enroll_agent "$URL_LOCAL" "$etok" "$ca" "$ETC/keys/bundle.pub" "$rootpub" >/dev/null
     ok "enrolled this machine (groups: linux, lab)"
   else
     ok "already enrolled"
@@ -485,13 +924,60 @@ if [ "$ROLE" = all ] && [ $WITH_AGENT = 1 ]; then
   ok "agent running"
 fi
 
+if [ $AGENT_UPGRADED = 1 ] && [ $HAVE_SYSTEMD = 1 ] && systemctl is-active --quiet offpatch-agent; then
+  systemctl restart offpatch-agent && ok "restarted offpatch-agent on $AGENT_VER"
+fi
+
+# ---------------------------------------------------------------- logs without systemd
+if [ $HAVE_SYSTEMD = 0 ] && [ -d /etc/logrotate.d ]; then
+  cat > /etc/logrotate.d/offpatch <<EOF
+$SRV_DATA/pmserver.log {
+  su $SVC_USER $SVC_USER
+  weekly
+  rotate 8
+  compress
+  delaycompress
+  missingok
+  notifempty
+  copytruncate
+}
+/var/log/offpatch-agent.log /var/log/offpatch-acquire.log {
+  weekly
+  rotate 8
+  compress
+  delaycompress
+  missingok
+  notifempty
+  copytruncate
+}
+EOF
+  ok "log rotation: /etc/logrotate.d/offpatch"
+fi
+
+# ---------------------------------------------------------------- remember choices for re-runs
+cat > "$STATE_FILE" <<EOF
+# Written by install-ubuntu.sh; read by re-runs (upgrades).
+ROLE=$ROLE
+VERSION=$VERSION
+AGENT_VERSION=$AGENT_VER
+BACKUP_DIR=$BACKUP_DIR
+BACKUP_KEEP=$BACKUP_KEEP
+ALLOW_FROM=${ALLOW_FROM[*]+"${ALLOW_FROM[*]}"}
+EOF
+chmod 0644 "$STATE_FILE"
+
 # ---------------------------------------------------------------- summary
 step "Done"
-if [ "$ROLE" = all ] || [ "$ROLE" = server ]; then
-  cat <<EOF
-  Console:        $URL_PUBLIC
-  Admin token:    sudo cat $ETC/admin-token.txt   (paste into "Break-glass / automation token")
-EOF
+if [ $IS_SERVER = 1 ]; then
+  echo "  Console:        $URL_PUBLIC"
+  if [ "$ROLE" = all ]; then
+    echo "  Admin token:    sudo cat $ETC/admin-token.txt   (paste into \"Break-glass / automation token\")"
+  elif [ -n "$NEW_TOKEN" ]; then
+    echo "  Admin token:    shown once above; it is not stored on this machine"
+  else
+    echo "  Admin token:    unchanged (kept in your safe)"
+  fi
+  echo "  Backups:        daily → $BACKUP_DIR (keeps $BACKUP_KEEP); copy them off the machine"
   [ $INSECURE = 0 ] && cat <<EOF
   TLS:            the console uses the internal CA $ETC/pki/ca.pem — import it into your browser /
                   OS trust store, or accept the certificate warning once for this lab.
@@ -502,12 +988,24 @@ EOF
                          --ca ca.pem --pubkey bundle.pub --root-pubkey root.pub
                   (copy ca.pem, bundle.pub, root.pub from $ETC/pki and $ETC/keys)
 EOF
+  [ "$ROLE" = server ] && echo "  Inbox:          the transfer receiver delivers into $SRV_DATA/inbox; add its account to group $XFER_GROUP"
   [ $INSECURE = 1 ] && warn "lab mode: plain HTTP and bearer device secrets — never use outside an isolated lab"
 fi
-if [ "$ROLE" = all ] || [ "$ROLE" = acquisition ]; then
-  echo "  Acquisition:    edit $ETC/acquire.json, test with: sudo -u $SVC_USER $PREFIX/bin/pmctl auto -config $ETC/acquire.json -dry-run"
+if [ $IS_ACQ = 1 ]; then
+  echo "  Acquisition:    edit $ETC/acquire.json, test with: sudo -u $ACQ_USER $PREFIX/bin/pmctl auto -config $ETC/acquire.json -dry-run"
+fi
+if [ "$ROLE" = acquisition ]; then
+  cat <<EOF
+  Public key:     carry $ETC/keys/bundle.pub (public only) to the server: --role server --pubkey bundle.pub
+  Root key:       NOT created here. On an offline machine: pmctl keygen -out root; keep root.key offline,
+                  carry root.pub to the server (--root-pubkey) and agents (runbook 02 A2)
+EOF
 fi
 cat <<EOF
   Status:         sudo $0 --status
+  Upgrade:        re-run with the same --role (backup first, previous binaries in $PREFIX/bin.prev)
   Uninstall:      sudo $0 --uninstall   (add --purge to delete keys and data)
 EOF
+if [ "$ROLE" = all ]; then
+  banner "Reminder: --role all is a single-box LAB. Production = separate server and acquisition hosts."
+fi

@@ -28,8 +28,10 @@ RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_BIND_SERVICE
+# No capabilities for the default port 8443. Only for a listen port below 1024, use instead:
+#   CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+#   AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=
 # Writable: data dir (inbox, repository, db), PKI, and the audit export mount.
 ReadWritePaths=/var/lib/offpatch-server /etc/offpatch-server
 # ReadWritePaths=/mnt/audit-worm   # if audit_export_dir is set

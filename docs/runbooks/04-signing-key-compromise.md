@@ -85,7 +85,9 @@ What it does **not** do:
 
 Trust documents cannot be used. Then:
 
-1. Remove the key from `trusted_keys` in `pmserver.json` (add the new key) and restart `pmserver`.
+1. Remove the key from `trusted_keys` in `pmserver.json` (add the new key) and restart the server
+   (`systemctl restart offpatch-server`; manual install: `pmserver`). With the installer layout, the
+   new public key goes into `/etc/offpatch/keys/` by hand; re-runs never replace trusted keys.
 2. An approver revokes each approved package and rejects each quarantined package from the affected
    bundles, with the incident reference as reason. Revocation cancels their deployments.
 3. Re-enroll **every agent** with the new `bundle.pub` and `-root-pubkey root.pub` (runbook 09), and
@@ -140,7 +142,8 @@ Trust documents cannot be used. Then:
 ## Root key compromise
 
 Not handled by the product. The root public key is pinned in `root_public_key_file` and in every
-agent's `agent.json`; a trust document cannot replace it. Recovery: generate a new root key,
+agent's `agent.json`; a trust document cannot replace it. Recovery: generate a new root key
+offline (`pmctl keygen -out root`, runbook 02 A2),
 change `root_public_key_file` (restart the server), and re-enroll every agent with the new
 `-root-pubkey`. Until then, an attacker with the root key can make agents and the server trust any
 bundle key (content would still need approval).

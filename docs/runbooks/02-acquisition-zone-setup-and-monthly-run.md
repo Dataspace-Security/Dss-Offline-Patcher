@@ -29,6 +29,31 @@ These commands run **only in the connected zone**. Nothing here runs in the isol
 
 ## Part A — One-time setup
 
+### A0. Install with the installer (Ubuntu acquisition host)
+
+```bash
+tar xzf offpatch-<version>-linux-amd64.tar.gz && cd offpatch-<version>-linux-amd64
+sudo ./install-ubuntu.sh --role acquisition
+```
+
+| Item | Path |
+|---|---|
+| Bundle signing key (A1, created if missing) | `/etc/offpatch/keys/bundle.key` (root:`offpatch-acq`, 0640), `bundle.pub` |
+| Config | `/etc/offpatch/acquire.json` |
+| Work dir, sequence state, `sent.jsonl`, drop dir | `/var/lib/offpatch-acq`, outbox `/var/lib/offpatch-acq/outbox` |
+| Schedule | `offpatch-acquire.timer` (daily 07:00) runs `pmctl auto` as user `offpatch-acq` |
+
+The installer **never creates a root key** on an acquisition host, and warns if it finds
+`/etc/offpatch/keys/root.key` there. Do A2 on the offline machine. Carry
+`/etc/offpatch/keys/bundle.pub` to the server (`--role server --pubkey bundle.pub`, runbook 01).
+Re-running the same command upgrades and keeps the key, config and state.
+
+`--role all` (single-box lab) is the one exception: it also creates a root key so the lab works,
+and it prints a warning that this layout is not for production.
+
+If you do not use the installer, A1 below creates the key by hand (`packaging/acquisition/` has
+units for `/etc/offpatch-acq`).
+
 ### A1. Bundle signing key
 
 ```bash
@@ -44,10 +69,16 @@ pmctl keygen -out bundle
 
 ### A2. Root key (offline)
 
-On the offline machine (not the acquisition host):
+On the offline machine (never networked; not the acquisition host, not the server), with a `pmctl`
+binary whose hash you checked against the release `SHA256SUMS`:
 
 ```bash
+mkdir -p /media/offline-root && cd /media/offline-root   # encrypted removable media
 pmctl keygen -out root
+# key_id: ed25519:…          → record it in the key ceremony log
+# private: root.key           → stays here; never copy it to a networked machine
+# public:  root.pub           → the only file that leaves
+sha256sum root.pub            # record; compare after carrying it to the server
 ```
 
 - `root.key` signs trust documents only (key rotation and revocation, [runbook 03](03-key-rotation.md)).
@@ -75,8 +106,9 @@ and `pmctl inspect -pub` before relying on it.
 
 ### A4. Install the public keys in the isolated zone
 
-Carry `bundle.pub` and `root.pub` (public keys only) to the server ([runbook 01](01-install-management-server.md))
-and to the agent packaging (MSI `ConfigDir`, Linux `/etc/offpatch/`).
+Carry `bundle.pub` and `root.pub` (public keys only) to the server ([runbook 01](01-install-management-server.md):
+`install-ubuntu.sh --role server --pubkey bundle.pub --root-pubkey root.pub`, which copies them to
+`/etc/offpatch/keys`) and to the agent packaging (MSI `ConfigDir`, Linux `/etc/offpatch/`).
 
 ### A5. (Recommended) First trust document
 
@@ -101,7 +133,7 @@ than the last accepted one (Intake page shows each bundle's sequence).
 
 ## Part B — Monthly run
 
-> **Unattended alternative:** `pmctl auto` performs B1–B6 on a daily schedule, including the send. Set it up once with `packaging/acquisition/` (Task Scheduler or systemd timer) and check `auto-log.jsonl` and the scheduler result each morning. See [docs/08-acquisition.md](../08-acquisition.md#unattended-acquisition-pmctl-auto). The manual steps below remain the procedure for out-of-band patches and troubleshooting.
+> **Unattended alternative:** `pmctl auto` performs B1–B6 on a daily schedule, including the send. Set it up once with the installer (A0, `offpatch-acquire.timer`) or `packaging/acquisition/` (Task Scheduler or systemd timer) and check `auto-log.jsonl` and the scheduler result each morning. See [docs/08-acquisition.md](../08-acquisition.md#unattended-acquisition-pmctl-auto). The manual steps below remain the procedure for out-of-band patches and troubleshooting.
 
 Set a working directory per month, for example `acq/2026-11/`.
 

@@ -25,10 +25,37 @@ and the evidence to keep. Day-to-day console work and troubleshooting are in the
 | `pmctl` | `keygen -out`, `build -key [-pub] -spec -out [-source] [-seq] [-state] [-ttl]`, `inspect -bundle [-pub]`, `send -bundle [-via dropdir\|command] [-to] [-command] [-key] [-pub] [-log]`, `trust -root [-root-pub] -seq -key file.pub=src [-retire file.pub] [-revoke key_id:reason] -out`, `catalog-search -q`, `msrc -month [-product] [-arch]`, `fetch …`, `fetch-url … [-kind msu\|msi\|deb\|rpm\|pkg\|agent] [-package-name] [-os]` |
 | `pmagent` | `enroll -server -token -pubkey [-root-pubkey] [-ca] [-state-dir] [-platform windows\|linux\|macos\|sim]`, `run [-state-dir] [-once]`, `service install\|uninstall [-state-dir]` (Windows SCM, systemd, launchd), `version` |
 
+## Paths by install method
+
+The runbooks use the **installer layout** (`install-ubuntu.sh`, the supported method). If you installed
+by hand from `packaging/server/` or run the container image, substitute the paths from this table.
+
+| Item | `install-ubuntu.sh` (default) | Manual (`packaging/server/pmserver.service`) | Container (`packaging/server/Dockerfile`) |
+|---|---|---|---|
+| Server config | `/etc/offpatch/pmserver.json` | `/etc/offpatch-server/pmserver.json` | `/etc/offpatch-server/pmserver.json` (volume) |
+| PKI (CA, server cert) | `/etc/offpatch/pki` | `/etc/offpatch-server/pki` | `/etc/offpatch-server/pki` |
+| Trusted public keys | `/etc/offpatch/keys/bundle.pub`, `root.pub` | `/etc/offpatch-server/bundle.pub`, `root.pub` | `/etc/offpatch-server/*.pub` |
+| Server data (`data_dir`) | `/var/lib/offpatch-server` | `/var/lib/offpatch-server` | `/var/lib/offpatch-server` (volume) |
+| Audit export (default) | `--audit-dir`, else `/var/lib/offpatch-server/audit-export` | as configured | as configured |
+| Server unit | `offpatch-server.service` | `pmserver.service` | container `pmserver` |
+| Server binary | `/opt/offpatch/bin/pmserver` (`/usr/local/bin/pmserver` symlink) | `/usr/local/bin/pmserver` | `/usr/local/bin/pmserver` |
+| Service users | `offpatch` (server), `offpatch-acq` (acquisition), group `offpatch-inbox` (may write the inbox) | `offpatch` | UID 65532 |
+| Backups | `offpatch-backup.timer` → `/var/lib/offpatch-backup` | your own timer (runbook 05) | host timer + `docker exec` |
+| Acquisition config / keys | `/etc/offpatch/acquire.json`, `/etc/offpatch/keys/bundle.key` | `/etc/offpatch-acq/acquire.json` (`packaging/acquisition/`) | n/a |
+| Acquisition data / timer | `/var/lib/offpatch-acq`, `offpatch-acquire.timer` (user `offpatch-acq`) | same (`packaging/acquisition/`) | n/a |
+| Previous binaries after upgrade | `/opt/offpatch/bin.prev` | keep your own copy | previous image tag |
+
+Restart after a config change: `systemctl restart offpatch-server` (installer), `systemctl restart
+pmserver` (manual), `docker restart pmserver` (container). Logs: `journalctl -u offpatch-server`
+(installer) or `journalctl -u pmserver` (manual).
+
 ## Conventions used in the runbooks
 
-- Server URL `https://pm.corp.internal:8443`; config `/etc/offpatch-server/pmserver.json`; data
-  `/var/lib/offpatch-server`; PKI `/etc/offpatch-server/pki` (as in `packaging/server/`).
+- Server URL `https://pm.corp.internal:8443`; paths from the installer column above.
+- Placeholders in angle brackets (`<metrics_token>`, `<from step 4>`, `adm_…`) and in
+  `packaging/server/pmserver.example.json` (`REPLACE_…`, all-zero `token_sha256`) **must be replaced**
+  before use. Generate secrets with `openssl rand -hex 32`. Check a finished config with
+  `grep -nE 'REPLACE|0{64}|<[a-z_ ]+>' /etc/offpatch/pmserver.json` (must print nothing).
 - `$TOK` is a static admin token with the role the step needs (API calls). The same actions are
   available in the console for SSO users.
 - Every state-changing API call that takes `{"reason": …}` records the reason in the hash-chained

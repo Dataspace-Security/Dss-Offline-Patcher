@@ -90,8 +90,15 @@ If the old key may be **compromised**, use [runbook 04](04-signing-key-compromis
    at the next planned restart, so the config file matches reality:
 
    ```json
-   "trusted_keys": [{"public_key_file": "/etc/offpatch-server/bundle-2027.pub", "sources": ["acq-zone-1"]}]
+   "trusted_keys": [{"public_key_file": "/etc/offpatch/keys/bundle-2027.pub", "sources": ["acq-zone-1"]}]
    ```
+
+   Installer layout shown; copy `bundle-2027.pub` (public only) to `/etc/offpatch/keys/` yourself,
+   because the installer never replaces or adds trusted keys on re-runs, and restart
+   `offpatch-server`. Manual install: `/etc/offpatch-server/bundle-2027.pub`, unit `pmserver`. On an
+   installer-built acquisition host, put `bundle-2027.key` in `/etc/offpatch/keys/` and change `"key"`
+   in `/etc/offpatch/acquire.json`; a re-run of the installer gives it the right owner
+   (root:`offpatch-acq`, 0640).
 
    At start the server re-applies the stored trust document, so intake keeps using the document's
    key set (including the retired key for receipts and history) whatever the config says.
