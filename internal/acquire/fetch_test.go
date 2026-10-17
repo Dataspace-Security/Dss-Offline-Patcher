@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -52,7 +53,7 @@ func TestSpecUpsert(t *testing.T) {
 	if _, ok := got[1]["vendor_signature"]; ok {
 		t.Fatal(`entry must not contain "vendor_signature" (pmctl build fills it)`)
 	}
-	if fi, _ := os.Stat(spec); fi.Mode().Perm() != 0o640 {
+	if fi, _ := os.Stat(spec); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o640 { // no Unix modes on Windows
 		t.Fatalf("mode changed to %v", fi.Mode().Perm())
 	}
 	ents, _ := os.ReadDir(dir)

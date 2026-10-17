@@ -9,7 +9,10 @@ import (
 
 // authenticode asks PowerShell for the file's Authenticode status (Windows
 // acquisition hosts only; elsewhere the caller records "not_checked").
-func authenticode(path string) (status, signer string, err error) {
+// A variable so tests with synthetic payloads can stub it.
+var authenticode = authenticodePS
+
+func authenticodePS(path string) (status, signer string, err error) {
 	script := `$s = Get-AuthenticodeSignature -LiteralPath $env:PM_FILE; ` +
 		`[pscustomobject]@{Status=[string]$s.Status; Signer=[string]$s.SignerCertificate.Subject} | ConvertTo-Json -Compress`
 	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)

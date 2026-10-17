@@ -27,7 +27,7 @@ func (e *env) dropStatus(r acqstatus.Report, key []byte) {
 		e.t.Fatal(err)
 	}
 	b, _ := json.Marshal(s)
-	os.WriteFile(filepath.Join(e.inbox, "acq-"+r.FinishedAt[11:19]+r.Outcome+acqstatus.FileSuffix), b, 0o640)
+	os.WriteFile(filepath.Join(e.inbox, "acq-"+strings.ReplaceAll(r.FinishedAt[11:19], ":", "")+r.Outcome+acqstatus.FileSuffix), b, 0o640)
 	e.intake.ScanOnce(context.Background())
 }
 

@@ -29,10 +29,10 @@ cat > "$DEMO/acq/spec.json" <<'EOF'
   {"package_id":"KB5044273-x64","title":"2026-10 Cumulative Update for Windows 10 22H2 x64","vendor":"Microsoft","kind":"msu",
    "version":"19045.5011","kb":"KB5044273","severity":"critical","release_date":"2026-10-08","supersedes":["KB5043064"],
    "applicability":{"os":"windows","arch":"x64","min_build":19045,"max_build":19045},
-   "source_url":"https://catalog.update.microsoft.com/","path":"downloads/windows10.0-kb5044273-x64.msu"},
+   "source_url":"https://catalog.update.microsoft.com/","vendor_signature":{"status":"not_checked"},"path":"downloads/windows10.0-kb5044273-x64.msu"},
   {"package_id":"AcmeAgent-2.1","title":"Acme Endpoint Agent 2.1","vendor":"Acme","kind":"msi","version":"2.1.0",
    "product_code":"{11111111-2222-3333-4444-555555555555}","severity":"important","release_date":"2026-10-01",
-   "applicability":{"os":"windows","arch":"any"},"path":"downloads/acme-agent-2.1.msi"}
+   "applicability":{"os":"windows","arch":"any"},"vendor_signature":{"status":"not_checked"},"path":"downloads/acme-agent-2.1.msi"}
 ]
 EOF
 "$BIN/pmctl" build -key "$DEMO/acq/bundle.key" -spec "$DEMO/acq/spec.json" -state "$DEMO/acq/state.json" -out "$DEMO/acq/out/october.pmb"

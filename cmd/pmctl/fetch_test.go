@@ -18,6 +18,7 @@ import (
 // catalog/MSRC/vendor (recorded fixtures), then `pmctl build` on the
 // generated spec, and checks the result is a valid signed bundle.
 func TestFetchThenBuild(t *testing.T) {
+	stubAuthenticode(t)
 	srv := acquiretest.New(t, "../../internal/acquire/testdata", acquiretest.Payload(250_000))
 	msi := acquiretest.Payload(64_000)[1000:] // distinct content
 	srv.Vendor["acme-agent-2.2.msi"] = msi

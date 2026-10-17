@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -53,7 +54,7 @@ func TestMTLS(t *testing.T) {
 	if st.Secret != "" || st.CertFile == "" {
 		t.Fatalf("TLS enrollment must issue a certificate and no bearer secret: %+v", st)
 	}
-	if fi, err := os.Stat(filepath.Join(a.dir, "client.key")); err != nil || fi.Mode().Perm() != 0o600 {
+	if fi, err := os.Stat(filepath.Join(a.dir, "client.key")); err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600) {
 		t.Fatalf("client key must exist with 0600: %v", err)
 	}
 	e.cycle(a)

@@ -1,0 +1,11 @@
+# Keep LF everywhere so scripts, units and configs work when copied to Linux/macOS
+# from a Windows checkout (core.autocrlf=true would otherwise turn them into CRLF).
+* text=auto eol=lf
+
+# Windows-only files keep CRLF.
+*.ps1 text eol=crlf
+*.wxs text eol=crlf
+
+*.png binary
+*.ico binary
+*.pmb binary

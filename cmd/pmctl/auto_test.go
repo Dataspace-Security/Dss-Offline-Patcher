@@ -25,6 +25,7 @@ import (
 // second run sends nothing; a new vendor version is picked up; a vendor
 // checksum mismatch is refused and retried.
 func TestAutoAcquisition(t *testing.T) {
+	stubAuthenticode(t)
 	srv := acquiretest.New(t, "../../internal/acquire/testdata", acquiretest.Payload(200_000))
 	app := []byte("ACME agent 2.3 msi")
 	setApp := func(ver string, content []byte, published []byte) {

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"offpatch/internal/manifest"
@@ -12,6 +13,9 @@ import (
 func TestExecSigner(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "fakehsm")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
 	if out, err := exec.Command("go", "build", "-o", bin, "./testdata/fakehsm").CombinedOutput(); err != nil {
 		t.Fatalf("build fakehsm: %v %s", err, out)
 	}
