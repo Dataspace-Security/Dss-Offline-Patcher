@@ -464,8 +464,12 @@ func (a *Agent) process(ctx context.Context, as store.Assignment, f Facts, inv [
 	}
 	for _, it := range inv {
 		if (pkg.KB != "" && it.Kind == "kb" && strings.EqualFold(it.ID, pkg.KB)) || (pkg.ProductCode != "" && it.Kind == "product" && strings.EqualFold(it.ID, pkg.ProductCode)) ||
-			(pkg.PackageName != "" && it.Kind == "pkg" && it.ID == pkg.PackageName && store.VersionAtLeast(it.Version, pkg.Version)) {
+			(pkg.PackageName != "" && (it.Kind == "pkg" || (it.Kind == "app" && pkg.Kind == "pkg")) && it.ID == pkg.PackageName && store.VersionAtLeast(it.Version, pkg.Version)) {
 			a.report(ctx, as, "installed", 0, "already present in local inventory")
+			return
+		}
+		if pkg.Kind == "pkg" && it.Kind == "app" && it.Source == "appstore" && it.ID == pkg.PackageName {
+			a.report(ctx, as, "not_applicable", 0, "installed from the Mac App Store, which keeps it updated")
 			return
 		}
 	}

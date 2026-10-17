@@ -49,6 +49,9 @@ func needs(p Package, e Endpoint, inv []InventoryItem, sup map[string]bool) (boo
 	if ok, _ := presentIn(inv, p, sup); ok {
 		return false, "", ""
 	}
+	if appStoreManaged(inv, p) {
+		return false, "", ""
+	}
 	switch p.Kind {
 	case "msu":
 		return true, "", "security update not installed"

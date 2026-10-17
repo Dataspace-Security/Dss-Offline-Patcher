@@ -2,7 +2,12 @@
 
 package agent
 
-import "testing"
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestMacParsers(t *testing.T) {
 	if v := parsePkgInfo("package-id: com.apple.pkg.X\nversion: 14.2.1.0.1.1700000000\nvolume: /\n"); v != "14.2.1.0.1.1700000000" {
@@ -56,4 +61,28 @@ func TestNormalizeAppVersion(t *testing.T) {
 		}
 	}
 	t.Logf("%d app bundles", len(items))
+}
+
+func TestAppBundlesMarksAppStoreApps(t *testing.T) {
+	dir := t.TempDir()
+	for _, a := range []struct {
+		name string
+		mas  bool
+	}{{"Direct", false}, {"Store", true}} {
+		c := filepath.Join(dir, a.name+".app", "Contents")
+		os.MkdirAll(c, 0o755)
+		os.WriteFile(filepath.Join(c, "Info.plist"), []byte(`<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.example.`+a.name+`</string><key>CFBundleShortVersionString</key><string>1.0</string></dict></plist>`), 0o644)
+		if a.mas {
+			os.MkdirAll(filepath.Join(c, "_MASReceipt"), 0o755)
+			os.WriteFile(filepath.Join(c, "_MASReceipt", "receipt"), []byte("x"), 0o644)
+		}
+	}
+	got := map[string]string{}
+	for _, it := range appBundles(context.Background(), dir) {
+		got[it.ID] = it.Source
+	}
+	if got["com.example.Direct"] != "" || got["com.example.Store"] != "appstore" || len(got) != 2 {
+		t.Fatalf("sources: %v", got)
+	}
 }

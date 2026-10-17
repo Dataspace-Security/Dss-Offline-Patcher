@@ -143,7 +143,11 @@ func appBundles(ctx context.Context, dir string) []store.InventoryItem {
 		if id == "" {
 			continue
 		}
-		out = append(out, store.InventoryItem{Kind: "app", ID: id, Name: strings.TrimSuffix(e.Name(), ".app"), Version: normalizeAppVersion(read("CFBundleShortVersionString"))})
+		it := store.InventoryItem{Kind: "app", ID: id, Name: strings.TrimSuffix(e.Name(), ".app"), Version: normalizeAppVersion(read("CFBundleShortVersionString"))}
+		if _, err := os.Stat(dir + "/" + e.Name() + "/Contents/_MASReceipt/receipt"); err == nil {
+			it.Source = "appstore"
+		}
+		out = append(out, it)
 	}
 	return out
 }

@@ -14,6 +14,8 @@ type InventoryItem struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
 	Version string `json:"version"`
+	// Source is "appstore" for macOS apps installed from the Mac App Store.
+	Source string `json:"source,omitempty"`
 }
 
 type Endpoint struct {

@@ -601,6 +601,8 @@ func (s *Store) ensureTarget(ctx context.Context, tx *sql.Tx, d Deployment, e En
 		}
 		if ok, why := presentIn(e.inventory, p, sup); ok && e.InventoryAt != "" {
 			state, detail = "verified", "already present: "+why
+		} else if appStoreManaged(e.inventory, p) {
+			state, detail = "not_applicable", appStoreDetail
 		} else if xid, err := s.activeException(ctx, tx, e.EndpointID, p.PackageID); err != nil {
 			return err
 		} else if xid != "" {
@@ -749,6 +751,13 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 			// if the install itself asked for one.
 			if ok, why := presentIn(r.Inventory, p, sup); ok && !(t.State == "pending_reboot" && r.RebootPending) {
 				if err := s.setTarget(tx, "system:verifier", t, "verified", why, t.ExitCode, 0); err != nil {
+					return err
+				}
+				touched[t.DeploymentID] = true
+				continue
+			}
+			if appStoreManaged(r.Inventory, p) && (t.State == "pending" || t.State == "failed") {
+				if err := s.setTarget(tx, "system:scheduler", t, "not_applicable", appStoreDetail, t.ExitCode, 0); err != nil {
 					return err
 				}
 				touched[t.DeploymentID] = true
@@ -1049,3 +1058,20 @@ func missingPrereqs(prereqs []string, inv []InventoryItem) []string {
 	}
 	return missing
 }
+
+// appStoreManaged reports whether inventory shows p's app installed from the
+// Mac App Store. Apple's installer refuses to replace those ("You've already
+// installed X from the App Store"), and the App Store keeps them updated.
+func appStoreManaged(inv []InventoryItem, p Package) bool {
+	if p.Kind != "pkg" || p.PackageName == "" {
+		return false
+	}
+	for _, it := range inv {
+		if it.Kind == "app" && it.Source == "appstore" && it.ID == p.PackageName {
+			return true
+		}
+	}
+	return false
+}
+
+const appStoreDetail = "installed from the Mac App Store, which keeps it updated"
