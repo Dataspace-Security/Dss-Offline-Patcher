@@ -451,7 +451,7 @@ func TestDownloadStallAborts(t *testing.T) {
 	as := store.Assignment{URL: "/api/agent/content/" + sha}
 	p := manifest.Package{File: manifest.FileRef{Name: "payload/x.msu", Size: 1000, SHA256: sha}}
 	start := time.Now()
-	_, err := a.download(context.Background(), as, p)
+	_, err := a.download(context.Background(), as, p, nil)
 	if err == nil || !strings.Contains(err.Error(), "stalled") {
 		t.Fatalf("want a stall error, got %v", err)
 	}

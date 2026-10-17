@@ -181,6 +181,12 @@ type Agent struct {
 	started  time.Time
 	cleanAt  time.Time
 	failures int // consecutive failed cycles (check-in backoff)
+	// nextHint: the server's next_checkin_seconds from the last check-in
+	// (0 = use interval); it shortens the wait while a deployment is active.
+	nextHint time.Duration
+	// awaitingReboot: targets installed but waiting for a reboot (progress
+	// key → waiting_reboot progress), re-sent while the reboot is pending.
+	awaitingReboot map[string]Progress
 }
 
 const (
@@ -542,7 +548,7 @@ func (a *Agent) Run(ctx context.Context, once bool) error {
 		if once {
 			return err
 		}
-		wait := backoffDelay(a.interval, a.failures)
+		wait := nextWait(a.interval, a.nextHint, a.failures)
 		if a.failures > 0 {
 			wait += rand.N(wait/10 + 1) // spread retries across the fleet
 		}
@@ -617,6 +623,7 @@ func (a *Agent) hardware(ctx context.Context) *store.Hardware {
 // Cycle: check in with inventory, then work through assignments
 // sequentially (one installer at a time).
 func (a *Agent) Cycle(ctx context.Context) error {
+	a.nextHint = 0 // only a successful check-in sets it
 	if err := a.maybeRenew(ctx); err != nil {
 		a.log.Warn("renewal failed; will retry", "err", err)
 	}
@@ -629,7 +636,7 @@ func (a *Agent) Cycle(ctx context.Context) error {
 	f, inv, reboot, err := a.collect()
 	if err != nil {
 		// Stay visible as online; assignments wait for usable inventory.
-		if herr := a.do(ctx, "POST", "/api/agent/heartbeat", struct{}{}, nil); herr != nil {
+		if herr := a.heartbeat(ctx, nil); herr != nil {
 			return fmt.Errorf("%w (heartbeat: %v)", err, herr)
 		}
 		return fmt.Errorf("%w; sent a heartbeat instead of a check-in", err)
@@ -642,6 +649,9 @@ func (a *Agent) Cycle(ctx context.Context) error {
 		Trust                  *trust.Signed           `json:"trust"`
 		DownloadRateKbps       int                     `json:"download_rate_kbps"`
 		Preinstall             *store.PreinstallPolicy `json:"preinstall"`
+		// Decoded here rather than via store.CheckinResult so the agent does
+		// not depend on the server's struct; unknown fields are ignored.
+		NextCheckinSeconds int `json:"next_checkin_seconds"`
 	}
 	req := store.CheckinRequest{Hostname: f.Hostname, OSVersion: f.OSVersion, Build: f.Build, Arch: f.Arch, AgentVersion: a.agentVersion(), RebootPending: reboot, Inventory: inv, Edition: f.Edition,
 		Hardware: a.hardware(ctx)}
@@ -653,6 +663,9 @@ func (a *Agent) Cycle(ctx context.Context) error {
 	if resp.CheckinIntervalSeconds > 0 {
 		a.interval = time.Duration(resp.CheckinIntervalSeconds) * time.Second
 	}
+	if resp.NextCheckinSeconds > 0 {
+		a.nextHint = time.Duration(resp.NextCheckinSeconds) * time.Second
+	}
 	a.rateKbps = resp.DownloadRateKbps
 	a.preinstall = resp.Preinstall
 	if resp.Trust != nil {
@@ -661,6 +674,7 @@ func (a *Agent) Cycle(ctx context.Context) error {
 		}
 	}
 	a.log.Info("checked in", "inventory", len(inv), "reboot_pending", reboot, "assignments", len(resp.Assignments), "reboot_now", resp.RebootNow)
+	a.reportAwaitingReboot(ctx, reboot)
 	needReboot := resp.RebootNow
 	for _, as := range resp.Assignments {
 		if ctx.Err() != nil {
@@ -693,37 +707,6 @@ func (a *Agent) reboot(ctx context.Context) {
 		return
 	}
 	a.log.Info("reboot scheduled to complete pending updates")
-}
-
-// keepAlive sends a heartbeat every check-in interval until the returned
-// stop function is called. Installers (a Windows cumulative update takes
-// 10+ minutes) block the cycle; without this the server would show the
-// endpoint as offline while it is busy installing.
-func (a *Agent) keepAlive(ctx context.Context) (stop func()) {
-	ctx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		// At most a minute apart, whatever the check-in interval: the server's
-		// offline threshold must never be reached while we are busy.
-		every := a.interval
-		if every <= 0 || every > time.Minute {
-			every = time.Minute
-		}
-		t := time.NewTicker(every)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				if err := a.do(ctx, "POST", "/api/agent/heartbeat", struct{}{}, nil); err != nil && ctx.Err() == nil {
-					a.log.Warn("heartbeat failed", "err", err)
-				}
-			}
-		}
-	}()
-	return func() { cancel(); <-done }
 }
 
 // process handles one assignment and reports whether a reboot is pending.
@@ -782,8 +765,9 @@ func (a *Agent) process(ctx context.Context, as store.Assignment, f Facts, inv [
 	// 4. Download (resumable) and verify against the signed hash.
 	a.report(ctx, as, "downloading", 0, fmt.Sprintf("%d bytes", pkg.File.Size))
 	file, err := func() (string, error) {
-		defer a.keepAlive(ctx)() // large downloads over slow links take a while too
-		return a.download(ctx, as, pkg)
+		lp := newLive(as, stageDownloading, 0, pkg.File.Size)
+		defer a.keepAlive(ctx, lp)() // large downloads over slow links take a while too
+		return a.download(ctx, as, pkg, lp)
 	}()
 	if err != nil {
 		log.Error("download failed", "err", err)
@@ -797,7 +781,7 @@ func (a *Agent) process(ctx context.Context, as store.Assignment, f Facts, inv [
 	a.report(ctx, as, "installing", 0, a.plat.Name()+" installer started")
 	ictx := context.WithoutCancel(ctx)
 	res := func() Result {
-		defer a.keepAlive(ctx)()
+		defer a.keepAlive(ctx, newLive(as, stageInstalling, pkg.File.Size, pkg.File.Size))()
 		if pkg.Kind == "agent" {
 			return a.selfUpgrade(ictx, as.DeploymentID, pkg, file)
 		}
@@ -811,6 +795,7 @@ func (a *Agent) process(ctx context.Context, as store.Assignment, f Facts, inv [
 	if res.State != "failed" {
 		os.Remove(file)
 	}
+	a.afterInstall(rctx, as, res, pkg.File.Size)
 	return res.State == "pending_reboot"
 }
 
@@ -847,7 +832,7 @@ func (a *Agent) rollback(ctx context.Context, as store.Assignment, pkg manifest.
 	a.report(ctx, as, "installing", 0, a.plat.Name()+" uninstall started")
 	ictx := context.WithoutCancel(ctx) // see process: never kill an installer on stop
 	res := func() Result {
-		defer a.keepAlive(ctx)()
+		defer a.keepAlive(ctx, newLive(as, stageInstalling, 0, 0))()
 		return u.Uninstall(ictx, pkg)
 	}()
 	a.invAt = time.Time{}
@@ -855,7 +840,21 @@ func (a *Agent) rollback(ctx context.Context, as store.Assignment, pkg manifest.
 	rctx, cancel := context.WithTimeout(ictx, reportTimeout)
 	defer cancel()
 	a.finish(rctx, as, res)
+	a.afterInstall(rctx, as, res, 0)
 	return res.State == "pending_reboot"
+}
+
+// afterInstall: an install that needs a reboot reports waiting_reboot
+// progress now and at every cycle until the reboot has happened.
+func (a *Agent) afterInstall(ctx context.Context, as store.Assignment, res Result, size int64) {
+	if res.State != "pending_reboot" {
+		return
+	}
+	a.rememberReboot(as, size)
+	p := a.awaitingReboot[rebootKey(as)]
+	if err := a.heartbeat(ctx, &p); err != nil {
+		a.log.Debug("waiting_reboot heartbeat failed", "err", err)
+	}
 }
 
 // finish runs post-install health checks and reports the final state.
@@ -948,7 +947,8 @@ func locallyApplicable(p manifest.Package, f Facts) (bool, string) {
 
 // download fetches into <dir>/cache/<sha>.part, resuming with Range, then
 // verifies size and SHA-256 before renaming into place.
-func (a *Agent) download(ctx context.Context, as store.Assignment, p manifest.Package) (string, error) {
+// lp (may be nil) receives byte counts and the verifying stage.
+func (a *Agent) download(ctx context.Context, as store.Assignment, p manifest.Package, lp *liveProgress) (string, error) {
 	path, err := a.sameOrigin(as.URL, "/api/agent/content/")
 	if err != nil {
 		return "", err
@@ -958,8 +958,13 @@ func (a *Agent) download(ctx context.Context, as store.Assignment, p manifest.Pa
 		return "", err
 	}
 	final := filepath.Join(cache, p.File.SHA256+filepath.Ext(p.File.Name))
-	if n, h, err := manifest.HashFile(final); err == nil && n == p.File.Size && h == p.File.SHA256 {
-		return final, nil
+	if fi, err := os.Stat(final); err == nil && fi.Size() == p.File.Size {
+		lp.setDone(p.File.Size)
+		lp.setStage(stageVerifying)
+		if n, h, err := manifest.HashFile(final); err == nil && n == p.File.Size && h == p.File.SHA256 {
+			return final, nil
+		}
+		lp.setStage(stageDownloading)
 	}
 	part := final + ".part"
 	var have int64
@@ -968,6 +973,7 @@ func (a *Agent) download(ctx context.Context, as store.Assignment, p manifest.Pa
 	} else {
 		os.Remove(part)
 	}
+	lp.setDone(have)
 	dctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	req, err := http.NewRequestWithContext(dctx, "GET", path, nil)
@@ -1002,8 +1008,15 @@ func (a *Agent) download(ctx context.Context, as store.Assignment, p manifest.Pa
 	if err != nil {
 		return "", err
 	}
+	if resp.StatusCode == http.StatusOK {
+		lp.setDone(0) // the server sent the whole file again
+	}
+	var dst io.Writer = out
+	if lp != nil {
+		dst = countingWriter{w: out, lp: lp}
+	}
 	body := &idleReader{r: resp.Body, t: idle, d: downloadIdleTimeout}
-	_, err = io.Copy(out, throttle(ctx, io.LimitReader(body, p.File.Size+1), a.rateKbps))
+	_, err = io.Copy(dst, throttle(ctx, io.LimitReader(body, p.File.Size+1), a.rateKbps))
 	cerr := out.Close()
 	if err != nil {
 		if errors.Is(context.Cause(dctx), errStalled) {
@@ -1014,6 +1027,7 @@ func (a *Agent) download(ctx context.Context, as store.Assignment, p manifest.Pa
 	if cerr != nil {
 		return "", cerr
 	}
+	lp.setStage(stageVerifying)
 	n, h, err := manifest.HashFile(part)
 	if err != nil {
 		return "", err

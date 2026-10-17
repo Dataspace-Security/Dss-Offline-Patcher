@@ -31,6 +31,9 @@ type SimConfig struct {
 	BatteryPct    int   `json:"battery_pct,omitempty"`
 	// FailUninstall: rollbacks of these KBs/product codes fail.
 	FailUninstall []string `json:"fail_uninstall,omitempty"`
+	// InstallDelayMs makes each simulated install take this long, so tests
+	// and demos can observe live "installing" progress (0 = instant).
+	InstallDelayMs int `json:"install_delay_ms,omitempty"`
 }
 
 type simState struct {
@@ -99,6 +102,7 @@ func (s *Sim) Inventory() ([]store.InventoryItem, bool, error) {
 }
 
 func (s *Sim) Install(ctx context.Context, p manifest.Package, file string) Result {
+	s.simulateWork(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, err := os.Stat(file); err != nil {
@@ -135,6 +139,7 @@ func (s *Sim) Install(ctx context.Context, p manifest.Package, file string) Resu
 
 // Uninstall removes the KB / product from the simulated inventory.
 func (s *Sim) Uninstall(ctx context.Context, p manifest.Package) Result {
+	s.simulateWork(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	id := p.KB
@@ -162,6 +167,22 @@ func (s *Sim) Uninstall(ctx context.Context, p manifest.Package) Result {
 		return Result{State: "failed", ExitCode: 1, Detail: err.Error()}
 	}
 	return res
+}
+
+// simulateWork waits InstallDelayMs (installer run time).
+func (s *Sim) simulateWork(ctx context.Context) {
+	s.mu.Lock()
+	d := time.Duration(s.cfg.InstallDelayMs) * time.Millisecond
+	s.mu.Unlock()
+	if d <= 0 {
+		return
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-ctx.Done():
+	}
 }
 
 // FreeDisk and Power simulate the pre-install conditions.

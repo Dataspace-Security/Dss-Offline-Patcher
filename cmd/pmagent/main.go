@@ -87,6 +87,7 @@ func enroll(args []string) error {
 	build := fs.Int("build", 19045, "sim: Windows build number")
 	simFail := fs.String("sim-fail", "", "sim: KBs/product codes whose install fails")
 	simReboot := fs.Bool("sim-reboot", false, "sim: installs require a reboot")
+	simDelay := fs.Duration("sim-install-delay", 0, "sim: how long each simulated install takes (shows live progress)")
 	force := fs.Bool("force", false, "replace an existing enrollment (new device key and identity)")
 	fs.Parse(args)
 	if *server == "" || *token == "" || *pubs == "" {
@@ -107,7 +108,7 @@ func enroll(args []string) error {
 			h, _ = os.Hostname()
 			h += "-sim"
 		}
-		sim = &agent.SimConfig{Hostname: h, Build: *build, Arch: "x64", Reboot: *simReboot}
+		sim = &agent.SimConfig{Hostname: h, Build: *build, Arch: "x64", Reboot: *simReboot, InstallDelayMs: int(simDelay.Milliseconds())}
 		if *simFail != "" {
 			sim.FailKBs = strings.Split(*simFail, ",")
 		}
@@ -154,11 +155,6 @@ func run(args []string, log *slog.Logger) error {
 }
 
 func runAgent(ctx context.Context, dir string, once bool, log *slog.Logger) error {
-	release, err := singleInstance()
-	if err != nil {
-		return err
-	}
-	defer release()
 	// The state dir holds the device key and the installers run as SYSTEM:
 	// refuse to use one that someone else owns (see SecureStateDir).
 	if err := agent.SecureStateDir(dir); err != nil {
@@ -168,6 +164,16 @@ func runAgent(ctx context.Context, dir string, once bool, log *slog.Logger) erro
 	st, err := agent.LoadState(dir)
 	if err != nil {
 		return err
+	}
+	// One real agent per computer, so two never run installers at once. A
+	// simulated agent (labs, demos, tests) installs nothing and may run
+	// alongside the real one.
+	if st.Platform != "sim" {
+		release, err := singleInstance()
+		if err != nil {
+			return err
+		}
+		defer release()
 	}
 	p, err := agent.PlatformFor(st, dir)
 	if err != nil {
