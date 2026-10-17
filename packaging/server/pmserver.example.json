@@ -36,5 +36,7 @@
   "site_download_kbps": {"branch-office-1": 20000},
   "checkin_interval_seconds": 60,
   "offline_after": "30m",
-  "stale_inventory_after": "24h"
+  "stale_inventory_after": "24h",
+  "lost_after_install": "2h",
+  "preinstall": {"min_free_disk_mb": {"windows": 5120, "macos": 2048, "linux": 1024}, "min_battery_pct": 40}
 }

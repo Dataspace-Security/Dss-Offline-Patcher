@@ -135,7 +135,7 @@ func (s *Store) AvailableFor(ctx context.Context, endpointID string) ([]Availabl
 	if err != nil {
 		return nil, err
 	}
-	targets, err := queryTargets(ctx, s.db, `t.endpoint_id=? AND d.state IN ('active','paused')`, endpointID)
+	targets, err := queryTargets(ctx, s.db, `t.endpoint_id=? AND d.state IN ('active','paused') AND d.operation='install'`, endpointID)
 	if err != nil {
 		return nil, err
 	}

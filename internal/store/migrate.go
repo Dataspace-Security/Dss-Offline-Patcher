@@ -20,6 +20,7 @@ var columnMigrations = []struct{ table, column, ddl string }{
 	{"deployments", "reboot_policy", "TEXT NOT NULL DEFAULT 'never'"},
 	{"deployments", "ignore_windows", "INTEGER NOT NULL DEFAULT 0"},
 	{"deployments", "health_checks", "TEXT NOT NULL DEFAULT '[]'"},
+	{"deployments", "operation", "TEXT NOT NULL DEFAULT 'install'"},
 	{"targets", "leased_until", "TEXT NOT NULL DEFAULT ''"},
 	{"targets", "health", "TEXT NOT NULL DEFAULT ''"},
 	{"targets", "health_detail", "TEXT NOT NULL DEFAULT ''"},

@@ -44,7 +44,7 @@ type Server struct {
 
 func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger) (*Server, error) {
 	s := &Server{cfg: cfg, store: st, repo: rp, ui: ui, log: log,
-		th: store.Thresholds{OfflineAfter: cfg.OfflineAfter.Duration, StaleAfter: cfg.StaleInventoryAfter.Duration}}
+		th: store.Thresholds{OfflineAfter: cfg.OfflineAfter.Duration, StaleAfter: cfg.StaleInventoryAfter.Duration, LostAfterInstall: cfg.LostAfterInstall.Duration}}
 	s.auth = newAuthState()
 	dl := map[string]time.Duration{}
 	for k, v := range cfg.PatchDeadlines {
@@ -643,7 +643,8 @@ func (s *Server) agentCheckin(w http.ResponseWriter, r *http.Request) {
 		rate = v
 	}
 	resp := map[string]any{"assignments": res.Assignments, "reboot_now": res.RebootNow,
-		"checkin_interval_seconds": s.cfg.CheckinIntervalSeconds, "download_rate_kbps": rate}
+		"checkin_interval_seconds": s.cfg.CheckinIntervalSeconds, "download_rate_kbps": rate,
+		"preinstall": s.cfg.Preinstall.policyFor(res.OS)}
 	if doc, _ := s.store.GetMeta(r.Context(), "trust_doc"); doc != "" {
 		resp["trust"] = json.RawMessage(doc)
 	}

@@ -37,6 +37,9 @@ type NewDeployment struct {
 	RebootPolicy  string        `json:"reboot_policy"`
 	IgnoreWindows bool          `json:"ignore_windows"`
 	HealthChecks  []HealthCheck `json:"health_checks"`
+	// Operation: install (default) | rollback (agents uninstall the package;
+	// msu, msi, deb and rpm only — see RollbackUnsupported).
+	Operation string `json:"operation"`
 }
 
 // HealthCheck is a fixed, non-executable post-install check (no arbitrary
@@ -76,16 +79,17 @@ type Target struct {
 	UpdatedAt    string `json:"updated_at"`
 	Health       string `json:"health"` // "" | ok | failed
 	HealthDetail string `json:"health_detail"`
+	Operation    string `json:"operation"` // of the deployment: install | rollback
 }
 
-const depCols = `deployment_id,package_id,name,state,emergency,justification,rings,current_ring,max_failure_pct,max_retries,window_start,window_end,created_by,created_at,updated_at,state_reason,deadline,max_concurrent,reboot_policy,ignore_windows,health_checks`
+const depCols = `deployment_id,package_id,name,state,emergency,justification,rings,current_ring,max_failure_pct,max_retries,window_start,window_end,created_by,created_at,updated_at,state_reason,deadline,max_concurrent,reboot_policy,ignore_windows,health_checks,operation`
 
 func scanDeployment(sc interface{ Scan(...any) error }) (Deployment, error) {
 	var d Deployment
 	var em, iw int
 	var rings, hc string
 	err := sc.Scan(&d.DeploymentID, &d.PackageID, &d.Name, &d.State, &em, &d.Justification, &rings, &d.CurrentRing, &d.MaxFailurePct, &d.MaxRetries,
-		&d.WindowStart, &d.WindowEnd, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt, &d.StateReason, &d.Deadline, &d.MaxConcurrent, &d.RebootPolicy, &iw, &hc)
+		&d.WindowStart, &d.WindowEnd, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt, &d.StateReason, &d.Deadline, &d.MaxConcurrent, &d.RebootPolicy, &iw, &hc, &d.Operation)
 	if err != nil {
 		return d, err
 	}
@@ -133,7 +137,7 @@ func fillCounts(ctx context.Context, q querier, d *Deployment) error {
 }
 
 func queryTargets(ctx context.Context, q querier, where string, args ...any) ([]Target, error) {
-	rows, err := q.QueryContext(ctx, `SELECT t.deployment_id,t.package_id,t.endpoint_id,e.hostname,t.ring,t.state,t.attempts,t.detail,t.exit_code,t.updated_at,t.health,t.health_detail
+	rows, err := q.QueryContext(ctx, `SELECT t.deployment_id,t.package_id,t.endpoint_id,e.hostname,t.ring,t.state,t.attempts,t.detail,t.exit_code,t.updated_at,t.health,t.health_detail,d.operation
 		FROM targets t JOIN endpoints e ON e.endpoint_id=t.endpoint_id JOIN deployments d ON d.deployment_id=t.deployment_id
 		WHERE `+where+` ORDER BY t.ring, e.hostname`, args...)
 	if err != nil {
@@ -143,7 +147,7 @@ func queryTargets(ctx context.Context, q querier, where string, args ...any) ([]
 	out := []Target{}
 	for rows.Next() {
 		var t Target
-		if err := rows.Scan(&t.DeploymentID, &t.PackageID, &t.EndpointID, &t.Hostname, &t.Ring, &t.State, &t.Attempts, &t.Detail, &t.ExitCode, &t.UpdatedAt, &t.Health, &t.HealthDetail); err != nil {
+		if err := rows.Scan(&t.DeploymentID, &t.PackageID, &t.EndpointID, &t.Hostname, &t.Ring, &t.State, &t.Attempts, &t.Detail, &t.ExitCode, &t.UpdatedAt, &t.Health, &t.HealthDetail, &t.Operation); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -263,6 +267,17 @@ func (n *NewDeployment) validate() error {
 	if n.RebootPolicy == "at_deadline" && n.Deadline == "" {
 		errs = append(errs, "reboot_policy at_deadline needs a deadline")
 	}
+	switch n.Operation {
+	case "":
+		n.Operation = "install"
+	case "install":
+	case "rollback":
+		if strings.TrimSpace(n.Justification) == "" {
+			errs = append(errs, "rollback deployments require a justification")
+		}
+	default:
+		errs = append(errs, "operation must be install or rollback")
+	}
 	if n.HealthChecks == nil {
 		n.HealthChecks = []HealthCheck{}
 	}
@@ -311,8 +326,25 @@ func (s *Store) CreateDeployment(ctx context.Context, actor string, n NewDeploym
 		if err != nil {
 			return err
 		}
-		if p.State != "approved" {
+		rollback := n.Operation == "rollback"
+		switch {
+		case rollback && p.State != "approved" && p.State != "revoked":
+			return Errf(ErrConflict, "package %s is %s; only approved or revoked packages can be rolled back", p.PackageID, p.State)
+		case !rollback && p.State != "approved":
 			return Errf(ErrConflict, "package %s is %s; only approved packages can be deployed", p.PackageID, p.State)
+		}
+		if rollback {
+			if why := RollbackUnsupported(p); why != "" {
+				return Errf(ErrConflict, "rollback not supported for %s: %s", p.PackageID, why)
+			}
+		}
+		// An install and a rollback of the same package would undo each other.
+		var other string
+		err = tx.QueryRow(`SELECT deployment_id FROM deployments WHERE package_id=? AND state IN ('active','paused') AND operation != ? LIMIT 1`, n.PackageID, n.Operation).Scan(&other)
+		if err == nil {
+			return Errf(ErrConflict, "deployment %s (%s) of this package is still active or paused; cancel it first", other, map[bool]string{true: "install", false: "rollback"}[rollback])
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
 		}
 		if s.Policy.SeparationOfDuties {
 			for _, a := range p.Approvals {
@@ -327,19 +359,22 @@ func (s *Store) CreateDeployment(ctx context.Context, actor string, n NewDeploym
 		if n.Emergency {
 			em = 1
 		}
-		if _, err := tx.Exec(`INSERT INTO deployments(`+depCols+`) VALUES(?,?,?,'active',?,?,?,0,?,?,?,?,?,?,?,'',?,?,?,?,?)`,
+		if _, err := tx.Exec(`INSERT INTO deployments(`+depCols+`) VALUES(?,?,?,'active',?,?,?,0,?,?,?,?,?,?,?,'',?,?,?,?,?,?)`,
 			id, n.PackageID, n.Name, em, n.Justification, mustJSON(n.Rings), n.MaxFailurePct, n.MaxRetries, n.WindowStart, n.WindowEnd, actor, now, now,
-			n.Deadline, n.MaxConcurrent, n.RebootPolicy, boolInt(n.IgnoreWindows), mustJSON(n.HealthChecks)); err != nil {
+			n.Deadline, n.MaxConcurrent, n.RebootPolicy, boolInt(n.IgnoreWindows), mustJSON(n.HealthChecks), n.Operation); err != nil {
 			return err
 		}
 		action := "deployment.created"
 		if n.Emergency {
 			action = "deployment.created_emergency"
 		}
+		if rollback {
+			action = "deployment.created_rollback"
+		}
 		if err := s.audit(tx, Ev{Actor: actor, Action: action, ObjectType: "deployment", ObjectID: id, PackageID: n.PackageID,
 			Details: map[string]any{"name": n.Name, "rings": n.Rings, "max_failure_pct": n.MaxFailurePct, "max_retries": n.MaxRetries,
 				"window": n.WindowStart + "-" + n.WindowEnd, "emergency": n.Emergency, "justification": n.Justification,
-				"deadline": n.Deadline, "max_concurrent": n.MaxConcurrent, "reboot_policy": n.RebootPolicy, "ignore_windows": n.IgnoreWindows, "health_checks": n.HealthChecks}}); err != nil {
+				"deadline": n.Deadline, "max_concurrent": n.MaxConcurrent, "reboot_policy": n.RebootPolicy, "ignore_windows": n.IgnoreWindows, "health_checks": n.HealthChecks, "operation": n.Operation}}); err != nil {
 			return err
 		}
 		if err := s.ensureTargetsForDeployment(ctx, tx, id); err != nil {
@@ -594,6 +629,11 @@ func (s *Store) ensureTarget(ctx context.Context, tx *sql.Tx, d Deployment, e En
 	state, detail := "pending", ""
 	if ok, why := applicable(p, e); !ok {
 		state, detail = "not_applicable", why
+	} else if d.Operation == "rollback" {
+		// Only endpoints that have this package (this version) are in scope.
+		if ok, why := rollbackPresent(e.inventory, p); !ok && e.InventoryAt != "" {
+			state, detail = "not_applicable", why
+		}
 	} else {
 		sup, err := supersedingKBs(ctx, tx, p.KB)
 		if err != nil {
@@ -630,35 +670,58 @@ func (s *Store) setTarget(tx *sql.Tx, actor string, t Target, state, detail stri
 // a new failure, so an operator's resume isn't immediately undone) and
 // completes the deployment when the last ring is finished.
 func (s *Store) evaluateDeployment(ctx context.Context, tx *sql.Tx, id string, failureTrigger bool) error {
+	ring := -1
+	if failureTrigger {
+		ring = -2 // the current ring
+	}
+	return s.evaluate(ctx, tx, id, ring)
+}
+
+// evaluateRing is evaluateDeployment triggered by a new failure in ring r
+// (an endpoint lost after install may be in an earlier ring).
+func (s *Store) evaluateRing(ctx context.Context, tx *sql.Tx, id string, r int) error {
+	return s.evaluate(ctx, tx, id, r)
+}
+
+// evaluate: failRing -1 = no new failure, -2 = check the current ring, else
+// check that ring's failure threshold.
+func (s *Store) evaluate(ctx context.Context, tx *sql.Tx, id string, failRing int) error {
 	d, err := getDeployment(ctx, tx, id)
 	if err != nil || d.State != "active" {
 		return err
 	}
-	// One indexed aggregate over the current ring (no per-target rows) so
-	// agent reports stay cheap however large the ring is.
-	var total, skipped, verified, exhausted, unhealthy int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),
+	if failRing == -2 || failRing > d.CurrentRing {
+		failRing = d.CurrentRing
+	}
+	// One indexed aggregate per ring (no per-target rows) so agent reports
+	// stay cheap however large the ring is.
+	count := func(ring int) (total, skipped, verified, exhausted, unhealthy, lost int, err error) {
+		err = tx.QueryRowContext(ctx, `SELECT COUNT(*),
 		COALESCE(SUM(state IN ('not_applicable','exception')),0),
 		COALESCE(SUM(state='verified'),0),
 		COALESCE(SUM(state='failed' AND attempts > ?),0),
-		COALESCE(SUM(health='failed' AND state != 'failed'),0)
-		FROM targets WHERE deployment_id=? AND ring=?`, d.MaxRetries, id, d.CurrentRing).Scan(&total, &skipped, &verified, &exhausted, &unhealthy); err != nil {
+		COALESCE(SUM(health='failed' AND state NOT IN ('failed','lost_after_install')),0),
+		COALESCE(SUM(state='lost_after_install'),0)
+		FROM targets WHERE deployment_id=? AND ring=?`, d.MaxRetries, id, ring).Scan(&total, &skipped, &verified, &exhausted, &unhealthy, &lost)
+		return
+	}
+	now := s.now()
+	if failRing >= 0 {
+		total, skipped, _, exhausted, unhealthy, lost, err := count(failRing)
+		if err != nil {
+			return err
+		}
+		considered := total - skipped
+		if bad := exhausted + unhealthy + lost; considered > 0 && bad*100 > d.MaxFailurePct*considered {
+			return s.autoPause(tx, d, fmt.Sprintf("auto-pause: %d/%d endpoints failed (%d install, %d health check, %d lost after install) in ring %q (threshold %d%%)",
+				bad, considered, exhausted, unhealthy, lost, d.Rings[failRing].Name, d.MaxFailurePct))
+		}
+	}
+	total, skipped, verified, exhausted, _, _, err := count(d.CurrentRing)
+	if err != nil {
 		return err
 	}
-	considered := total - skipped
 	terminal := skipped + verified + exhausted
-	now := s.now()
-	if failureTrigger && considered > 0 && (exhausted+unhealthy)*100 > d.MaxFailurePct*considered {
-		reason := fmt.Sprintf("auto-pause: %d/%d endpoints failed (%d install, %d health check) in ring %q (threshold %d%%)", exhausted+unhealthy, considered, exhausted, unhealthy, d.Rings[d.CurrentRing].Name, d.MaxFailurePct)
-		if _, err := tx.Exec(`UPDATE deployments SET state='paused', state_reason=?, updated_at=? WHERE deployment_id=?`, reason, now, id); err != nil {
-			return err
-		}
-		if err := s.raiseAlert(tx, "critical", "deployment_auto_paused", "deployment", id, d.Name+": "+reason); err != nil {
-			return err
-		}
-		return s.audit(tx, Ev{Actor: "system:scheduler", Action: "deployment.auto_paused", ObjectType: "deployment", ObjectID: id, PackageID: d.PackageID,
-			Details: map[string]any{"reason": reason}})
-	}
 	if d.CurrentRing == len(d.Rings)-1 && total > 0 && terminal == total {
 		if err := fillCounts(ctx, tx, &d); err != nil {
 			return err
@@ -670,6 +733,18 @@ func (s *Store) evaluateDeployment(ctx context.Context, tx *sql.Tx, id string, f
 			Details: map[string]any{"counts": d.Counts}})
 	}
 	return nil
+}
+
+func (s *Store) autoPause(tx *sql.Tx, d Deployment, reason string) error {
+	id := d.DeploymentID
+	if _, err := tx.Exec(`UPDATE deployments SET state='paused', state_reason=?, updated_at=? WHERE deployment_id=?`, reason, s.now(), id); err != nil {
+		return err
+	}
+	if err := s.raiseAlert(tx, "critical", "deployment_auto_paused", "deployment", id, d.Name+": "+reason); err != nil {
+		return err
+	}
+	return s.audit(tx, Ev{Actor: "system:scheduler", Action: "deployment.auto_paused", ObjectType: "deployment", ObjectID: id, PackageID: d.PackageID,
+		Details: map[string]any{"reason": reason}})
 }
 
 // ---- agent interaction ----
@@ -701,6 +776,8 @@ type Assignment struct {
 	// RebootAllowed: the agent may reboot right after this install if needed.
 	RebootAllowed bool          `json:"reboot_allowed"`
 	HealthChecks  []HealthCheck `json:"health_checks"`
+	// Operation is "rollback" for uninstalls (omitted for installs).
+	Operation string `json:"operation,omitempty"`
 }
 
 // Checkin records heartbeat + inventory, reconciles targets (exceptions,
@@ -750,20 +827,50 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 			if err != nil {
 				return err
 			}
+			// Waiting on a reboot the install (or uninstall) asked for.
+			rebootWait := (t.State == "pending_reboot" || t.State == "lost_after_install") && r.RebootPending
+			if t.Operation == "rollback" {
+				present, _ := rollbackPresent(r.Inventory, p)
+				switch {
+				case !present && (t.State == "pending" || t.State == "deferred"):
+					err = s.setTarget(tx, "system:verifier", t, "not_applicable", "inventory does not show it; nothing to roll back", t.ExitCode, 0)
+				case !present && !rebootWait:
+					if err = s.setTarget(tx, "system:verifier", t, "verified", "inventory no longer shows "+t.PackageID, t.ExitCode, 0); err == nil {
+						err = s.markRolledBack(tx, t)
+					}
+				case t.State == "lost_after_install":
+					err = s.recoverLost(tx, t, r.RebootPending)
+				default:
+					continue
+				}
+				if err != nil {
+					return err
+				}
+				touched[t.DeploymentID] = true
+				continue
+			}
 			sup, err := supersedingKBs(ctx, tx, p.KB)
 			if err != nil {
 				return err
 			}
 			// Verification: fresh inventory evidence, and no outstanding reboot
 			// if the install itself asked for one.
-			if ok, why := presentIn(r.Inventory, p, sup); ok && !(t.State == "pending_reboot" && r.RebootPending) {
+			if ok, why := presentIn(r.Inventory, p, sup); ok && !rebootWait {
 				if err := s.setTarget(tx, "system:verifier", t, "verified", why, t.ExitCode, 0); err != nil {
 					return err
 				}
 				touched[t.DeploymentID] = true
 				continue
 			}
-			if appStoreManaged(r.Inventory, p) && (t.State == "pending" || t.State == "failed") {
+			if t.State == "lost_after_install" {
+				if err := s.recoverLost(tx, t, r.RebootPending); err != nil {
+					return err
+				}
+				touched[t.DeploymentID] = true
+				continue
+			}
+			retryable := t.State == "pending" || t.State == "failed" || t.State == "deferred"
+			if appStoreManaged(r.Inventory, p) && retryable {
 				if err := s.setTarget(tx, "system:scheduler", t, "not_applicable", appStoreDetail, t.ExitCode, 0); err != nil {
 					return err
 				}
@@ -775,7 +882,7 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 				return err
 			}
 			switch {
-			case xid != "" && (t.State == "pending" || t.State == "failed"):
+			case xid != "" && retryable:
 				if err := s.setTarget(tx, "system:scheduler", t, "exception", "covered by exception "+xid, t.ExitCode, 0); err != nil {
 					return err
 				}
@@ -792,7 +899,7 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 			}
 		}
 		// Assignments: current state after reconciliation.
-		res.Site = e.Site
+		res.Site, res.OS = e.Site, e.OS
 		windows, err := listWindows(ctx, tx)
 		if err != nil {
 			return err
@@ -807,14 +914,15 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 			deadline, rebootPolicy string
 			ignoreWindows, maxConc int
 			healthJSON, prereqJSON string
-			detail                 string
+			detail, operation      string
 		}
 		var cands []cand
 		rows, err := tx.QueryContext(ctx, `SELECT t.deployment_id, t.state, t.attempts, d.max_retries, d.window_start, d.window_end, d.deadline, d.reboot_policy, d.ignore_windows, d.max_concurrent, d.health_checks,
-			p.package_id, p.kind, p.kb, p.product_code, p.file_name, p.size, p.sha256, p.prerequisites, t.detail
+			p.package_id, p.kind, p.kb, p.product_code, p.file_name, p.size, p.sha256, p.prerequisites, t.detail, d.operation
 			FROM targets t JOIN deployments d ON d.deployment_id=t.deployment_id JOIN packages p ON p.package_id=t.package_id
-			WHERE t.endpoint_id=? AND d.state='active' AND p.state='approved' AND t.ring <= d.current_ring
-			AND t.state IN ('pending','downloading','downloaded','installing','failed')
+			WHERE t.endpoint_id=? AND d.state='active' AND t.ring <= d.current_ring
+			AND (p.state='approved' OR (d.operation='rollback' AND p.state='revoked'))
+			AND t.state IN ('pending','deferred','downloading','downloaded','installing','failed')
 			ORDER BY d.emergency DESC, d.created_at`, endpointID)
 		if err != nil {
 			return err
@@ -822,7 +930,7 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 		for rows.Next() {
 			var c cand
 			if err := rows.Scan(&c.a.DeploymentID, &c.state, &c.attempts, &c.maxRetries, &c.winStart, &c.winEnd, &c.deadline, &c.rebootPolicy, &c.ignoreWindows, &c.maxConc, &c.healthJSON,
-				&c.a.PackageID, &c.a.Kind, &c.a.KB, &c.a.ProductCode, &c.a.FileName, &c.a.Size, &c.a.SHA256, &c.prereqJSON, &c.detail); err != nil {
+				&c.a.PackageID, &c.a.Kind, &c.a.KB, &c.a.ProductCode, &c.a.FileName, &c.a.Size, &c.a.SHA256, &c.prereqJSON, &c.detail, &c.operation); err != nil {
 				rows.Close()
 				return err
 			}
@@ -837,7 +945,9 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 				continue
 			}
 			var prereqs []string
-			json.Unmarshal([]byte(c.prereqJSON), &prereqs)
+			if c.operation == "install" {
+				json.Unmarshal([]byte(c.prereqJSON), &prereqs)
+			}
 			if miss := missingPrereqs(prereqs, r.Inventory); len(miss) > 0 {
 				msg := "waiting for prerequisite(s) " + strings.Join(miss, ", ")
 				if c.detail != msg {
@@ -853,7 +963,7 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 				continue
 			}
 			// Concurrency cap: count in-flight work plus fresh leases on other endpoints.
-			starting := c.state == "pending" || c.state == "failed"
+			starting := c.state == "pending" || c.state == "failed" || c.state == "deferred"
 			if starting && c.maxConc > 0 {
 				var inflight int
 				if err := tx.QueryRow(`SELECT COUNT(*) FROM targets WHERE deployment_id=? AND endpoint_id != ? AND
@@ -876,7 +986,11 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 			if c.a.HealthChecks == nil {
 				c.a.HealthChecks = []HealthCheck{}
 			}
-			c.a.URL = "/api/agent/content/" + c.a.SHA256
+			if c.operation == "rollback" {
+				c.a.Operation = "rollback" // uninstall: nothing to download
+			} else {
+				c.a.URL = "/api/agent/content/" + c.a.SHA256
+			}
 			c.a.ManifestURL = "/api/agent/manifest/" + c.a.PackageID
 			res.Assignments = append(res.Assignments, c.a)
 		}
@@ -931,9 +1045,10 @@ type CheckinResult struct {
 	Assignments []Assignment `json:"assignments"`
 	RebootNow   bool         `json:"reboot_now"`
 	Site        string       `json:"-"`
+	OS          string       `json:"-"`
 }
 
-var agentStates = map[string]bool{"downloading": true, "downloaded": true, "installing": true, "installed": true, "pending_reboot": true, "failed": true, "not_applicable": true}
+var agentStates = map[string]bool{"downloading": true, "downloaded": true, "installing": true, "installed": true, "pending_reboot": true, "failed": true, "not_applicable": true, "deferred": true}
 
 type Report struct {
 	DeploymentID string `json:"deployment_id"`
@@ -964,6 +1079,11 @@ func (s *Store) ReportTarget(ctx context.Context, endpointID string, r Report) e
 		switch t.State {
 		case "verified", "exception", "not_applicable":
 			return Errf(ErrConflict, "target is %s", t.State)
+		}
+		if r.State == "deferred" && t.State == "deferred" {
+			// Re-deferred at every check-in: refresh the reason, don't flood the audit log.
+			_, err := tx.Exec(`UPDATE targets SET detail=?, updated_at=? WHERE deployment_id=? AND endpoint_id=?`, r.Detail, s.now(), r.DeploymentID, endpointID)
+			return err
 		}
 		delta := 0
 		if r.State == "installing" {
@@ -1003,7 +1123,7 @@ func (s *Store) ReportTarget(ctx context.Context, endpointID string, r Report) e
 func (s *Store) ContentAllowed(ctx context.Context, endpointID, sha string) (Package, error) {
 	var pid string
 	err := s.db.QueryRowContext(ctx, `SELECT p.package_id FROM targets t JOIN packages p ON p.package_id=t.package_id JOIN deployments d ON d.deployment_id=t.deployment_id
-		WHERE t.endpoint_id=? AND p.sha256=? AND p.state='approved' AND d.state='active' AND t.state NOT IN ('verified','exception','not_applicable') LIMIT 1`, endpointID, sha).Scan(&pid)
+		WHERE t.endpoint_id=? AND p.sha256=? AND p.state='approved' AND d.state='active' AND d.operation='install' AND t.state NOT IN ('verified','exception','not_applicable') LIMIT 1`, endpointID, sha).Scan(&pid)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Package{}, ErrNotFound
 	}
@@ -1016,7 +1136,8 @@ func (s *Store) ContentAllowed(ctx context.Context, endpointID, sha string) (Pac
 // PackageAssigned: manifest access is limited the same way.
 func (s *Store) PackageAssigned(ctx context.Context, endpointID, packageID string) bool {
 	var n int
-	s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM targets t JOIN packages p ON p.package_id=t.package_id WHERE t.endpoint_id=? AND t.package_id=? AND p.state='approved'`, endpointID, packageID).Scan(&n)
+	s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM targets t JOIN packages p ON p.package_id=t.package_id JOIN deployments d ON d.deployment_id=t.deployment_id
+		WHERE t.endpoint_id=? AND t.package_id=? AND (p.state='approved' OR (p.state='revoked' AND d.operation='rollback'))`, endpointID, packageID).Scan(&n)
 	return n > 0
 }
 

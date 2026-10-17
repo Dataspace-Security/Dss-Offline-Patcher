@@ -123,6 +123,7 @@ func (s *Server) system(w http.ResponseWriter, r *http.Request) {
 		"agents": map[string]any{
 			"checkin_interval_seconds": c.CheckinIntervalSeconds, "offline_after": c.OfflineAfter.String(),
 			"stale_inventory_after": c.StaleInventoryAfter.String(), "download_rate_kbps": c.DownloadRateKbps,
+			"lost_after_install": c.LostAfterInstall.String(), "preinstall_min_free_disk_mb": c.Preinstall.MinFreeDiskMB, "preinstall_min_battery_pct": c.Preinstall.policyFor("windows").MinBatteryPct,
 		},
 		"open_alerts": len(alerts),
 	})

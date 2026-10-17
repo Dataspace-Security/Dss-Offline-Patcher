@@ -176,6 +176,7 @@ a.cell-title { color: var(--accent); }
 .sev { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
 .sev-critical { color: var(--red); } .sev-important { color: #bc4c00; } .sev-moderate { color: var(--amber); } .sev-low { color: var(--text-2); }
 .flag-emergency { display: inline-block; margin-left: 8px; font-size: 10px; font-weight: 700; letter-spacing: .06em; color: #fff; background: var(--red); padding: 1px 6px; border-radius: 3px; vertical-align: middle; }
+.flag-rollback { background: var(--amber); }
 .time .rel { color: var(--text-3); }
 
 /* Tiles */

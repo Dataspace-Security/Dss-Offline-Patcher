@@ -261,6 +261,8 @@ type Package struct {
 	SupersededBy      string                   `json:"superseded_by"`
 	Approvals         []Approval               `json:"approvals"`
 	ApprovalsRequired int                      `json:"approvals_required"`
+	// RollbackUnsupported says why a rollback deployment is impossible ("" = supported).
+	RollbackUnsupported string `json:"rollback_unsupported"`
 }
 
 const packageCols = `package_id,bundle_id,title,vendor,kind,version,kb,product_code,severity,release_date,supersedes,applicability,file_name,size,sha256,source_url,vendor_signature,quarantine_path,state,state_reason,state_by,state_at,created_at,package_name,prerequisites,superseded_by`
@@ -279,6 +281,7 @@ func scanPackage(sc interface{ Scan(...any) error }) (Package, error) {
 	p.Supersedes = nonNil(p.Supersedes)
 	json.Unmarshal([]byte(prq), &p.Prerequisites)
 	p.Prerequisites = nonNil(p.Prerequisites)
+	p.RollbackUnsupported = RollbackUnsupported(p)
 	return p, nil
 }
 
@@ -440,8 +443,9 @@ func (s *Store) SetPackageState(ctx context.Context, actor, id, action, reason s
 			return err
 		}
 		if action == "revoke" {
-			// No new installs of revoked content.
-			rows, err := tx.Query(`SELECT deployment_id FROM deployments WHERE package_id=? AND state IN ('active','paused')`, id)
+			// No new installs of revoked content. Rollbacks keep running: removing
+			// a bad package is often why it was revoked.
+			rows, err := tx.Query(`SELECT deployment_id FROM deployments WHERE package_id=? AND state IN ('active','paused') AND operation='install'`, id)
 			if err != nil {
 				return err
 			}

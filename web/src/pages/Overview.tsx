@@ -4,7 +4,7 @@ import { ErrorBanner, PageHeader, Pill, RelTime, pillTone, scoreTone } from "../
 import type { Alert, Summary } from "../types";
 import { useLoad } from "../util";
 
-const ENDPOINT_STATUSES = ["offline", "stale", "failed", "pending_reboot", "exception", "noncompliant", "compliant"] as const;
+const ENDPOINT_STATUSES = ["lost_after_install", "offline", "stale", "failed", "pending_reboot", "exception", "noncompliant", "compliant"] as const;
 const PACKAGE_STATES = ["quarantined", "approved", "rejected", "revoked"] as const;
 const BUNDLE_STATES = ["received", "validated", "rejected"] as const;
 const DEPLOYMENT_STATES = ["active", "paused", "completed", "cancelled"] as const;

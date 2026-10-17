@@ -104,7 +104,7 @@ func (s *Store) Compliance(ctx context.Context, th Thresholds) (ComplianceReport
 	if err != nil {
 		return r, err
 	}
-	targets, err := queryTargets(ctx, s.db, `d.state != 'cancelled'`)
+	targets, err := queryTargets(ctx, s.db, `d.state != 'cancelled' AND d.operation='install'`)
 	if err != nil {
 		return r, err
 	}

@@ -88,6 +88,11 @@ tampering").
 | `failed` | Installer or download failed. Retried while `attempts ≤ max_retries` | agent |
 | `not_applicable` | OS/arch/build/edition does not match, or the installer said "not applicable", or the endpoint was retired | server or agent |
 | `exception` | Covered by an active exception | server |
+| `deferred` | A pre-install check failed (not enough free disk space, laptop on battery below the minimum). Retried at every check-in; **not** a failure (§3.8) | agent |
+| `lost_after_install` | The endpoint reported `installed` / `pending_reboot` and then went silent for `lost_after_install` (default 2 h). Counts as a failure towards auto-pause (§3.8) | server |
+| `rolled_back` | The package was removed from this endpoint by a verified rollback deployment; no longer counted as patched | server |
+
+A deployment is either an **install** (default) or a **rollback**: a rollback uninstalls the package, ring by ring (§3.8). Its targets use the same states; the console shows them as *uninstalling*, *uninstalled* and *verified removed*.
 
 Deployment states: `active`, `paused`, `cancelled`, `completed`. A deployment completes on its own
 when every target in the **last** ring is `verified`, `not_applicable`, `exception`, or `failed`
@@ -100,15 +105,16 @@ Each endpoint gets one derived status. The first matching rule wins:
 | Status | Rule |
 |---|---|
 | `retired` | The endpoint was retired. Excluded from fleet totals. |
+| `lost_after_install` | Any target `lost_after_install`: it went silent right after installing (§3.8). Highest priority. |
 | `offline` | No check-in for longer than `offline_after` (default 30 min) |
 | `stale` | Inventory older than `stale_inventory_after` (default 24 h), or never received |
 | `failed` | Any target `failed` (in a deployment that is not cancelled) |
 | `pending_reboot` | Any target `pending_reboot`, or the OS reports a reboot pending |
 | `exception` | Any target covered by an exception |
-| `noncompliant` | Any target `pending`/`downloading`/`downloaded`/`installing`/`installed` |
+| `noncompliant` | Any target `pending`/`deferred`/`downloading`/`downloaded`/`installing`/`installed` (rollback targets excepted) |
 | `compliant` | Otherwise |
 
-`offline` and `stale` beat everything else. An endpoint that stops talking is **never** shown as
+`lost_after_install`, `offline` and `stale` beat everything else. An endpoint that stops talking is **never** shown as
 compliant, and the reports count it as not reporting.
 
 ---
@@ -158,14 +164,15 @@ Tokens are sent as `Authorization: Bearer <token>` and are what scripts use agai
 
 ### 3.1 Morning check (10 minutes)
 
-1. **Overview.** Read the endpoint status counts. Look at `offline`, `stale`, `failed` and
-   `pending_reboot`, not only `compliant`. Check that the audit chain shows OK.
+1. **Overview.** Read the endpoint status counts. Look at `lost_after_install` first, then `offline`,
+   `stale`, `failed` and `pending_reboot`, not only `compliant`. Check that the audit chain shows OK.
 2. **Alerts** (badge in the navigation). Work through open alerts. Each one names an object. Alert
    kinds raised by the server:
 
 | Kind | Severity | Raised when |
 |---|---|---|
 | `deployment_auto_paused` | critical | A ring crossed its failure threshold |
+| `lost_after_install` | critical | Endpoints stopped checking in after an install (the message names them; updated and re-sent while open) |
 | `signing_key_compromised` | critical | A trust document revoked a bundle key as compromised |
 | `audit_export_failed` | critical | Writing audit export files failed |
 | `install_failed` | warning | An agent reported `failed` |
@@ -294,6 +301,62 @@ packages for that endpoint. Exceptions are per endpoint; there are no group-wide
 - An `exception_expiring` alert is raised 7 days before expiry. Review it with the owner and either
   revoke it, let it lapse, or create a new one.
 - When an exception expires or is revoked, the target goes back to `pending` and will be installed.
+
+### 3.8 Install safety: pre-install checks, lost endpoints, rollback
+
+**Pre-install checks (deferral).** Before downloading, the agent checks:
+
+- free space on the system volume (Windows `%SystemDrive%`, else `/`) and on its cache directory
+  ≥ the larger of **2 × the package size** and `preinstall.min_free_disk_mb` for the endpoint's OS
+  (defaults: Windows 5120, macOS 2048, Linux 1024 MB);
+- on laptops: **AC power**, or battery ≥ `preinstall.min_battery_pct` (default 40; `0` turns the
+  battery check off). Windows reads `GetSystemPowerStatus` (the source of `Win32_Battery`), macOS
+  `pmset -g batt`, Linux `/sys/class/power_supply`. Desktops, servers and VMs have no battery and pass.
+
+If a check fails the target becomes `deferred` with the reason (for example `not enough free disk
+space on C:\: 3.2 GB free, need 5.0 GB …` or `on battery at 23% (need AC power or at least 40%)`)
+and is offered again at every check-in. Deferral uses no attempt, raises no alert and does not count
+towards auto-pause. A long-deferred endpoint stays `noncompliant`: free disk space or ask the user to
+plug in. If the OS cannot report disk or power the check is skipped and logged, not enforced.
+
+```json
+"preinstall": {"min_free_disk_mb": {"windows": 5120, "macos": 2048, "linux": 1024}, "min_battery_pct": 40}
+```
+
+**Lost after install.** If an endpoint reported `installed` or `pending_reboot` and then shows no
+activity (check-in or report) for `lost_after_install` (default `"2h"`, counted from the later of the
+install report, its last check-in and the reboot request), the alert sweep marks the target
+`lost_after_install`, raises a **critical** alert naming the hosts, and counts it as a failure in
+its ring — so a patch that stops machines from booting auto-pauses the rollout. What to do:
+
+1. Look at the named machines (console / hypervisor / hands on): boot loop, blue screen, no network
+   after the reboot? Use your normal recovery (Safe Mode, System Restore, `DISM /Remove-Package`,
+   restore from backup).
+2. Consider a rollback deployment for machines that still boot (below).
+3. When a machine comes back and its agent checks in, its target recovers by itself (`verified`, or
+   back to `pending_reboot` / `installed`). The deployment stays paused until you resume it.
+
+Set `lost_after_install` longer than your longest install + reboot, and expect laptops that are
+simply switched off after patching to show up here too; the auto-recovery handles them.
+
+**Rollback.** On a package (Catalog) or an install deployment, **Roll back…** opens a new
+deployment with operation *Roll back (uninstall)*. It goes through rings, windows, concurrency,
+reboot policy, health checks and auto-pause like an install, needs the operator role and a
+**justification** (change ticket / incident), and is audited as `deployment.created_rollback`.
+
+| Kind | Uninstall | Notes |
+|---|---|---|
+| `msu` | `wusa /uninstall /kb:N /quiet /norestart` | Some combined SSU+LCU packages cannot be removed with wusa; such targets fail and need `DISM /Remove-Package` by hand |
+| `msi` | `msiexec /x {ProductCode} /qn /norestart` (verbose log in the agent log directory) | |
+| `deb` / `rpm` | `dpkg -r` / `rpm -e` | Removes the package (it does not reinstall the previous version). Refused when other packages depend on it. Only endpoints at exactly this version are targeted |
+| `pkg` (macOS) | — | **Not supported**: macOS installer packages have no uninstall. Deploy the previous version's `.pkg` or remove the app by hand |
+
+Only endpoints whose inventory shows the package are targeted; the others are `not_applicable`. A
+rollback target is `verified` when a fresh inventory no longer shows the package; the matching
+install targets then become `rolled_back` and reports stop counting them as patched. An install and
+a rollback of the same package cannot run at the same time: cancel one first. Revoking a package
+cancels its install deployments but not its rollbacks, and a revoked package can still be rolled
+back — the usual order for a bad patch is *revoke*, then *roll back*.
 
 ---
 
@@ -478,6 +541,8 @@ Check in this order:
 | 0x80240017 (2149842967) `WU_E_NOT_APPLICABLE` | msu | `not_applicable` | `wusa: update not applicable to this computer` |
 | 1618 | msi | `failed` (retried while retries remain) | `another installation is in progress (will retry)` |
 | 1638 | msi | `failed` | `another version of this product is already installed` |
+| 0x00240007 (2359303) `WU_S_ALREADY_UNINSTALLED` | msu rollback | `installed` | `not installed; nothing to remove` |
+| 1605 `ERROR_UNKNOWN_PRODUCT` | msi rollback | `installed` | `not installed; nothing to remove` |
 | any other | msu, msi | `failed` | `installer exit code N (0xNNNNNNNN)` |
 | -1 | any | `failed` | Agent-side error: installer could not start, unsupported kind, manifest verification or download failure |
 
@@ -498,9 +563,12 @@ Notes:
 |---|---|---|
 | Linux `deb` failed, detail mentions `dependency problems` / `depends on … not installed` | `dpkg -i` does not resolve dependencies and the agent never uses network repositories. After a failure the agent runs `dpkg --configure -a` to leave dpkg consistent. | Ship the missing dependency as its own `deb` package, list it in `prerequisites`, deploy it first. |
 | `rpm` failed with `Failed dependencies` | Same: `rpm -U` does not resolve dependencies | Same approach. |
-| Deployment `paused`, reason `auto-pause: N/M endpoints failed (x install, y health check) in ring "…" (threshold P%)` | Failures in the current ring crossed `max_failure_pct` | Investigate the failed targets first. Resume (reason required) only when the cause is understood; or cancel / revoke the package. |
+| Deployment `paused`, reason `auto-pause: N/M endpoints failed (x install, y health check, z lost after install) in ring "…" (threshold P%)` | Failures in the current ring crossed `max_failure_pct` | Investigate the failed targets first. Resume (reason required) only when the cause is understood; or cancel / revoke the package. |
 | Target health `failed`, alert `health_check_failed` | A `service_running` service/unit/label is not running, or nothing listens on a `tcp_listening` port, after install | Check the service on the endpoint; check you used the service **name**, not the display name. A failed health check counts toward auto-pause but does **not** make the target `failed`; it can still become `verified`. |
 | Target stays `installed`, never `verified` | Inventory does not show the KB / product code / package version. Some updates do not appear in `Win32_QuickFixEngineering`; the MSI product code in the manifest may not match the installed product | Check the endpoint's Inventory tab. Fix the package metadata (new `package_id`) if it is wrong. |
+| Target `deferred`, detail `not enough free disk space …` / `on battery …` | Pre-install check (§3.8) | Free disk space (Disk Cleanup, clear old profiles) or plug the laptop in; the next check-in proceeds. Adjust `preinstall` in the server config if the minimum is wrong for your fleet. |
+| Target `lost_after_install`, critical alert | Endpoint silent since the install / reboot (§3.8) | Check the machine; it recovers automatically when it checks in. |
+| Create rollback returns 409 `rollback not supported` | macOS `.pkg`, the agent, or a package without KB / product code / package name | Remove by hand or deploy the previous version. |
 | Target stays `pending_reboot` | `reboot_policy: never`, or no maintenance window with `allow_reboot` is open | Reboot through your normal process. |
 | Approve returns 409 `already approved this package; a different approver is required` | Two-person rule | A second approver approves. |
 | Create deployment returns 409 `separation of duties` | You approved the package | Another operator creates the deployment. |

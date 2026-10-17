@@ -101,24 +101,35 @@ func listEndpoints(ctx context.Context, q querier) ([]Endpoint, error) {
 type Thresholds struct {
 	OfflineAfter time.Duration
 	StaleAfter   time.Duration
+	// LostAfterInstall: an endpoint silent this long after reporting
+	// installed / pending_reboot (or after its reboot request) is
+	// lost_after_install (0 = never).
+	LostAfterInstall time.Duration
 }
 
-var DefaultThresholds = Thresholds{OfflineAfter: 30 * time.Minute, StaleAfter: 24 * time.Hour}
+var DefaultThresholds = Thresholds{OfflineAfter: 30 * time.Minute, StaleAfter: 24 * time.Hour, LostAfterInstall: 2 * time.Hour}
 
 func (s *Store) deriveStatus(e Endpoint, targets []Target, th Thresholds) string {
 	now := s.Now()
 	if e.RetiredAt != "" {
 		return "retired"
 	}
+	has := map[string]bool{}
+	for _, t := range targets {
+		if t.Operation == "rollback" && t.State != "failed" && t.State != "pending_reboot" && t.State != "lost_after_install" {
+			continue // a rollback in progress does not make the endpoint noncompliant
+		}
+		has[t.State] = true
+	}
+	// An endpoint that went silent right after an install is the loudest signal.
+	if has["lost_after_install"] {
+		return "lost_after_install"
+	}
 	if now.Sub(parseTime(e.LastSeen)) > th.OfflineAfter {
 		return "offline"
 	}
 	if e.InventoryAt == "" || now.Sub(parseTime(e.InventoryAt)) > th.StaleAfter {
 		return "stale"
-	}
-	has := map[string]bool{}
-	for _, t := range targets {
-		has[t.State] = true
 	}
 	switch {
 	case has["failed"]:
@@ -127,7 +138,7 @@ func (s *Store) deriveStatus(e Endpoint, targets []Target, th Thresholds) string
 		return "pending_reboot"
 	case has["exception"]:
 		return "exception"
-	case has["pending"] || has["downloading"] || has["downloaded"] || has["installing"] || has["installed"]:
+	case has["pending"] || has["deferred"] || has["downloading"] || has["downloaded"] || has["installing"] || has["installed"]:
 		return "noncompliant"
 	}
 	return "compliant"

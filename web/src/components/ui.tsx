@@ -2,9 +2,9 @@ import { useEffect, useState, type ReactNode } from "react";
 import { fmtTime, relTime, useNow } from "../util";
 
 const GREEN = ["verified", "compliant", "approved", "validated", "completed", "installed", "downloaded", "success", "active-ok"];
-const AMBER = ["pending_reboot", "paused", "quarantined", "noncompliant", "pending", "downloading", "installing", "received"];
-const RED = ["failed", "rejected", "revoked", "offline", "cancelled", "failure", "expired"];
-const MUTED = ["stale", "exception", "not_applicable"];
+const AMBER = ["pending_reboot", "paused", "quarantined", "noncompliant", "pending", "downloading", "installing", "received", "deferred"];
+const RED = ["failed", "rejected", "revoked", "offline", "cancelled", "failure", "expired", "lost_after_install"];
+const MUTED = ["stale", "exception", "not_applicable", "rolled_back"];
 const BLUE = ["active"];
 
 export function pillTone(state: string): string {
@@ -170,10 +170,30 @@ export function CopyBox({ value }: { value: string }) {
 
 const TARGET_ORDER = [
   "verified", "installed", "pending_reboot", "installing", "downloaded", "downloading",
-  "pending", "failed", "exception", "not_applicable",
+  "pending", "deferred", "failed", "lost_after_install", "exception", "not_applicable", "rolled_back",
 ];
 
-export function CountsBar({ counts, compact }: { counts: Partial<Record<string, number>>; compact?: boolean }) {
+/** Target state as shown to people: rollback deployments uninstall, so their
+ * in-flight and done states read as such. */
+export function targetLabel(state: string, operation?: string): string {
+  if (operation === "rollback") {
+    const l: Record<string, string> = { installing: "uninstalling", installed: "uninstalled", verified: "verified removed", pending_reboot: "pending reboot" };
+    if (l[state]) return l[state];
+  }
+  return state.replace(/_/g, " ");
+}
+
+export const TARGET_HELP: Record<string, string> = {
+  deferred: "Pre-install check not met (free disk space or battery). Retried at every check-in; not a failure.",
+  lost_after_install: "The endpoint stopped checking in after installing. Counts as a failure towards auto-pause; recovers when it checks in again.",
+  rolled_back: "Removed by a rollback deployment; no longer counted as patched.",
+};
+
+export function TargetPill({ state, operation }: { state: string; operation?: string }) {
+  return <span title={TARGET_HELP[state]}><Pill state={state} label={targetLabel(state, operation)} /></span>;
+}
+
+export function CountsBar({ counts, compact, rollback }: { counts: Partial<Record<string, number>>; compact?: boolean; rollback?: boolean }) {
   const entries = TARGET_ORDER
     .map((k) => [k, counts[k] ?? 0] as [string, number])
     .concat(Object.entries(counts).filter(([k]) => !TARGET_ORDER.includes(k)).map(([k, v]) => [k, v ?? 0] as [string, number]))
@@ -182,7 +202,7 @@ export function CountsBar({ counts, compact }: { counts: Partial<Record<string, 
   if (total === 0) return <span className="muted">no targets</span>;
   return (
     <div className={`counts ${compact ? "counts-compact" : ""}`}>
-      {!compact && <PatchScore counts={counts} />}
+      {!compact && <PatchScore counts={counts} rollback={rollback} />}
       <div className="countbar" title={entries.map(([k, v]) => `${k}: ${v}`).join(", ")}>
         {entries.map(([k, v]) => (
           <span key={k} className={`seg seg-${pillTone(k)} seg-${k}`} style={{ width: `${(v / total) * 100}%` }} />
@@ -193,7 +213,7 @@ export function CountsBar({ counts, compact }: { counts: Partial<Record<string, 
           {entries.map(([k, v]) => (
             <span key={k} className="legend-item">
               <span className={`dot seg-${pillTone(k)} seg-${k}`} />
-              {k.replace(/_/g, " ")} <b>{v}</b>
+              {targetLabel(k, rollback ? "rollback" : undefined)} <b>{v}</b>
             </span>
           ))}
           <span className="legend-item muted">total <b>{total}</b></span>
@@ -220,14 +240,14 @@ export function scoreTone(pct: number): "green" | "amber" | "red" {
   return pct >= 95 ? "green" : pct >= 70 ? "amber" : "red";
 }
 
-export function PatchScore({ counts }: { counts: Partial<Record<string, number>> }) {
+export function PatchScore({ counts, rollback }: { counts: Partial<Record<string, number>>; rollback?: boolean }) {
   const s = patchScore(counts);
   if (s.total === 0) return null;
   return (
     <div className="patch-score">
       <span className={`patch-score-pct text-${scoreTone(s.pct)}`}>{s.pct}%</span>
       <span className="patch-score-label">
-        patched — <b>{s.patched}</b> of <b>{s.applicable}</b> endpoint{s.applicable === 1 ? "" : "s"} verified
+        {rollback ? "removed" : "patched"} — <b>{s.patched}</b> of <b>{s.applicable}</b> endpoint{s.applicable === 1 ? "" : "s"} verified{rollback ? " without the package" : ""}
         {s.total !== s.applicable && <span className="muted"> ({s.total - s.applicable} not applicable / excepted)</span>}
       </span>
     </div>

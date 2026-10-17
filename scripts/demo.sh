@@ -7,9 +7,24 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
 BIN=$ROOT/bin
-DEMO=$ROOT/demo
+DEMO=${DEMO_DIR:-$ROOT/demo}
 PORT=${PORT:-8080}
 URL=http://127.0.0.1:$PORT
+
+# demo/ may be someone's live environment (server data, signing key, tokens,
+# acquisition config): never delete it silently.
+if [ -e "$DEMO" ]; then
+  if pgrep -f "pmserver.*$(basename "$DEMO")/mgmt/pmserver.json" >/dev/null 2>&1; then
+    echo "refusing: a pmserver is running from $DEMO. Stop it first, or use DEMO_DIR=/tmp/offpatch-demo PORT=18080." >&2
+    exit 1
+  fi
+  if [ "${DEMO_RESET:-}" != "yes" ]; then
+    echo "refusing: $DEMO already exists and would be deleted (server data, signing key, tokens, acquire.json)." >&2
+    echo "Use another folder (DEMO_DIR=/tmp/offpatch-demo PORT=18080 $0), or DEMO_RESET=yes $0 to really start over." >&2
+    exit 1
+  fi
+fi
+if curl -s -o /dev/null "$URL"; then echo "port $PORT busy — stop the other server or set PORT=…" >&2; exit 1; fi
 
 [ -x "$BIN/pmserver" ] || make build >/dev/null
 make windows >/dev/null 2>&1 || true   # Windows agent, offered for download in the console

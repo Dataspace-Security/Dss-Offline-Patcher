@@ -34,9 +34,12 @@ export type Package = {
   // v1.1
   approvals: Approval[]; approvals_required: number;
   package_name: string; prerequisites: string[]; superseded_by: string;
+  // v1.2: why a rollback deployment is impossible ("" = supported: msu, msi, deb, rpm)
+  rollback_unsupported: string;
 };
 
-export type EndpointStatus = "compliant" | "noncompliant" | "pending_reboot" | "failed" | "exception" | "stale" | "offline" | "retired";
+export type EndpointStatus = "compliant" | "noncompliant" | "pending_reboot" | "failed" | "exception" | "stale" | "offline" | "retired"
+  | "lost_after_install"; // v1.2
 export type Endpoint = {
   endpoint_id: string; hostname: string; os: string; os_version: string; build: number; arch: string;
   groups: string[]; site: string; owner: string; criticality: string;
@@ -56,7 +59,9 @@ export type EndpointDetail = Endpoint & { inventory: InventoryItem[]; targets: T
 
 export type DeploymentState = "active" | "paused" | "cancelled" | "completed";
 export type TargetState = "pending" | "downloading" | "downloaded" | "installing" | "installed"
-  | "pending_reboot" | "verified" | "failed" | "not_applicable" | "exception";
+  | "pending_reboot" | "verified" | "failed" | "not_applicable" | "exception"
+  | "deferred" | "lost_after_install" | "rolled_back"; // v1.2
+export type DeploymentOperation = "install" | "rollback"; // v1.2
 export type Ring = { name: string; groups: string[] };
 export type HealthCheck = { type: "service_running" | "tcp_listening"; name: string };
 export type RebootPolicy = "never" | "in_window" | "at_deadline";
@@ -70,6 +75,8 @@ export type NewDeployment = {
   reboot_policy: RebootPolicy;
   ignore_windows: boolean;
   health_checks: HealthCheck[];
+  // v1.2 (default "install"; "rollback" requires a justification)
+  operation?: DeploymentOperation;
 };
 export type Deployment = NewDeployment & {
   deployment_id: string; state: DeploymentState; current_ring: number; state_reason: string;
@@ -81,6 +88,8 @@ export type Target = {
   state: TargetState; attempts: number; detail: string; exit_code: number; updated_at: string;
   // v1.1
   health: "" | "ok" | "failed"; health_detail: string;
+  // v1.2: the deployment's operation
+  operation: DeploymentOperation;
 };
 export type DeploymentDetail = Deployment & { targets: Target[] };
 
@@ -105,6 +114,8 @@ export type Assignment = {
   manifest_url: string; // /api/agent/manifest/<package_id>
   // v1.1
   reboot_allowed?: boolean; health_checks?: HealthCheck[];
+  // v1.2: "rollback" = uninstall (url is empty: nothing to download)
+  operation?: "rollback";
 };
 
 export type LifecycleExport = {

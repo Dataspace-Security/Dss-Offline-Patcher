@@ -25,6 +25,12 @@ type SimConfig struct {
 	// UnhealthyServices simulate post-install health-check failures.
 	UnhealthyServices []string `json:"unhealthy_services"`
 	Edition           string   `json:"edition"`
+	// Pre-install conditions: free disk bytes (0 = 100 GB) and battery.
+	FreeDiskBytes int64 `json:"free_disk_bytes,omitempty"`
+	OnBattery     bool  `json:"on_battery,omitempty"`
+	BatteryPct    int   `json:"battery_pct,omitempty"`
+	// FailUninstall: rollbacks of these KBs/product codes fail.
+	FailUninstall []string `json:"fail_uninstall,omitempty"`
 }
 
 type simState struct {
@@ -125,6 +131,59 @@ func (s *Sim) Install(ctx context.Context, p manifest.Package, file string) Resu
 		return Result{State: "failed", ExitCode: 1, Detail: err.Error()}
 	}
 	return res
+}
+
+// Uninstall removes the KB / product from the simulated inventory.
+func (s *Sim) Uninstall(ctx context.Context, p manifest.Package) Result {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id := p.KB
+	if p.Kind == "msi" {
+		id = p.ProductCode
+	}
+	for _, f := range s.cfg.FailUninstall {
+		if strings.EqualFold(f, id) {
+			return Result{State: "failed", ExitCode: 1603, Detail: "simulated uninstall failure"}
+		}
+	}
+	st := s.load()
+	n := len(st.KBs) + len(st.Products)
+	st.KBs = slices.DeleteFunc(st.KBs, func(k string) bool { return strings.EqualFold(k, id) })
+	st.Products = slices.DeleteFunc(st.Products, func(it store.InventoryItem) bool { return strings.EqualFold(it.ID, id) })
+	if len(st.KBs)+len(st.Products) == n {
+		return Result{State: "installed", Detail: "not installed; nothing to remove"}
+	}
+	res := Result{State: "installed", Detail: "simulated uninstall succeeded"}
+	if s.cfg.Reboot {
+		st.RebootCountdown = 1
+		res = Result{State: "pending_reboot", ExitCode: 3010, Detail: "simulated uninstall succeeded; reboot required"}
+	}
+	if err := s.save(st); err != nil {
+		return Result{State: "failed", ExitCode: 1, Detail: err.Error()}
+	}
+	return res
+}
+
+// FreeDisk and Power simulate the pre-install conditions.
+func (s *Sim) FreeDisk(path string) (int64, error) {
+	if s.cfg.FreeDiskBytes > 0 {
+		return s.cfg.FreeDiskBytes, nil
+	}
+	return 100 << 30, nil
+}
+
+func (s *Sim) Power(ctx context.Context) (PowerStatus, error) {
+	if !s.cfg.OnBattery {
+		return PowerStatus{}, nil
+	}
+	return PowerStatus{HasBattery: true, Percent: s.cfg.BatteryPct}, nil
+}
+
+// SetConditions changes the simulated disk/power (tests: "the user plugged in").
+func (s *Sim) SetConditions(freeDisk int64, onBattery bool, batteryPct int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cfg.FreeDiskBytes, s.cfg.OnBattery, s.cfg.BatteryPct = freeDisk, onBattery, batteryPct
 }
 
 // Reboot simulates an immediate, successful restart.

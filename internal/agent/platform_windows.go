@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -164,6 +165,61 @@ func (w *Windows) Install(ctx context.Context, p manifest.Package, file string) 
 	}
 	return Result{State: "failed", ExitCode: code, Detail: fmt.Sprintf("installer exit code %d (0x%08X)", code, u)}
 }
+
+const (
+	exitWusaAlreadyRemoved = 0x00240007 // WU_S_ALREADY_UNINSTALLED
+	exitMsiUnknownProduct  = 1605       // ERROR_UNKNOWN_PRODUCT: not installed
+)
+
+// Uninstall rolls back an .msu (wusa /uninstall /kb:N) or an .msi
+// (msiexec /x {ProductCode}). Nothing is downloaded: the KB / product code
+// come from the signed manifest.
+func (w *Windows) Uninstall(ctx context.Context, p manifest.Package) Result {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Hour)
+	defer cancel()
+	sys := filepath.Join(os.Getenv("SystemRoot"), "System32")
+	var cmd *exec.Cmd
+	switch p.Kind {
+	case "msu":
+		kb := strings.TrimPrefix(strings.ToUpper(p.KB), "KB")
+		if kb == "" || strings.Trim(kb, "0123456789") != "" {
+			return Result{State: "failed", ExitCode: -1, Detail: "invalid KB " + p.KB}
+		}
+		cmd = exec.CommandContext(ctx, filepath.Join(sys, "wusa.exe"), "/uninstall", "/kb:"+kb, "/quiet", "/norestart")
+	case "msi":
+		if !msiGUID.MatchString(p.ProductCode) {
+			return Result{State: "failed", ExitCode: -1, Detail: "invalid product code " + p.ProductCode}
+		}
+		os.MkdirAll(w.LogDir, 0o750)
+		logf := filepath.Join(w.LogDir, fmt.Sprintf("%s-uninstall-%d.log", p.PackageID, time.Now().Unix()))
+		cmd = exec.CommandContext(ctx, filepath.Join(sys, "msiexec.exe"), "/x", p.ProductCode, "/qn", "/norestart", "/l*v", logf)
+	default:
+		return Result{State: "failed", ExitCode: -1, Detail: "rollback is not supported for kind " + p.Kind}
+	}
+	err := cmd.Run()
+	code := 0
+	if err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			return Result{State: "failed", ExitCode: -1, Detail: "could not start uninstaller: " + err.Error()}
+		}
+		code = ee.ExitCode()
+	}
+	u := uint32(code)
+	switch {
+	case u == exitOK:
+		return Result{State: "installed", ExitCode: code, Detail: p.Kind + " uninstalled"}
+	case u == exitRebootRequired || u == exitRebootInitiated:
+		return Result{State: "pending_reboot", ExitCode: code, Detail: "uninstalled; reboot required"}
+	case p.Kind == "msu" && u == exitWusaAlreadyRemoved, p.Kind == "msi" && u == exitMsiUnknownProduct:
+		return Result{State: "installed", ExitCode: code, Detail: "not installed; nothing to remove"}
+	case p.Kind == "msi" && u == exitMsiBusy:
+		return Result{State: "failed", ExitCode: code, Detail: "another installation is in progress (will retry)"}
+	}
+	return Result{State: "failed", ExitCode: code, Detail: fmt.Sprintf("uninstaller exit code %d (0x%08X)", code, u)}
+}
+
+var msiGUID = regexp.MustCompile(`^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}$`)
 
 // Reboot schedules a planned restart in 10 minutes with a visible warning
 // (shutdown reason p:2:17 = planned, operating system: hot fix).

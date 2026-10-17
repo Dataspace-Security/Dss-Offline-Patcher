@@ -234,6 +234,7 @@ type simAgent struct {
 	dir    string
 	secret string
 	id     string
+	sim    *agent.Sim
 }
 
 func (e *env) enroll(host string, groups []string, sim agent.SimConfig) *simAgent {
@@ -259,7 +260,8 @@ func (e *env) enroll(host string, groups []string, sim agent.SimConfig) *simAgen
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	return &simAgent{Agent: a, dir: dir, secret: st.Secret, id: st.EndpointID}
+	sp, _ := p.(*agent.Sim)
+	return &simAgent{Agent: a, dir: dir, secret: st.Secret, id: st.EndpointID, sim: sp}
 }
 
 func (e *env) cycle(a *simAgent) {

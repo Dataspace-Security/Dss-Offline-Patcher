@@ -8,7 +8,7 @@ import { CopyBox, Empty, ErrorBanner, Modal, PageHeader, Pill, RelTime, Time } f
 import type { Endpoint, EndpointStatus, EnrollmentToken } from "../types";
 import { fmtBytes, relTime, splitList, useLoad, useNow } from "../util";
 
-const STATUSES: EndpointStatus[] = ["offline", "stale", "failed", "pending_reboot", "exception", "noncompliant", "compliant", "retired"];
+const STATUSES: EndpointStatus[] = ["lost_after_install", "offline", "stale", "failed", "pending_reboot", "exception", "noncompliant", "compliant", "retired"];
 
 export default function Endpoints() {
   const canEdit = useCan("operator");

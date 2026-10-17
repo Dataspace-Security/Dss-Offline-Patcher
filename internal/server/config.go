@@ -13,6 +13,7 @@ import (
 	"offpatch/internal/manifest"
 	"offpatch/internal/oidc"
 	"offpatch/internal/pki"
+	"offpatch/internal/store"
 )
 
 type Duration struct{ time.Duration }
@@ -74,6 +75,9 @@ type Config struct {
 	AuditCheckpointEvery    Duration            `json:"audit_checkpoint_interval"`
 	AuditRetention          Duration            `json:"audit_retention"`
 	SiteDownloadKbps        map[string]int      `json:"site_download_kbps"`
+	// Install safety (docs/07-admin-guide.md "Install safety").
+	Preinstall       PreinstallConfig `json:"preinstall"`
+	LostAfterInstall Duration         `json:"lost_after_install"`
 
 	dir string // directory of the config file; relative paths resolve from here
 }
@@ -104,6 +108,12 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if c.StaleInventoryAfter.Duration == 0 {
 		c.StaleInventoryAfter.Duration = 24 * time.Hour
+	}
+	if c.LostAfterInstall.Duration == 0 {
+		c.LostAfterInstall.Duration = 2 * time.Hour
+	}
+	if err := c.Preinstall.normalize(); err != nil {
+		return nil, err
 	}
 	if c.MaxBundleBytes == 0 {
 		c.MaxBundleBytes = 8 << 30
@@ -240,4 +250,57 @@ func (c *Config) IntakeConfig() (intake.Config, error) {
 		MaxBundlesPerHour: c.IntakeMaxBundlesPerHour,
 		MaxBytesPerHour:   c.IntakeMaxBytesPerHour,
 	}, nil
+}
+
+// PreinstallConfig: checks agents run before downloading an install. Failing
+// one defers the install to the next check-in (not a failure).
+type PreinstallConfig struct {
+	// MinFreeDiskMB by endpoint OS (windows, linux, macos): free space needed
+	// on the system volume, or 2 × the package size if larger. 0 = only the
+	// 2 × size rule. Defaults: windows 5120, macos 2048, linux 1024.
+	MinFreeDiskMB map[string]int `json:"min_free_disk_mb"`
+	// MinBatteryPct: laptops on battery below this wait for AC power.
+	// Default 40; 0 = no battery check.
+	MinBatteryPct *int `json:"min_battery_pct"`
+}
+
+func (p *PreinstallConfig) normalize() error {
+	def := map[string]int{"windows": 5120, "macos": 2048, "linux": 1024}
+	for k, v := range p.MinFreeDiskMB {
+		if _, ok := def[k]; !ok {
+			return fmt.Errorf("config: preinstall.min_free_disk_mb key %q must be windows, linux or macos", k)
+		}
+		if v < 0 {
+			return fmt.Errorf("config: preinstall.min_free_disk_mb[%s] must be >= 0", k)
+		}
+	}
+	for k, v := range def {
+		if _, ok := p.MinFreeDiskMB[k]; !ok {
+			if p.MinFreeDiskMB == nil {
+				p.MinFreeDiskMB = map[string]int{}
+			}
+			p.MinFreeDiskMB[k] = v
+		}
+	}
+	if p.MinBatteryPct == nil {
+		v := 40
+		p.MinBatteryPct = &v
+	}
+	if *p.MinBatteryPct < 0 || *p.MinBatteryPct > 100 {
+		return fmt.Errorf("config: preinstall.min_battery_pct must be 0-100")
+	}
+	return nil
+}
+
+// policyFor is what an endpoint of this OS is told on check-in.
+func (p PreinstallConfig) policyFor(osName string) store.PreinstallPolicy {
+	mb, ok := p.MinFreeDiskMB[osName]
+	if !ok {
+		mb = p.MinFreeDiskMB["linux"]
+	}
+	pct := 40
+	if p.MinBatteryPct != nil {
+		pct = *p.MinBatteryPct
+	}
+	return store.PreinstallPolicy{MinFreeDiskMB: mb, MinBatteryPct: pct}
 }

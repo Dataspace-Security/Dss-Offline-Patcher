@@ -114,9 +114,13 @@ func (s *Store) MarkDelivered(ctx context.Context, id int64) error {
 	return err
 }
 
-// SweepAlerts raises time-based alerts: offline endpoints, stale inventory,
+// SweepAlerts raises time-based alerts: endpoints lost after an install
+// (which may auto-pause their deployment), offline endpoints, stale inventory,
 // exceptions expiring within a week, and certificates near expiry.
 func (s *Store) SweepAlerts(ctx context.Context, th Thresholds) error {
+	if err := s.sweepLost(ctx, th.LostAfterInstall); err != nil {
+		return err
+	}
 	if err := s.sweepAcquisition(ctx); err != nil {
 		return err
 	}
@@ -127,7 +131,7 @@ func (s *Store) SweepAlerts(ctx context.Context, th Thresholds) error {
 	offline, stale := 0, 0
 	for _, e := range eps {
 		switch e.Status {
-		case "offline":
+		case "offline", "lost_after_install": // lost endpoints are offline too
 			offline++
 		case "stale":
 			stale++

@@ -127,8 +127,10 @@ type Agent struct {
 	log      *slog.Logger
 	interval time.Duration
 	rateKbps int // download limit from the server (0 = unlimited)
-	lastBoot time.Time
-	restart  bool // set after a self-upgrade
+	// preinstall: disk/battery thresholds from the server (nil = built-in defaults).
+	preinstall *store.PreinstallPolicy
+	lastBoot   time.Time
+	restart    bool // set after a self-upgrade
 }
 
 func New(st *State, dir string, plat Platform, log *slog.Logger) (*Agent, error) {
@@ -393,11 +395,12 @@ func (a *Agent) Cycle(ctx context.Context) error {
 	}
 	inv = append(inv, store.InventoryItem{Kind: "agent", ID: "offpatch-agent", Name: "offpatch agent", Version: a.agentVersion()})
 	var resp struct {
-		Assignments            []store.Assignment `json:"assignments"`
-		CheckinIntervalSeconds int                `json:"checkin_interval_seconds"`
-		RebootNow              bool               `json:"reboot_now"`
-		Trust                  *trust.Signed      `json:"trust"`
-		DownloadRateKbps       int                `json:"download_rate_kbps"`
+		Assignments            []store.Assignment      `json:"assignments"`
+		CheckinIntervalSeconds int                     `json:"checkin_interval_seconds"`
+		RebootNow              bool                    `json:"reboot_now"`
+		Trust                  *trust.Signed           `json:"trust"`
+		DownloadRateKbps       int                     `json:"download_rate_kbps"`
+		Preinstall             *store.PreinstallPolicy `json:"preinstall"`
 	}
 	req := store.CheckinRequest{Hostname: f.Hostname, OSVersion: f.OSVersion, Build: f.Build, Arch: f.Arch, AgentVersion: a.agentVersion(), RebootPending: reboot, Inventory: inv, Edition: f.Edition}
 	if hr, ok := a.plat.(hardwareReporter); ok {
@@ -411,6 +414,7 @@ func (a *Agent) Cycle(ctx context.Context) error {
 		a.interval = time.Duration(resp.CheckinIntervalSeconds) * time.Second
 	}
 	a.rateKbps = resp.DownloadRateKbps
+	a.preinstall = resp.Preinstall
 	if resp.Trust != nil {
 		if err := a.applyTrust(*resp.Trust); err != nil {
 			a.log.Warn("trust update not applied", "err", err)
@@ -462,6 +466,9 @@ func (a *Agent) process(ctx context.Context, as store.Assignment, f Facts, inv [
 		a.report(ctx, as, "not_applicable", 0, why)
 		return
 	}
+	if as.Operation == "rollback" {
+		return a.rollback(ctx, as, pkg, f, inv)
+	}
 	if pkg.Kind == "agent" && store.VersionAtLeast(a.agentVersion(), pkg.Version) {
 		a.report(ctx, as, "installed", 0, "agent already at "+a.agentVersion())
 		return
@@ -477,7 +484,14 @@ func (a *Agent) process(ctx context.Context, as store.Assignment, f Facts, inv [
 			return
 		}
 	}
-	// 3. Download (resumable) and verify against the signed hash.
+	// 3. Pre-install checks (disk space, power): failing them defers the
+	//    install to a later check-in; it is not a failure.
+	if why := a.preflight(ctx, pkg.File.Size, f.OS); why != "" {
+		log.Info("install deferred", "why", why)
+		a.report(ctx, as, "deferred", 0, why)
+		return
+	}
+	// 4. Download (resumable) and verify against the signed hash.
 	a.report(ctx, as, "downloading", 0, fmt.Sprintf("%d bytes", pkg.File.Size))
 	file, err := a.download(ctx, as, pkg)
 	if err != nil {
@@ -486,7 +500,7 @@ func (a *Agent) process(ctx context.Context, as store.Assignment, f Facts, inv [
 		return
 	}
 	a.report(ctx, as, "downloaded", 0, "sha256 verified "+pkg.File.SHA256[:16])
-	// 4. Install.
+	// 5. Install.
 	a.report(ctx, as, "installing", 0, a.plat.Name()+" installer started")
 	var res Result
 	if pkg.Kind == "agent" {
@@ -495,19 +509,61 @@ func (a *Agent) process(ctx context.Context, as store.Assignment, f Facts, inv [
 		res = a.plat.Install(ctx, pkg, file)
 	}
 	log.Info("install finished", "state", res.State, "exit", res.ExitCode, "detail", res.Detail)
+	a.finish(ctx, as, res)
+	if res.State != "failed" {
+		os.Remove(file)
+	}
+	return res.State == "pending_reboot"
+}
+
+// uninstaller is implemented by platforms that can roll a package back.
+type uninstaller interface {
+	Uninstall(ctx context.Context, p manifest.Package) Result
+}
+
+// rollback runs the platform uninstaller for a rollback assignment. Nothing
+// is downloaded; the signed manifest identifies what to remove.
+func (a *Agent) rollback(ctx context.Context, as store.Assignment, pkg manifest.Package, f Facts, inv []store.InventoryItem) (rebootPending bool) {
+	log := a.log.With("deployment", as.DeploymentID, "package", as.PackageID, "operation", "rollback")
+	u, ok := a.plat.(uninstaller)
+	if !ok {
+		a.report(ctx, as, "failed", -1, "rollback is not supported on platform "+a.plat.Name())
+		return
+	}
+	present := false
+	for _, it := range inv {
+		if (pkg.KB != "" && it.Kind == "kb" && strings.EqualFold(it.ID, pkg.KB)) || (pkg.ProductCode != "" && it.Kind == "product" && strings.EqualFold(it.ID, pkg.ProductCode)) ||
+			(pkg.PackageName != "" && it.Kind == "pkg" && it.ID == pkg.PackageName) {
+			present = true
+		}
+	}
+	if !present {
+		a.report(ctx, as, "not_applicable", 0, "not present in local inventory; nothing to roll back")
+		return
+	}
+	if why := a.preflight(ctx, 0, f.OS); why != "" {
+		log.Info("rollback deferred", "why", why)
+		a.report(ctx, as, "deferred", 0, why)
+		return
+	}
+	a.report(ctx, as, "installing", 0, a.plat.Name()+" uninstall started")
+	res := u.Uninstall(ctx, pkg)
+	log.Info("uninstall finished", "state", res.State, "exit", res.ExitCode, "detail", res.Detail)
+	a.finish(ctx, as, res)
+	return res.State == "pending_reboot"
+}
+
+// finish runs post-install health checks and reports the final state.
+func (a *Agent) finish(ctx context.Context, as store.Assignment, res Result) {
 	health, hdetail := "", ""
 	if (res.State == "installed" || res.State == "pending_reboot") && len(as.HealthChecks) > 0 {
 		ok, d := a.plat.Health(ctx, as.HealthChecks)
 		health, hdetail = map[bool]string{true: "ok", false: "failed"}[ok], d
 		if !ok {
-			log.Warn("post-install health check failed", "detail", d)
+			a.log.Warn("post-install health check failed", "deployment", as.DeploymentID, "package", as.PackageID, "detail", d)
 		}
 	}
 	a.reportHealth(ctx, as, res.State, res.ExitCode, res.Detail, health, hdetail)
-	if res.State != "failed" {
-		os.Remove(file)
-	}
-	return res.State == "pending_reboot"
 }
 
 func (a *Agent) signedPackage(ctx context.Context, as store.Assignment) (manifest.Package, error) {

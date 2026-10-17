@@ -1,10 +1,10 @@
 import { useState, type FormEvent } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { api, ApiError, enc, errMsg, qs } from "../api";
+import { api, ApiError, enc, errMsg } from "../api";
 import { useCan } from "../auth";
 import { TargetPreview } from "../components/TargetPreview";
 import { CountsBar, Empty, ErrorBanner, Mono, PageHeader, Pill, Time, patchScore, scoreTone } from "../components/ui";
-import type { Deployment, HealthCheck, NewDeployment, Package, RebootPolicy } from "../types";
+import type { Deployment, DeploymentOperation, HealthCheck, NewDeployment, Package, RebootPolicy } from "../types";
 import { splitList, toRFC3339, useLoad } from "../util";
 
 export function ringLabel(d: Deployment): string {
@@ -41,6 +41,7 @@ export function DeploymentList() {
                 <td>
                   <Link to={`/deployments/${enc(d.deployment_id)}`} className="cell-title">{d.name || d.deployment_id}</Link>
                   {d.emergency && <span className="flag-emergency">EMERGENCY</span>}
+                  {d.operation === "rollback" && <span className="flag-emergency flag-rollback">ROLLBACK</span>}
                   <div className="cell-sub"><Mono>{d.deployment_id}</Mono></div>
                 </td>
                 <td>
@@ -70,9 +71,11 @@ function SmallCounts({ d }: { d: Deployment }) {
   const sc = patchScore(c);
   return (
     <div className="cell-sub">
-      <b className={`text-${scoreTone(sc.pct)}`}>{sc.pct}% patched</b> · {done}/{total} done
+      <b className={`text-${scoreTone(sc.pct)}`}>{sc.pct}% {d.operation === "rollback" ? "removed" : "patched"}</b> · {done}/{total} done
       {(c.failed ?? 0) > 0 && <span className="text-red"> · {c.failed} failed</span>}
       {(c.pending_reboot ?? 0) > 0 && <span className="text-amber"> · {c.pending_reboot} reboot</span>}
+      {(c.lost_after_install ?? 0) > 0 && <span className="text-red"> · {c.lost_after_install} lost</span>}
+      {(c.deferred ?? 0) > 0 && <span className="text-amber"> · {c.deferred} deferred</span>}
     </div>
   );
 }
@@ -93,7 +96,9 @@ export function NewDeploymentPage() {
   const [sp] = useSearchParams();
   const navigate = useNavigate();
   const canCreate = useCan("operator");
-  const pkgs = useLoad(() => api.get<Package[]>(`/api/packages${qs({ state: "approved" })}`), []);
+  const pkgs = useLoad(() => api.get<Package[]>("/api/packages"), []);
+  const [operation, setOperation] = useState<DeploymentOperation>(sp.get("operation") === "rollback" ? "rollback" : "install");
+  const rollback = operation === "rollback";
 
   const [packageId, setPackageId] = useState(sp.get("package_id") ?? "");
   const [name, setName] = useState("");
@@ -116,7 +121,8 @@ export function NewDeploymentPage() {
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
 
-  const approved = (pkgs.data ?? []).filter((p) => p.state === "approved");
+  // Rollbacks may also target revoked packages (removing a bad patch is often why it was revoked).
+  const approved = (pkgs.data ?? []).filter((p) => p.state === "approved" || (rollback && p.state === "revoked"));
   const selected = approved.find((p) => p.package_id === packageId);
 
   const setRing = (i: number, patch: Partial<RingDraft>) =>
@@ -124,6 +130,8 @@ export function NewDeploymentPage() {
 
   const problems: string[] = [];
   if (!packageId) problems.push("Choose an approved package.");
+  if (rollback && selected?.rollback_unsupported) problems.push(`Rollback not supported: ${selected.rollback_unsupported}`);
+  if (rollback && !justification.trim()) problems.push("Rollback deployments require a justification (e.g. the change ticket).");
   if (!name.trim()) problems.push("Name is required.");
   if (rings.length === 0) problems.push("At least one ring is required.");
   rings.forEach((r, i) => {
@@ -160,12 +168,13 @@ export function NewDeploymentPage() {
       window_start: winStart,
       window_end: winEnd,
       emergency,
-      justification: emergency ? justification.trim() : "",
+      justification: emergency || rollback ? justification.trim() : "",
       deadline: deadline ? toRFC3339(deadline) : "",
       max_concurrent: mc,
       reboot_policy: rebootPolicy,
       ignore_windows: ignoreWindows,
       health_checks: checks.map((c) => ({ type: c.type, name: c.name.trim() })),
+      operation,
     };
     try {
       const d = await api.post<Deployment>("/api/deployments", body);
@@ -188,17 +197,32 @@ export function NewDeploymentPage() {
 
   return (
     <>
-      <PageHeader title="New deployment" sub={<Link to="/deployments">← Deployments</Link>} />
+      <PageHeader title={rollback ? "New rollback deployment" : "New deployment"} sub={<Link to="/deployments">← Deployments</Link>} />
       <ErrorBanner error={pkgs.error} />
       <form className="form card" onSubmit={submit}>
         <div className="form-grid">
           <label className="field span-2">
-            <span>Package <em className="req">approved only</em></span>
+            <span>Operation</span>
+            <select value={operation} onChange={(e) => setOperation(e.target.value as DeploymentOperation)}>
+              <option value="install">Install the package</option>
+              <option value="rollback">Roll back (uninstall) the package</option>
+            </select>
+            {rollback && (
+              <small className="hint">
+                Agents uninstall it ring by ring (.msu: <Mono>wusa /uninstall /kb:N</Mono>, .msi: <Mono>msiexec /x {"{ProductCode}"}</Mono>,
+                .deb/.rpm: <Mono>dpkg -r</Mono> / <Mono>rpm -e</Mono>). Only endpoints whose inventory shows the package are targeted;
+                verified = inventory no longer shows it. macOS .pkg installers have no uninstall and cannot be rolled back.
+              </small>
+            )}
+          </label>
+          <label className="field span-2">
+            <span>Package <em className="req">{rollback ? "approved or revoked" : "approved only"}</em></span>
             <select value={packageId} onChange={(e) => setPackageId(e.target.value)}>
               <option value="">— select an approved package —</option>
               {approved.map((p) => (
-                <option key={p.package_id} value={p.package_id}>
-                  {p.title || p.package_id} {p.kb ? `(${p.kb})` : ""} · {p.severity}
+                <option key={p.package_id} value={p.package_id} disabled={rollback && !!p.rollback_unsupported}>
+                  {p.title || p.package_id} {p.kb ? `(${p.kb})` : ""} · {p.severity}{p.state === "revoked" ? " · revoked" : ""}
+                  {rollback && p.rollback_unsupported ? " — rollback not supported" : ""}
                 </option>
               ))}
               {packageId && !selected && pkgs.data && (
@@ -238,7 +262,10 @@ export function NewDeploymentPage() {
           <button type="button" className="btn btn-sm" onClick={() => setRings([...rings, { name: "", groups: "" }])}>+ Add ring</button>
         </fieldset>
 
-        <TargetPreview pkg={selected} rings={rings} />
+        {rollback && selected?.rollback_unsupported && (
+          <div className="banner banner-error"><b>Rollback not supported for {selected.kind}:</b> {selected.rollback_unsupported}</div>
+        )}
+        {!rollback && <TargetPreview pkg={selected} rings={rings} />}
 
         <div className="form-grid">
           <label className="field">
@@ -335,9 +362,9 @@ export function NewDeploymentPage() {
           <input type="checkbox" checked={emergency} onChange={(e) => setEmergency(e.target.checked)} />
           <span><b>Emergency deployment</b> — flagged in the audit log and the UI</span>
         </label>
-        {emergency && (
+        {(emergency || rollback) && (
           <label className="field">
-            <span>Justification <em className="req">required</em></span>
+            <span>Justification <em className="req">required</em>{rollback && <em className="muted"> — why roll back (change ticket, incident)</em>}</span>
             <textarea rows={3} value={justification} onChange={(e) => setJustification(e.target.value)} />
           </label>
         )}
@@ -358,8 +385,8 @@ export function NewDeploymentPage() {
         )}
         <div className="form-actions">
           <Link to="/deployments" className="btn">Cancel</Link>
-          <button className={`btn ${emergency ? "btn-danger" : "btn-primary"}`} disabled={problems.length > 0 || busy}>
-            {busy ? "Creating…" : emergency ? "Create emergency deployment" : "Create deployment"}
+          <button className={`btn ${emergency || rollback ? "btn-danger" : "btn-primary"}`} disabled={problems.length > 0 || busy}>
+            {busy ? "Creating…" : rollback ? "Create rollback deployment" : emergency ? "Create emergency deployment" : "Create deployment"}
           </button>
         </div>
       </form>

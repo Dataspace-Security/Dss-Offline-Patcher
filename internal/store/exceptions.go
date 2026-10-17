@@ -92,7 +92,7 @@ func (s *Store) CreateException(ctx context.Context, actor string, n NewExceptio
 			return err
 		}
 		// Apply immediately to outstanding targets.
-		where := `t.endpoint_id=? AND t.state IN ('pending','failed') AND d.state IN ('active','paused')`
+		where := `t.endpoint_id=? AND t.state IN ('pending','failed','deferred') AND d.state IN ('active','paused') AND d.operation='install'`
 		args := []any{n.EndpointID}
 		if n.PackageID != "" {
 			where += ` AND t.package_id=?`
@@ -195,7 +195,7 @@ type Summary struct {
 func (s *Store) Summary(ctx context.Context, th Thresholds) (Summary, error) {
 	var sm Summary
 	sm.Endpoints.ByStatus = map[string]int{}
-	for _, k := range []string{"compliant", "noncompliant", "pending_reboot", "failed", "exception", "stale", "offline"} {
+	for _, k := range []string{"compliant", "noncompliant", "pending_reboot", "failed", "exception", "stale", "offline", "lost_after_install"} {
 		sm.Endpoints.ByStatus[k] = 0
 	}
 	eps, err := s.ListEndpoints(ctx, th)

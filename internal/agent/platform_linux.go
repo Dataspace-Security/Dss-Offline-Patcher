@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -140,6 +141,44 @@ func (l *Linux) Install(ctx context.Context, p manifest.Package, file string) Re
 	}
 	return Result{State: "installed", Detail: tail}
 }
+
+// Uninstall removes the package (dpkg -r keeps conffiles; rpm -e). dpkg and
+// rpm refuse when other installed packages depend on it, which is reported
+// as a failure rather than forced.
+func (l *Linux) Uninstall(ctx context.Context, p manifest.Package) Result {
+	ctx, cancel := context.WithTimeout(ctx, time.Hour)
+	defer cancel()
+	if !debName.MatchString(p.PackageName) {
+		return Result{State: "failed", ExitCode: -1, Detail: "invalid package name " + p.PackageName}
+	}
+	var cmd *exec.Cmd
+	switch p.Kind {
+	case "deb":
+		cmd = exec.CommandContext(ctx, "dpkg", "-r", p.PackageName)
+		cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+	case "rpm":
+		cmd = exec.CommandContext(ctx, "rpm", "-e", p.PackageName)
+	default:
+		return Result{State: "failed", ExitCode: -1, Detail: "rollback is not supported for kind " + p.Kind + " on Linux"}
+	}
+	out, err := cmd.CombinedOutput()
+	tail := lastLines(string(out), 6)
+	if err != nil {
+		code := -1
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			code = ee.ExitCode()
+		}
+		return Result{State: "failed", ExitCode: code, Detail: tail}
+	}
+	if rebootRequired(ctx) {
+		return Result{State: "pending_reboot", Detail: "removed; reboot required. " + tail}
+	}
+	return Result{State: "installed", Detail: "removed. " + tail}
+}
+
+// debName: Debian/RPM package names (no options or paths can be smuggled in).
+var debName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9+._-]{0,200}$`)
 
 func lastLines(s string, n int) string {
 	lines := strings.Split(strings.TrimSpace(s), "\n")

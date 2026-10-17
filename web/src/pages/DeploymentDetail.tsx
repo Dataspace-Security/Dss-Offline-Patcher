@@ -2,8 +2,8 @@ import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, enc } from "../api";
 import { useCan } from "../auth";
-import { CountsBar, Empty, ErrorBanner, KV, Mono, PageHeader, Pill, ReasonModal, RelTime, Time } from "../components/ui";
-import type { Deployment, DeploymentDetail } from "../types";
+import { CountsBar, Empty, ErrorBanner, KV, Mono, PageHeader, Pill, ReasonModal, RelTime, TargetPill, Time, targetLabel } from "../components/ui";
+import type { Deployment, DeploymentDetail, Package } from "../types";
 import { useLoad } from "../util";
 import { REBOOT_POLICIES, ringLabel } from "./Deployments";
 
@@ -14,6 +14,7 @@ export default function DeploymentDetailPage() {
   const canOperate = useCan("operator");
   const { data: d, error, reload, loadedAt } = useLoad(
     () => api.get<DeploymentDetail>(`/api/deployments/${enc(id)}`), [id], 5000);
+  const pkg = useLoad(() => (d ? api.get<Package>(`/api/packages/${enc(d.package_id)}`) : Promise.resolve(null)), [d?.package_id]);
   const [action, setAction] = useState<Action | null>(null);
   const [ringFilter, setRingFilter] = useState<string>("");
   const [stateFilter, setStateFilter] = useState<string>("");
@@ -44,11 +45,16 @@ export default function DeploymentDetailPage() {
   const canAdvance = d.state === "active" && d.current_ring < total - 1;
   const ringName = (i: number) => d.rings?.[i]?.name ?? `ring ${i + 1}`;
   const states = Array.from(new Set((d.targets ?? []).map((t) => t.state))).sort();
+  const rollback = d.operation === "rollback";
+  const lost = (d.targets ?? []).filter((t) => t.state === "lost_after_install");
+  const deferred = (d.targets ?? []).filter((t) => t.state === "deferred");
+  const p = pkg.data;
+  const canRollBack = !rollback && p && (p.state === "approved" || p.state === "revoked");
 
   return (
     <>
       <PageHeader
-        title={<>{d.name || d.deployment_id} {d.emergency && <span className="flag-emergency">EMERGENCY</span>}</>}
+        title={<>{d.name || d.deployment_id} {d.emergency && <span className="flag-emergency">EMERGENCY</span>}{rollback && <span className="flag-emergency flag-rollback">ROLLBACK</span>}</>}
         sub={<><Link to="/deployments">← Deployments</Link> · <Mono>{d.deployment_id}</Mono> · updated <RelTime value={new Date(loadedAt || Date.now()).toISOString()} /></>}
       >
         <Pill state={d.state} />
@@ -57,6 +63,12 @@ export default function DeploymentDetailPage() {
         {canOperate && canAdvance && <button className="btn btn-primary" onClick={() => setAction("advance")}>Advance ring…</button>}
         {canOperate && (d.state === "active" || d.state === "paused") &&
           <button className="btn btn-danger" onClick={() => setAction("cancel")}>Cancel…</button>}
+        {canOperate && canRollBack && (p.rollback_unsupported
+          ? <button className="btn" disabled title={p.rollback_unsupported}>Rollback not supported</button>
+          : d.state === "active" || d.state === "paused"
+          ? <button className="btn" disabled title="Cancel this deployment first: an install and a rollback of the same package cannot run at the same time">Roll back…</button>
+          : <Link className="btn btn-danger-ghost" to={`/deployments/new?operation=rollback&package_id=${enc(d.package_id)}`}
+              title="Create a rollback deployment: agents uninstall this package, ring by ring">Roll back…</Link>)}
       </PageHeader>
       <ErrorBanner error={error} />
       {d.state_reason && (
@@ -67,11 +79,29 @@ export default function DeploymentDetailPage() {
       {d.emergency && (
         <div className="banner banner-error"><b>Emergency justification:</b> {d.justification || "—"}</div>
       )}
+      {rollback && (
+        <div className="banner banner-warn">
+          <b>Rollback:</b> agents uninstall <Mono>{d.package_id}</Mono> ({p?.kind === "msu" ? `wusa /uninstall /kb:${(p.kb || "").replace(/^KB/i, "")}` : p?.kind === "msi" ? `msiexec /x ${p.product_code}` : p?.kind === "deb" ? `dpkg -r ${p.package_name}` : p?.kind === "rpm" ? `rpm -e ${p.package_name}` : "uninstall"}).
+          {" "}Verified = inventory no longer shows it. Justification: {d.justification || "—"}
+        </div>
+      )}
+      {lost.length > 0 && (
+        <div className="banner banner-error">
+          <b>{lost.length} endpoint{lost.length === 1 ? "" : "s"} stopped checking in after {rollback ? "the uninstall" : "installing"}:</b>{" "}
+          {lost.map((t, i) => <span key={t.endpoint_id}>{i > 0 && ", "}<Link to={`/endpoints/${enc(t.endpoint_id)}`}>{t.hostname || t.endpoint_id}</Link></span>)}.
+          {" "}They count as failures towards auto-pause. Check them (boot failure?) before resuming; they recover automatically when they check in and verify.
+        </div>
+      )}
+      {deferred.length > 0 && (
+        <div className="banner banner-info">
+          <b>{deferred.length} deferred</b> by pre-install checks (free disk space / battery) — retried at each check-in, not counted as failures.
+        </div>
+      )}
 
       <div className="grid-2">
         <section className="card">
           <h2>Progress</h2>
-          <CountsBar counts={d.counts ?? {}} />
+          <CountsBar counts={d.counts ?? {}} rollback={rollback} />
           <div className="rings-progress">
             {(d.rings ?? []).map((r, i) => {
               const cls = d.state === "completed" || i < d.current_ring ? "done" : i === d.current_ring ? "current" : "future";
@@ -91,6 +121,7 @@ export default function DeploymentDetailPage() {
           <h2>Settings</h2>
           <KV rows={[
             ["Package", <Link to={`/catalog/${enc(d.package_id)}`}><Mono>{d.package_id}</Mono></Link>],
+            ["Operation", rollback ? <Pill state="failed" label="rollback (uninstall)" /> : "install"],
             ["Current ring", `${ringLabel(d)} · ${ringName(Math.min(d.current_ring, total - 1))}`],
             ["Max failure", `${d.max_failure_pct}%`],
             ["Max retries", String(d.max_retries)],
@@ -119,7 +150,7 @@ export default function DeploymentDetailPage() {
             </select>
             <select value={stateFilter} onChange={(e) => setStateFilter(e.target.value)}>
               <option value="">All states</option>
-              {states.map((s) => <option key={s} value={s}>{s}</option>)}
+              {states.map((s) => <option key={s} value={s}>{targetLabel(s, d.operation)}</option>)}
             </select>
           </div>
         </div>
@@ -133,7 +164,7 @@ export default function DeploymentDetailPage() {
                 <tr key={t.endpoint_id}>
                   <td><Link to={`/endpoints/${enc(t.endpoint_id)}`}>{t.hostname || t.endpoint_id}</Link></td>
                   <td>{t.ring + 1}. {ringName(t.ring)}</td>
-                  <td><Pill state={t.state} /></td>
+                  <td><TargetPill state={t.state} operation={t.operation} /></td>
                   <td className="num">{t.attempts}</td>
                   <td className="num"><Mono>{t.exit_code}</Mono></td>
                   <td>{t.health ? <span title={t.health_detail || undefined}><Pill state={t.health === "ok" ? "verified" : "failed"} label={t.health} /></span> : <span className="muted">—</span>}

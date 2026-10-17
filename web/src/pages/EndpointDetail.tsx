@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, enc, errMsg } from "../api";
 import { useCan } from "../auth";
-import { Empty, ErrorBanner, KV, Mono, PageHeader, Pill, ReasonModal, RelTime, Time } from "../components/ui";
+import { Empty, ErrorBanner, KV, Mono, PageHeader, Pill, ReasonModal, RelTime, TargetPill, Time } from "../components/ui";
 import { AvailablePatches } from "../components/AvailablePatches";
 import { HardwareCard } from "../components/Hardware";
 import type { Endpoint, EndpointDetail } from "../types";
@@ -45,6 +45,14 @@ export default function EndpointDetailPage() {
           excluded from compliance totals and new deployments.
         </div>
       )}
+      {e.status === "lost_after_install" && (
+        <div className="banner banner-error">
+          <b>Lost after install:</b> this endpoint stopped checking in after installing
+          {" "}{e.targets.filter((t) => t.state === "lost_after_install").map((t) => t.package_id).join(", ")}.
+          {" "}Check it (boot failure, blue screen, network stack?). It counts as a failure towards its deployment's auto-pause and recovers
+          automatically when the agent checks in and the install verifies.
+        </div>
+      )}
       {(e.status === "offline" || e.status === "stale") && (
         <div className="banner banner-warn">
           This endpoint is <b>{e.status}</b>. Its patch state is unknown — silence is never compliance.
@@ -62,6 +70,7 @@ export default function EndpointDetailPage() {
             ["Last seen", <Time value={e.last_seen} />],
             ["Inventory", <Time value={e.inventory_at} />],
             ["Reboot pending", e.reboot_pending ? <Pill state="pending_reboot" label="yes" /> : "no"],
+            ...(e.targets.some((t) => t.state === "deferred") ? [["Deferred", <span className="text-amber">{e.targets.filter((t) => t.state === "deferred").map((t) => t.detail).filter(Boolean)[0] ?? "pre-install check not met"}</span>] as [string, ReactNode]] : []),
             ["Enrolled", <Time value={e.enrolled_at} />],
             ["Certificate", <CertExpiry value={e.cert_not_after} now={now} />],
             ...(e.reboot_requested_at && parseTime(e.reboot_requested_at) ? [["Reboot requested", <Time value={e.reboot_requested_at} />] as [string, ReactNode]] : []),
@@ -80,14 +89,15 @@ export default function EndpointDetailPage() {
         <h2>Deployment targets <span className="muted">· {(e.targets ?? []).length}</span></h2>
         {(e.targets ?? []).length === 0 ? <Empty>Not targeted by any deployment.</Empty> : (
           <table className="table">
-            <thead><tr><th>Deployment</th><th>Package</th><th>Ring</th><th>State</th><th className="num">Attempts</th><th className="num">Exit</th><th>Detail</th><th>Updated</th></tr></thead>
+            <thead><tr><th>Deployment</th><th>Package</th><th>Operation</th><th>Ring</th><th>State</th><th className="num">Attempts</th><th className="num">Exit</th><th>Detail</th><th>Updated</th></tr></thead>
             <tbody>
               {e.targets.map((t) => (
                 <tr key={t.deployment_id}>
                   <td><Link to={`/deployments/${enc(t.deployment_id)}`}><Mono>{t.deployment_id}</Mono></Link></td>
                   <td><Link to={`/catalog/${enc(t.package_id)}`}><Mono>{t.package_id}</Mono></Link></td>
+                  <td>{t.operation === "rollback" ? <span className="text-amber">rollback</span> : "install"}</td>
                   <td>{t.ring + 1}</td>
-                  <td><Pill state={t.state} /></td>
+                  <td><TargetPill state={t.state} operation={t.operation} /></td>
                   <td className="num">{t.attempts}</td>
                   <td className="num"><Mono>{t.exit_code}</Mono></td>
                   <td className="detail-cell">{t.detail || <span className="muted">—</span>}</td>

@@ -158,6 +158,10 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
                 Deploy…
               </button>
             )}
+            {(p.state === "approved" || p.state === "revoked") && canDeploy && (p.rollback_unsupported
+              ? <button className="btn" disabled title={p.rollback_unsupported}>Rollback not supported</button>
+              : <button className="btn btn-danger-ghost" title="Agents uninstall this package, ring by ring"
+                  onClick={() => navigate(`/deployments/new?operation=rollback&package_id=${enc(p.package_id)}`)}>Roll back…</button>)}
             {p.state === "approved" && canApprove && (
               <button className="btn btn-danger" onClick={() => setAction("revoke")}>Revoke…</button>
             )}
@@ -193,6 +197,7 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
             ["Needed by", need ? (need.needed ? <><b>{need.needed}</b> endpoint{need.needed === 1 ? "" : "s"}: {need.hostnames.slice(0, 20).join(", ")}{need.hostnames.length > 20 ? " …" : ""}</> : "no endpoint needs it (up to date, not installed, or not applicable)") : "…"],
             ["Vendor", p.vendor],
             ["Kind", <span className="tag">{p.kind}</span>],
+            ["Rollback", p.rollback_unsupported ? <span className="text-amber">not supported — {p.rollback_unsupported}</span> : "supported (uninstall via rollback deployment)"],
             ["Package name", p.package_name ? <Mono>{p.package_name}</Mono> : ""],
             ["Version", p.version],
             ["KB", p.kb],

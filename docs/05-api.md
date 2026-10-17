@@ -53,7 +53,7 @@ serial must be the endpoint's current one and the endpoint must not be retired, 
 `client certificate not valid for an active endpoint`; no certificate → 401
 `client certificate required`. Lab mode: `Authorization: Bearer <device secret>`.
 
-Agent-reportable `state`: `downloading`, `downloaded`, `installing`, `installed`, `pending_reboot`, `failed`, `not_applicable`. Only the server sets `verified`.
+Agent-reportable `state`: `downloading`, `downloaded`, `installing`, `installed`, `pending_reboot`, `failed`, `not_applicable`, `deferred` (v1.2). Only the server sets `verified`, `lost_after_install` and `rolled_back`.
 
 ## Types
 
@@ -242,4 +242,41 @@ type Alert = { id: number; created_at: string; severity: "info" | "warning" | "c
 // Failed deliveries are retried at the next sweep (alert_sweep_interval).
 
 // AgentSetup gains: ca_certificate: string (PEM; "" in lab mode) — offer "Download ca.pem" and add `-ca` to commands when present.
+```
+
+## v1.2 additions — install safety (docs/03-state-model.md)
+
+```ts
+// Pre-install deferral. Agent-reportable states gain "deferred": a pre-install check (free disk
+// space, battery) was not met; retried at every check-in, never counted as a failure.
+// Check-in response gains:
+//   preinstall: { min_free_disk_mb: number; min_battery_pct: number }   // for this endpoint's OS
+// The agent needs max(2 × package size, min_free_disk_mb) free on the system volume and on its
+// cache directory, and AC power or ≥ min_battery_pct (0 = no battery check). Agents talking to an
+// older server use built-in defaults (windows 5120, macos 2048, linux 1024 MB; battery 40%).
+
+// Lost endpoints. TargetState gains "lost_after_install" (server only): the endpoint reported
+// installed / pending_reboot and has not checked in (nor reported on any target) for
+// lost_after_install (default 2h) since that report or its reboot request. Counts towards the
+// ring's max_failure_pct; raises a critical alert kind "lost_after_install" (object = deployment,
+// message names every lost host; updated and re-sent while open). Check-in recovers it
+// (verified, or back to pending_reboot / installed).
+// EndpointStatus gains "lost_after_install" (highest precedence after "retired").
+
+// Rollback. NewDeployment gains:
+//   operation?: "install" | "rollback";     // default "install"; "rollback" requires justification
+// Rollback is accepted for approved or revoked packages of kind msu (needs kb), msi (needs
+// product_code), deb/rpm (needs package_name); otherwise 409 "rollback not supported for …".
+// 409 while an active/paused deployment of the same package with the other operation exists.
+// Deployment, Target gain operation: "install" | "rollback".
+// Package gains rollback_unsupported: string ("" = supported; else why, e.g. macOS .pkg).
+// Assignment gains operation?: "rollback" (url is "": nothing is downloaded; the agent verifies
+// the signed manifest and runs wusa /uninstall /kb:N, msiexec /x {ProductCode}, dpkg -r or rpm -e).
+// Rollback targets reuse the install states; "installed" = uninstaller succeeded, "verified" =
+// fresh inventory no longer shows the package. Endpoints whose inventory does not show it (deb/rpm:
+// at exactly this version) are not_applicable.
+// TargetState gains "rolled_back" (server only): set on install targets of the same package and
+// endpoint when a rollback is verified there; reports no longer count them as patched.
+// Revoking a package cancels its install deployments only; rollback deployments keep running.
+// Audit actions: deployment.created_rollback, target.deferred, target.lost_after_install, target.rolled_back.
 ```
