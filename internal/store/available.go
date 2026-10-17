@@ -171,21 +171,54 @@ func (s *Store) AvailableFor(ctx context.Context, endpointID string) ([]Availabl
 	return out, nil
 }
 
-// PackageNeed summarises, per package, which endpoints still need it.
+// PackageNeed summarises, per package, which endpoints still need it and
+// where the rest of the fleet stands (GET /api/packages-needs, PackageFleet).
 type PackageNeed struct {
 	PackageID string   `json:"package_id"`
 	Needed    int      `json:"needed"`
 	Endpoints []string `json:"endpoint_ids"`
 	Hostnames []string `json:"hostnames"`
+	// Every applicable endpoint with inventory is exactly one of needed,
+	// up_to_date (present, superseded, newer, or otherwise not needed) and
+	// not_installed (a third-party app that is not on it).
+	UpToDate     int `json:"up_to_date"`
+	NotInstalled int `json:"not_installed"`
+	// Which endpoints those are, so the console can show per machine what a
+	// deployment will do (install, skip as up to date, skip as not installed).
+	UpToDateIDs     []string `json:"up_to_date_ids"`
+	NotInstalledIDs []string `json:"not_installed_ids"`
+	// Targets of install deployments and active exceptions, per endpoint
+	// (may overlap with needed).
+	Deploying          int    `json:"deploying"`
+	Verified           int    `json:"verified"`
+	Failed             int    `json:"failed"`
+	Exception          int    `json:"exception"`
+	ActiveDeploymentID string `json:"active_deployment_id"`
+
+	state string // package state (approved | quarantined)
 }
+
+// Approved reports whether the package is approved (deployable now).
+func (n PackageNeed) Approved() bool { return n.state == "approved" }
 
 // Needs computes PackageNeed for every live catalog package across the fleet.
 func (s *Store) Needs(ctx context.Context) (map[string]PackageNeed, error) {
+	eps, err := listEndpoints(ctx, s.db)
+	if err != nil {
+		return nil, err
+	}
+	return s.NeedsFor(ctx, eps)
+}
+
+// NeedsFor is Needs over the given endpoints (loaded with their inventory,
+// e.g. by ListEndpoints), so callers that already hold the fleet do not
+// parse every inventory again.
+func (s *Store) NeedsFor(ctx context.Context, eps []Endpoint) (map[string]PackageNeed, error) {
 	pkgs, err := s.catalogForNeeds(ctx)
 	if err != nil {
 		return nil, err
 	}
-	eps, err := listEndpoints(ctx, s.db)
+	fl, err := s.FleetTargets(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -195,15 +228,42 @@ func (s *Store) Needs(ctx context.Context) (map[string]PackageNeed, error) {
 		if err != nil {
 			return nil, err
 		}
-		pn := PackageNeed{PackageID: p.PackageID, Endpoints: []string{}, Hostnames: []string{}}
+		pn := PackageNeed{PackageID: p.PackageID, Endpoints: []string{}, Hostnames: []string{}, UpToDateIDs: []string{}, NotInstalledIDs: []string{}, state: p.State,
+			ActiveDeploymentID: fl.ActiveDeployment(p.PackageID)}
 		for _, e := range eps {
-			if e.RetiredAt != "" || e.InventoryAt == "" {
+			if e.RetiredAt != "" {
 				continue
 			}
-			if ok, _, _ := needs(p, e, e.inventory, sup); ok {
+			if ok, _ := applicable(p, e); !ok {
+				continue
+			}
+			st := fl.Status(p.PackageID, e.EndpointID)
+			if st.Exception {
+				pn.Exception++
+			}
+			switch {
+			case st.Verified:
+				pn.Verified++
+			case st.Deploying:
+				pn.Deploying++
+			case st.Failed:
+				pn.Failed++
+			}
+			if e.InventoryAt == "" {
+				continue
+			}
+			need, _, _ := needs(p, e, e.inventory, sup)
+			switch {
+			case need:
 				pn.Needed++
 				pn.Endpoints = append(pn.Endpoints, e.EndpointID)
 				pn.Hostnames = append(pn.Hostnames, e.Hostname)
+			case !appInstalled(e.inventory, p):
+				pn.NotInstalled++
+				pn.NotInstalledIDs = append(pn.NotInstalledIDs, e.EndpointID)
+			default:
+				pn.UpToDate++
+				pn.UpToDateIDs = append(pn.UpToDateIDs, e.EndpointID)
 			}
 		}
 		out[p.PackageID] = pn

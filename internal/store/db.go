@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -37,6 +38,7 @@ type Store struct {
 
 	chain        chainCache
 	enrollDenied deniedAudits
+	gen          atomic.Uint64 // Generation
 }
 
 const schema = `

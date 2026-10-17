@@ -35,7 +35,7 @@ func (s *Store) Enroll(ctx context.Context, r EnrollRequest, issue CertIssuer) (
 		return "", "", "", err
 	}
 	th := HashSecret(r.Token)
-	err = s.tx(ctx, func(tx *sql.Tx) error {
+	err = s.txChanged(ctx, func(tx *sql.Tx) error {
 		var groups, site, exp, used string
 		var uses, maxUses int
 		err := tx.QueryRow(`SELECT groups, site, expires_at, used_at, uses, max_uses FROM enrollment_tokens WHERE token_hash=?`, th).Scan(&groups, &site, &exp, &used, &uses, &maxUses)
@@ -245,7 +245,7 @@ func (s *Store) RetireEndpoint(ctx context.Context, actor, id, reason string) (E
 		return Endpoint{}, err
 	}
 	var out Endpoint
-	err := s.tx(ctx, func(tx *sql.Tx) error {
+	err := s.txChanged(ctx, func(tx *sql.Tx) error {
 		e, err := getEndpoint(ctx, tx, id)
 		if err != nil {
 			return err

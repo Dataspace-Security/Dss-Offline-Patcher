@@ -72,7 +72,15 @@ func (s *Server) exportAcqRequest(w http.ResponseWriter, r *http.Request) {
 	for _, k := range req.KBs {
 		kbs = append(kbs, k.KB+"/"+k.Arch)
 	}
-	if err := s.store.Audit(r.Context(), store.Ev{Actor: req.CreatedBy, Action: "acquisition.request_exported", ObjectType: "acquisition_request",
+	rec := store.AcqRequestRecord{RequestID: req.RequestID, CreatedAt: req.CreatedAt, CreatedBy: req.CreatedBy, IntelGeneratedAt: req.IntelGeneratedAt}
+	for _, a := range req.Apps {
+		rec.Items = append(rec.Items, store.AcqRequestItem{Kind: "app", Key: a.WingetID, Version: a.Version})
+	}
+	for _, k := range req.KBs {
+		rec.Items = append(rec.Items, store.AcqRequestItem{Kind: "kb", Key: k.KB, Version: k.Arch})
+	}
+	// Tracked (seen / fulfilled) and audited in one transaction.
+	if err := s.store.RecordAcqRequest(r.Context(), rec, store.Ev{Actor: req.CreatedBy, Action: "acquisition.request_exported", ObjectType: "acquisition_request",
 		ObjectID: req.RequestID, Details: map[string]any{"apps": apps, "kbs": kbs, "intel_generated_at": req.IntelGeneratedAt}}); err != nil {
 		s.fail(w, err) // no audit record, no export
 		return

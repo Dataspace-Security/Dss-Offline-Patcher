@@ -52,7 +52,21 @@ func hasColumn(db *sql.DB, table, column string) (bool, error) {
 	return false, rows.Err()
 }
 
+// Additive tables added after the base schema (idempotent).
+var tableMigrations = []string{
+	// Exported acquisition requests (tracked: seen / fulfilled are computed on read).
+	`CREATE TABLE IF NOT EXISTS acq_requests(
+	  request_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, created_by TEXT NOT NULL,
+	  intel_generated_at TEXT NOT NULL DEFAULT '', items TEXT NOT NULL DEFAULT '[]')`,
+	`CREATE INDEX IF NOT EXISTS acq_requests_created ON acq_requests(created_at)`,
+}
+
 func migrate(db *sql.DB) error {
+	for _, ddl := range tableMigrations {
+		if _, err := db.Exec(ddl); err != nil {
+			return fmt.Errorf("table migration: %w", err)
+		}
+	}
 	for _, m := range columnMigrations {
 		ok, err := hasColumn(db, m.table, m.column)
 		if err != nil {

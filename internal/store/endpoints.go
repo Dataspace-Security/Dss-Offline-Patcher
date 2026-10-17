@@ -41,8 +41,20 @@ type Endpoint struct {
 	RetiredReason     string   `json:"retired_reason"`
 	Status            string   `json:"status"`
 	Hardware          Hardware `json:"hardware"`
+	// Missing is filled by the API (update intelligence + catalog); nil
+	// without intelligence and nothing ready to deploy.
+	Missing *EndpointMissing `json:"missing"`
 
 	inventory []InventoryItem
+}
+
+// EndpointMissing: Windows updates and newer app versions the update
+// intelligence says the endpoint lacks, and approved catalog packages it
+// needs (ready to deploy).
+type EndpointMissing struct {
+	OS    int `json:"os"`
+	Apps  int `json:"apps"`
+	Ready int `json:"ready"`
 }
 
 // InventoryItems is the endpoint's last reported inventory (loaded by
@@ -243,7 +255,7 @@ func cleanGroups(gs []string) []string {
 
 func (s *Store) UpdateEndpoint(ctx context.Context, actor, id string, p EndpointPatch) (Endpoint, error) {
 	var out Endpoint
-	err := s.tx(ctx, func(tx *sql.Tx) error {
+	err := s.txChanged(ctx, func(tx *sql.Tx) error {
 		e, err := getEndpoint(ctx, tx, id)
 		if err != nil {
 			return err

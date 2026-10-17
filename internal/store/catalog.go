@@ -71,7 +71,7 @@ func (s *Store) IngestBundle(ctx context.Context, in Intake) (Bundle, error) {
 			failed = true
 		}
 	}
-	err := s.tx(ctx, func(tx *sql.Tx) error {
+	err := s.txChanged(ctx, func(tx *sql.Tx) error {
 		var newPkgs []manifest.Package
 		if !failed {
 			m := in.Manifest
@@ -420,7 +420,7 @@ func (s *Store) SetPackageState(ctx context.Context, actor, id, action, reason s
 		}
 	}
 	var out Package
-	err := s.tx(ctx, func(tx *sql.Tx) error {
+	err := s.txChanged(ctx, func(tx *sql.Tx) error {
 		p, err := getPackage(ctx, tx, id)
 		if err != nil {
 			return err

@@ -52,6 +52,13 @@ type Result struct {
 	Apps      []AppUpdate `json:"apps"`
 	Current   int         `json:"current"`
 	Unmatched int         `json:"unmatched"` // installed apps not found in the index
+
+	// CurrentOS: cumulative updates known for the endpoint's build that it
+	// already has (KB in inventory, or at/past that revision). CurrentApps:
+	// matched apps that are up to date (Current counts them). Neither is
+	// part of the JSON form (fleet status uses them).
+	CurrentOS   []WindowsRelease `json:"-"`
+	CurrentApps []AppUpdate      `json:"-"`
 }
 
 // Index is a Doc prepared for matching. It is read-only after NewIndex.
@@ -115,12 +122,17 @@ func (ix *Index) Match(ep Endpoint) Result {
 	}
 	server := strings.Contains(strings.ToLower(ep.OSVersion), "server")
 	for _, w := range ix.windows[ep.Build] {
-		if w.Server != server || !strings.EqualFold(w.Arch, ep.Arch) || kbs[strings.ToUpper(w.KB)] {
+		if w.Server != server || !strings.EqualFold(w.Arch, ep.Arch) {
+			continue
+		}
+		if kbs[strings.ToUpper(w.KB)] {
+			res.CurrentOS = append(res.CurrentOS, w)
 			continue
 		}
 		basis := "kb_inventory"
 		if w.UBR > 0 && ubr > 0 {
 			if ubr >= w.UBR {
+				res.CurrentOS = append(res.CurrentOS, w)
 				continue // already at or past that revision (a later update is installed)
 			}
 			basis = "build_revision"
@@ -147,13 +159,14 @@ func (ix *Index) Match(ep Endpoint) Result {
 		if a.ARPMax != "" {
 			target = a.ARPMax
 		}
-		if it.Version == "" || CompareVersions(it.Version, target) >= 0 {
-			res.Current++
-			continue
-		}
 		u := AppUpdate{AppID: a.ID, Name: a.Name, InstalledName: it.Name, InstalledVersion: it.Version, LatestVersion: a.Version, MatchedBy: by}
 		if strings.HasPrefix(it.ID, "{") {
 			u.ProductCode = it.ID
+		}
+		if it.Version == "" || CompareVersions(it.Version, target) >= 0 {
+			res.Current++
+			res.CurrentApps = append(res.CurrentApps, u)
+			continue
 		}
 		res.Apps = append(res.Apps, u)
 	}

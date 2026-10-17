@@ -321,7 +321,7 @@ func (s *Store) CreateDeployment(ctx context.Context, actor string, n NewDeploym
 		return Deployment{}, err
 	}
 	var out Deployment
-	err := s.tx(ctx, func(tx *sql.Tx) error {
+	err := s.txChanged(ctx, func(tx *sql.Tx) error {
 		p, err := getPackage(ctx, tx, n.PackageID)
 		if err != nil {
 			return err
@@ -394,7 +394,7 @@ func (s *Store) DeploymentAction(ctx context.Context, actor, id, action, reason 
 		}
 	}
 	var out Deployment
-	err := s.tx(ctx, func(tx *sql.Tx) error {
+	err := s.txChanged(ctx, func(tx *sql.Tx) error {
 		d, err := getDeploymentCounted(ctx, tx, id)
 		if err != nil {
 			return err
@@ -846,14 +846,23 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 		}
 	}
 	res := CheckinResult{Assignments: []Assignment{}}
+	changed := false // inventory, OS facts or target states changed (Generation)
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		now := s.now()
 		rp := 0
 		if r.RebootPending {
 			rp = 1
 		}
+		var oldInv, oldInvAt, oldOSVersion, oldArch string
+		var oldBuild int
+		if err := tx.QueryRowContext(ctx, `SELECT inventory, inventory_at, os_version, build, arch FROM endpoints WHERE endpoint_id=?`, endpointID).
+			Scan(&oldInv, &oldInvAt, &oldOSVersion, &oldBuild, &oldArch); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		newInv := mustJSON(r.Inventory)
+		changed = oldInvAt == "" || oldInv != newInv || oldOSVersion != r.OSVersion || oldBuild != r.Build || oldArch != r.Arch
 		if _, err := tx.Exec(`UPDATE endpoints SET hostname=?, os_version=?, build=?, arch=?, agent_version=?, reboot_pending=?, inventory=?, last_seen=?, inventory_at=?, edition=? WHERE endpoint_id=?`,
-			r.Hostname, r.OSVersion, r.Build, r.Arch, r.AgentVersion, rp, mustJSON(r.Inventory), now, now, r.Edition, endpointID); err != nil {
+			r.Hostname, r.OSVersion, r.Build, r.Arch, r.AgentVersion, rp, newInv, now, now, r.Edition, endpointID); err != nil {
 			return err
 		}
 		if r.Hardware != nil {
@@ -947,6 +956,9 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 				}
 			}
 		}
+		if len(touched) > 0 {
+			changed = true
+		}
 		for id := range touched {
 			if err := s.evaluateDeployment(ctx, tx, id, false); err != nil {
 				return err
@@ -971,6 +983,7 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 			detail, operation      string
 		}
 		var cands []cand
+		actionable := 0
 		rows, err := tx.QueryContext(ctx, `SELECT t.deployment_id, t.state, t.attempts, d.max_retries, d.window_start, d.window_end, d.deadline, d.reboot_policy, d.ignore_windows, d.max_concurrent, d.health_checks,
 			p.package_id, p.kind, p.kb, p.product_code, p.file_name, p.size, p.sha256, p.prerequisites, t.detail, d.operation
 			FROM targets t JOIN deployments d ON d.deployment_id=t.deployment_id JOIN packages p ON p.package_id=t.package_id
@@ -1047,6 +1060,9 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 			}
 			c.a.ManifestURL = "/api/agent/manifest/" + c.a.PackageID
 			res.Assignments = append(res.Assignments, c.a)
+			if c.state != "deferred" {
+				actionable++ // deferred: waiting on disk space / power, not worth polling for
+			}
 		}
 		// Reboot: endpoints waiting on a reboot get one only where policy allows,
 		// and at most once per rebootRetry so a slow reboot isn't spammed.
@@ -1074,8 +1090,12 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 				return err
 			}
 		}
-		return nil
+		res.NextCheckinSeconds, err = s.nextCheckin(ctx, tx, e, actionable, res.RebootNow)
+		return err
 	})
+	if err == nil && changed {
+		s.Changed()
+	}
 	return res, err
 }
 
@@ -1098,8 +1118,12 @@ func rebootAllowed(policy string, ws windowState, pastDeadline bool) bool {
 type CheckinResult struct {
 	Assignments []Assignment `json:"assignments"`
 	RebootNow   bool         `json:"reboot_now"`
-	Site        string       `json:"-"`
-	OS          string       `json:"-"`
+	// NextCheckinSeconds > 0 asks the agent to check in again sooner than
+	// its configured interval (work in progress or just released); 0 = use
+	// the configured interval.
+	NextCheckinSeconds int    `json:"next_checkin_seconds"`
+	Site               string `json:"-"`
+	OS                 string `json:"-"`
 }
 
 var agentStates = map[string]bool{"downloading": true, "downloaded": true, "installing": true, "installed": true, "pending_reboot": true, "failed": true, "not_applicable": true, "deferred": true}

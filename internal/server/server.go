@@ -41,7 +41,11 @@ type Server struct {
 	caInChain bool
 	certHosts []string
 
-	intel intelCache
+	intel    intelCache
+	progress *progressMap
+	// Derived fleet views, cached for fleetTTL while store.Generation is unchanged.
+	needsCache genCache[needsView]
+	refsCache  genCache[map[string]store.AcqRequestRef]
 
 	enrollLimit *ipLimiter
 }
@@ -50,6 +54,7 @@ func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger
 	s := &Server{cfg: cfg, store: st, repo: rp, ui: ui, log: log,
 		th: store.Thresholds{OfflineAfter: cfg.OfflineAfter.Duration, StaleAfter: cfg.StaleInventoryAfter.Duration, LostAfterInstall: cfg.LostAfterInstall.Duration}}
 	s.auth = newAuthState()
+	s.progress = newProgressMap()
 	s.enrollLimit = newIPLimiter(enrollBurst, enrollEvery)
 	dl := map[string]time.Duration{}
 	for k, v := range cfg.PatchDeadlines {
@@ -148,6 +153,9 @@ func (s *Server) Handler() http.Handler {
 	admin("viewer", "GET /api/intel", s.intelStatus)
 	admin("operator", "POST /api/acquisition-requests", s.exportAcqRequest)
 	admin("viewer", "GET /api/packages-needs", s.packageNeeds)
+	admin("viewer", "GET /api/policy", s.policy)
+	admin("viewer", "GET /api/fleet/status", s.fleetStatusHandler)
+	admin("viewer", "GET /api/acquisition-requests", s.listAcqRequests)
 	admin("operator", "PATCH /api/endpoints/{id}", s.patchEndpoint)
 	admin("operator", "POST /api/endpoints/{id}/retire", s.retireEndpoint)
 	admin("operator", "POST /api/enrollment-tokens", s.createEnrollmentToken)
@@ -157,6 +165,7 @@ func (s *Server) Handler() http.Handler {
 	admin("operator", "POST /api/deployments", s.createDeployment)
 	admin("viewer", "GET /api/deployments/{id}", s.getDeployment)
 	admin("operator", "POST /api/deployments/{id}/{action}", s.deploymentAction)
+	admin("operator", "POST /api/deployments/{id}/retry_failed", s.retryFailed)
 	admin("viewer", "GET /api/maintenance-windows", s.listWindows)
 	admin("operator", "POST /api/maintenance-windows", s.createWindow)
 	admin("operator", "POST /api/maintenance-windows/{id}/delete", s.deleteWindow)
@@ -401,24 +410,6 @@ func (s *Server) packageAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, v)
 }
 
-func (s *Server) listEndpoints(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.ListEndpointsBrief(r.Context(), s.th)
-	if err != nil {
-		s.fail(w, err)
-		return
-	}
-	writeJSON(w, 200, v)
-}
-
-func (s *Server) getEndpoint(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.GetEndpoint(r.Context(), r.PathValue("id"), s.th)
-	if err != nil {
-		s.fail(w, err)
-		return
-	}
-	writeJSON(w, 200, v)
-}
-
 func (s *Server) patchEndpoint(w http.ResponseWriter, r *http.Request) {
 	var p store.EndpointPatch
 	if !decode(w, r, &p) {
@@ -482,7 +473,7 @@ func (s *Server) getDeployment(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	writeJSON(w, 200, v)
+	writeJSON(w, 200, s.withLive(v))
 }
 
 func (s *Server) deploymentAction(w http.ResponseWriter, r *http.Request) {
@@ -701,7 +692,7 @@ func (s *Server) agentCheckin(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := map[string]any{"assignments": res.Assignments, "reboot_now": res.RebootNow,
 		"checkin_interval_seconds": s.cfg.CheckinIntervalSeconds, "download_rate_kbps": rate,
-		"preinstall": s.cfg.Preinstall.policyFor(res.OS)}
+		"preinstall": s.cfg.Preinstall.policyFor(res.OS), "next_checkin_seconds": res.NextCheckinSeconds}
 	if doc, _ := s.store.GetMeta(r.Context(), "trust_doc"); doc != "" {
 		resp["trust"] = json.RawMessage(doc)
 	}
@@ -759,10 +750,43 @@ func (s *Server) agentReport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
+// agentHeartbeat keeps the endpoint "seen"; an optional body carries live
+// progress of the current download or install (kept in memory only, not
+// audited). Old agents send no body or "{}".
 func (s *Server) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.Heartbeat(r.Context(), endpointID(r)); err != nil {
+	var body heartbeatBody
+	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, heartbeatMaxBody))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "heartbeat body too large")
+		return
+	}
+	if len(bytes.TrimSpace(b)) > 0 {
+		// Lenient: newer agents may send fields this server does not know.
+		if err := json.Unmarshal(b, &body); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+	}
+	if body.Progress != nil {
+		if err := body.Progress.validate(); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	eid := endpointID(r)
+	if err := s.store.Heartbeat(r.Context(), eid); err != nil {
 		s.fail(w, err)
 		return
+	}
+	if p := body.Progress; p != nil {
+		ok, err := s.store.HasTarget(r.Context(), eid, p.DeploymentID, p.PackageID)
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		if ok { // progress for deployments the endpoint is not in is ignored
+			s.progress.put(eid, *p)
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -863,10 +887,10 @@ func (s *Server) availableFor(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) packageNeeds(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.Needs(r.Context())
+	v, err := s.fleetNeeds(r.Context())
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	writeJSON(w, 200, v)
+	writeJSON(w, 200, v.needs)
 }

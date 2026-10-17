@@ -39,7 +39,7 @@ var AcqStaleAfter = 26 * time.Hour
 // RecordAcquisition stores a verified report and raises an alert when the
 // run failed or partly failed.
 func (s *Store) RecordAcquisition(ctx context.Context, source, finishedAt, outcome, keyID string, report []byte, summary string) error {
-	return s.tx(ctx, func(tx *sql.Tx) error {
+	return s.txChanged(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`INSERT INTO acquisition_reports(source,received_at,finished_at,outcome,key_id,report) VALUES(?,?,?,?,?,?)`,
 			source, s.now(), finishedAt, outcome, keyID, string(report)); err != nil {
 			return err

@@ -72,7 +72,7 @@ func (s *Store) CreateException(ctx context.Context, actor string, n NewExceptio
 	}
 	n.ExpiresAt = exp.UTC().Format(time.RFC3339Nano)
 	var out Exception
-	err = s.tx(ctx, func(tx *sql.Tx) error {
+	err = s.txChanged(ctx, func(tx *sql.Tx) error {
 		if _, err := getEndpoint(ctx, tx, n.EndpointID); err != nil {
 			return err
 		}
@@ -121,7 +121,7 @@ func (s *Store) RevokeException(ctx context.Context, actor, id, reason string) (
 		return Exception{}, err
 	}
 	var out Exception
-	err := s.tx(ctx, func(tx *sql.Tx) error {
+	err := s.txChanged(ctx, func(tx *sql.Tx) error {
 		x, err := s.scanException(tx.QueryRowContext(ctx, `SELECT `+excCols+` FROM exceptions WHERE exception_id=?`, id))
 		if errors.Is(err, sql.ErrNoRows) {
 			return Errf(ErrNotFound, "exception %s", id)

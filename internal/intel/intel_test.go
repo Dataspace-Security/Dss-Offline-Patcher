@@ -157,14 +157,28 @@ func TestMatch(t *testing.T) {
 	if len(res.Apps) != 4 || res.Current != 2 || res.Unmatched != 3 {
 		t.Errorf("apps=%d current=%d unmatched=%d", len(res.Apps), res.Current, res.Unmatched)
 	}
+	// The up-to-date apps are listed too (fleet status), with their installed form.
+	if len(res.CurrentApps) != res.Current || len(res.CurrentOS) != 0 {
+		t.Errorf("current lists: apps %+v os %+v", res.CurrentApps, res.CurrentOS)
+	}
+	cur := map[string]AppUpdate{}
+	for _, a := range res.CurrentApps {
+		cur[a.AppID] = a
+	}
+	if f := cur["Mozilla.Firefox"]; f.InstalledVersion != "157.0.1" || f.MatchedBy == "" {
+		t.Errorf("current firefox: %+v", cur)
+	}
+	if _, ok := cur["Vendor.Tool"]; !ok {
+		t.Errorf("current vendor tool missing: %+v", cur)
+	}
 
 	// Installing the KB (or any later revision) clears the OS update.
 	vm.Inventory = append(vm.Inventory, Item{Kind: "kb", ID: "kb5044280"})
-	if res := ix.Match(vm); len(res.OS) != 0 {
-		t.Errorf("KB installed but still listed: %+v", res.OS)
+	if res := ix.Match(vm); len(res.OS) != 0 || len(res.CurrentOS) != 1 || res.CurrentOS[0].KB != "KB5044280" {
+		t.Errorf("KB installed but still listed (or not current): %+v %+v", res.OS, res.CurrentOS)
 	}
 	pc := Endpoint{OS: "windows", OSVersion: "Windows 11 Pro N 26H2 (26300.9711)", Build: 26300, Arch: "x64"}
-	if res := ix.Match(pc); len(res.OS) != 0 {
+	if res := ix.Match(pc); len(res.OS) != 0 || len(res.CurrentOS) != 1 {
 		t.Errorf("UBR already at 9711 but listed: %+v", res.OS)
 	}
 	pc.OSVersion = "Windows 11 Pro N 26H2 (26300.9500)"

@@ -31,9 +31,14 @@ type intelCache struct {
 	err       error // last load failure, retried after intelRetry
 	errAt     time.Time
 
-	fleetAt  time.Time
-	fleetGen string
-	fleet    []*fleetUpdate
+	fleetAt       time.Time
+	fleetGen      string // MetaIntelGenerated the snapshot was built from
+	fleetStoreGen uint64 // store.Generation it was built at
+	fleet         *fleetSnapshot
+	fleetBuild    sync.Mutex // one buildFleet at a time
+
+	status   *fleetStatusCache
+	statusMu sync.Mutex
 }
 
 const (
@@ -89,7 +94,7 @@ func (s *Server) intelIndex(ctx context.Context) (*intel.Index, *intake.IntelSum
 	}
 	ix, err := s.loadIntel()
 	s.intel.generated, s.intel.ix, s.intel.err, s.intel.errAt = gen, ix, err, time.Now()
-	s.intel.fleet = nil
+	s.intel.fleet, s.intel.status = nil, nil
 	if err != nil {
 		s.log.Error("update intelligence unusable", "err", err)
 		sum.Error = err.Error()
@@ -201,6 +206,22 @@ func (ci *catalogIndex) forApp(u intel.AppUpdate) *catalogLink {
 	return nil
 }
 
+// forCurrentApp links an up-to-date app to its catalog package: by product
+// code, or by display name whatever the version.
+func (ci *catalogIndex) forCurrentApp(u intel.AppUpdate) *catalogLink {
+	if n, ok := ci.byCode[strings.ToLower(u.ProductCode)]; ok && u.ProductCode != "" {
+		l := n.link
+		return &l
+	}
+	if k := intel.Normalize(u.InstalledName); k != "" {
+		if n, ok := ci.byName[k]; ok {
+			l := n.link
+			return &l
+		}
+	}
+	return nil
+}
+
 type osUpdateView struct {
 	intel.OSUpdate
 	Catalog *catalogLink `json:"catalog"`
@@ -263,6 +284,18 @@ type fleetUpdate struct {
 	releases  map[string]intel.WindowsRelease // by architecture (a KB can cover x64 and arm64)
 	arches    map[string]bool
 	installed map[acqrequest.Installed]bool
+	// For fleet status (not shown): endpoints that already have it, and the
+	// catalog package of their (current) version.
+	current    []fleetNeed
+	currentCat *catalogLink
+}
+
+// statusCatalog is the package whose targets decide fleet status.
+func (u *fleetUpdate) statusCatalog() *catalogLink {
+	if u.Catalog != nil {
+		return u.Catalog
+	}
+	return u.currentCat
 }
 
 type fleetNeed struct {
@@ -272,42 +305,90 @@ type fleetNeed struct {
 	arch       string
 }
 
+// fleetSnapshot is the matcher's view of the whole fleet. Shared: read only.
+type fleetSnapshot struct {
+	missing []*fleetUpdate // updates some endpoint is missing (GET /api/updates)
+	all     []*fleetUpdate // missing plus updates matched endpoints already have
+	perEP   map[string]store.EndpointMissing
+}
+
 // fleet returns every update the fleet is missing (nil without usable
 // intelligence), cached for fleetTTL. The result is shared: read only.
 func (s *Server) fleet(ctx context.Context) (*intake.IntelSummary, []*fleetUpdate, error) {
+	sum, snap, err := s.fleetSnap(ctx, nil)
+	if snap == nil {
+		return sum, nil, err
+	}
+	return sum, snap.missing, err
+}
+
+// fleetSnap returns the cached fleet view: rebuilt when older than
+// fleetTTL, when the intelligence document changed or when the store
+// changed (catalog states, deployments, inventory: store.Generation). One
+// rebuild at a time; concurrent callers wait for it. eps, if not nil, are
+// the endpoints with inventory (as from ListEndpoints) to build from;
+// otherwise a fresh list is loaded. nil without usable intelligence.
+func (s *Server) fleetSnap(ctx context.Context, eps []store.Endpoint) (*intake.IntelSummary, *fleetSnapshot, error) {
 	ix, sum, err := s.intelIndex(ctx)
 	if err != nil || ix == nil {
 		return sum, nil, err
 	}
-	s.intel.mu.Lock()
-	if s.intel.fleet != nil && s.intel.fleetGen == sum.GeneratedAt && time.Since(s.intel.fleetAt) < fleetTTL {
-		f := s.intel.fleet
-		s.intel.mu.Unlock()
+	if f := s.cachedFleet(sum.GeneratedAt); f != nil {
 		return sum, f, nil
 	}
-	s.intel.mu.Unlock()
-	eps, err := s.store.ListEndpoints(ctx, s.th)
-	if err != nil {
-		return nil, nil, err
+	s.intel.fleetBuild.Lock()
+	defer s.intel.fleetBuild.Unlock()
+	if f := s.cachedFleet(sum.GeneratedAt); f != nil {
+		return sum, f, nil
+	}
+	gen := s.store.Generation() // before reading: a change meanwhile leaves it stale
+	if eps == nil {
+		if eps, err = s.store.ListEndpoints(ctx, s.th); err != nil {
+			return nil, nil, err
+		}
 	}
 	ci, err := s.catalogIndex(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
+	snap := buildFleet(ix, ci, eps)
+	s.intel.mu.Lock()
+	s.intel.fleet, s.intel.fleetGen, s.intel.fleetStoreGen, s.intel.fleetAt = snap, sum.GeneratedAt, gen, time.Now()
+	s.intel.mu.Unlock()
+	return sum, snap, nil
+}
+
+// cachedFleet is the cached snapshot if still valid for the intelligence
+// generation, else nil.
+func (s *Server) cachedFleet(intelGen string) *fleetSnapshot {
+	s.intel.mu.Lock()
+	defer s.intel.mu.Unlock()
+	if s.intel.fleet != nil && s.intel.fleetGen == intelGen && s.intel.fleetStoreGen == s.store.Generation() && time.Since(s.intel.fleetAt) < fleetTTL {
+		return s.intel.fleet
+	}
+	return nil
+}
+
+func buildFleet(ix *intel.Index, ci *catalogIndex, eps []store.Endpoint) *fleetSnapshot {
 	agg := map[string]*fleetUpdate{}
 	get := func(kind, key, name, latest string, cat *catalogLink) *fleetUpdate {
 		if u := agg[kind+"/"+key]; u != nil {
+			if u.Catalog == nil {
+				u.Catalog = cat
+			}
 			return u
 		}
 		u := &fleetUpdate{Kind: kind, Key: key, Name: name, Latest: latest, Catalog: cat, arches: map[string]bool{}, installed: map[acqrequest.Installed]bool{}}
 		agg[kind+"/"+key] = u
 		return u
 	}
+	snap := &fleetSnapshot{perEP: map[string]store.EndpointMissing{}}
 	for _, e := range eps {
 		if e.RetiredAt != "" {
 			continue
 		}
 		res := ix.Match(toIntelEndpoint(e, e.InventoryItems()))
+		snap.perEP[e.EndpointID] = store.EndpointMissing{OS: len(res.OS), Apps: len(res.Apps)}
 		for _, o := range res.OS {
 			u := get("os", o.KB, o.Title, o.KB, ci.forOS(o.KB))
 			if cur, ok := u.releases[o.Arch]; ok && cur.Build != o.Build {
@@ -321,32 +402,54 @@ func (s *Server) fleet(ctx context.Context) (*intake.IntelSummary, []*fleetUpdat
 		}
 		for _, a := range res.Apps {
 			u := get("app", a.AppID, a.Name, a.LatestVersion, ci.forApp(a))
-			if u.Catalog == nil {
-				u.Catalog = ci.forApp(a)
-			}
 			u.arches[strings.ToLower(e.Arch)] = true
 			u.installed[acqrequest.Installed{ProductCode: a.ProductCode, Name: a.InstalledName, Version: a.InstalledVersion}] = true
 			u.Endpoints = append(u.Endpoints, fleetNeed{EndpointID: e.EndpointID, Hostname: e.Hostname, Installed: a.InstalledVersion, arch: e.Arch})
 		}
+		for _, w := range res.CurrentOS {
+			u := get("os", w.KB, w.Title, w.KB, nil)
+			if u.currentCat == nil {
+				u.currentCat = ci.forOS(w.KB)
+			}
+			u.current = append(u.current, fleetNeed{EndpointID: e.EndpointID, Hostname: e.Hostname, Installed: e.OSVersion, arch: e.Arch})
+		}
+		for _, a := range res.CurrentApps {
+			u := get("app", a.AppID, a.Name, a.LatestVersion, nil)
+			if u.currentCat == nil {
+				u.currentCat = ci.forCurrentApp(a)
+			}
+			u.current = append(u.current, fleetNeed{EndpointID: e.EndpointID, Hostname: e.Hostname, Installed: a.InstalledVersion, arch: e.Arch})
+		}
 	}
-	out := make([]*fleetUpdate, 0, len(agg))
 	for _, u := range agg {
-		out = append(out, u)
+		snap.all = append(snap.all, u)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		a, b := out[i], out[j]
+	sort.Slice(snap.all, func(i, j int) bool {
+		a, b := snap.all[i], snap.all[j]
 		if a.Kind != b.Kind {
 			return a.Kind == "os" // Windows updates first
 		}
 		if len(a.Endpoints) != len(b.Endpoints) {
 			return len(a.Endpoints) > len(b.Endpoints)
 		}
+		if len(a.current) != len(b.current) {
+			return len(a.current) > len(b.current)
+		}
 		return strings.ToLower(a.Name) < strings.ToLower(b.Name)
 	})
-	s.intel.mu.Lock()
-	s.intel.fleet, s.intel.fleetGen, s.intel.fleetAt = out, sum.GeneratedAt, time.Now()
-	s.intel.mu.Unlock()
-	return sum, out, nil
+	snap.missing = make([]*fleetUpdate, 0, len(snap.all))
+	for _, u := range snap.all {
+		if len(u.Endpoints) > 0 {
+			snap.missing = append(snap.missing, u)
+		}
+	}
+	return snap
+}
+
+// fleetUpdateView is a cached row plus the latest acquisition request listing it.
+type fleetUpdateView struct {
+	*fleetUpdate
+	Requested *store.AcqRequestRef `json:"requested"`
 }
 
 func (s *Server) fleetUpdates(w http.ResponseWriter, r *http.Request) {
@@ -355,13 +458,26 @@ func (s *Server) fleetUpdates(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	if updates == nil {
-		updates = []*fleetUpdate{}
+	refs, err := s.acqRefs(r.Context())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	out := make([]fleetUpdateView, 0, len(updates))
+	for _, u := range updates {
+		out = append(out, fleetUpdateView{fleetUpdate: u, Requested: refFor(refs, u.Kind, u.Key)})
 	}
 	writeJSON(w, 200, struct {
 		Intel   *intake.IntelSummary `json:"intel"`
-		Updates []*fleetUpdate       `json:"updates"`
-	}{sum, updates})
+		Updates []fleetUpdateView    `json:"updates"`
+	}{sum, out})
+}
+
+func refFor(refs map[string]store.AcqRequestRef, kind, key string) *store.AcqRequestRef {
+	if r, ok := refs[store.AcqRefKey(kind, key)]; ok {
+		return &r
+	}
+	return nil
 }
 
 func (s *Server) intelStatus(w http.ResponseWriter, r *http.Request) {
