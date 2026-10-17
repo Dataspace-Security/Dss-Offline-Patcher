@@ -39,7 +39,8 @@ pmctl fetch-url      -url https://vendor/x.msi -sha256 <hex> -package-id X -titl
 | `pkg` | `.pkg` | `-package-name` (receipt id), `-version` | `macos` |
 | `agent` | — (pass `-kind agent`) | `-version` (e.g. `1.2.3`) | `windows`; set `-os` for Linux/macOS agent binaries |
 
-`prerequisites` and `applicability.editions` have no flags; add them to the spec entry by hand.
+`applicability.editions` has no flag; add it to the spec entry by hand. `fetch` fills `prerequisites` itself for
+checkpoint cumulative updates (see below); add other prerequisites by hand.
 
 | Command | What it does |
 |---|---|
@@ -58,7 +59,8 @@ pmctl fetch-url      -url https://vendor/x.msi -sha256 <hex> -package-id X -titl
 | `kb`, `version` | `-kb`; catalog version column (omitted when the catalog shows `n/a`) |
 | `severity` | `-severity`. If not given: MSRC (`-msrc-month`), for the matching product and arch. If not given: the "MSRC severity" field on the catalog details page (with a warning). Otherwise `important` (with a warning). |
 | `release_date` | catalog "Last Updated" date, as YYYY-MM-DD |
-| `supersedes` | "This update replaces the following updates" on the catalog details page. If that is empty, the MSRC `Supercedence` field. |
+| `supersedes` | "This update replaces the following updates" on the catalog details page. If that is empty, the MSRC `Supercedence` field. Checkpoint KBs (below) are never listed here. |
+| `prerequisites` | the checkpoint cumulative update KBs listed in the same download dialog (Windows 11 24H2 and later), see "Checkpoint cumulative updates" |
 | `applicability` | `{os: windows, arch, min_build, max_build}` from the flags |
 | `source_url` | the catalog download URL |
 | `path` | the downloaded file, relative to the directory of spec.json |
@@ -99,8 +101,25 @@ signature protect the file all the way to the endpoint.
   - If the server ignores `Range`, the download restarts from the beginning.
   - If a resumed file fails verification, it is deleted and downloaded once more from scratch.
 - A stall watchdog aborts a download after 2 minutes with no data.
-- If the target file already exists and matches the expected hash, it is reused. If it does not match,
-  `fetch` refuses to overwrite it and asks you to remove it.
+- A `.part` that does not fit what the server now serves (the reported size differs from the expected
+  size) is deleted, so the next run starts over instead of failing on every run.
+- If the target file already exists and matches the expected hash, it is reused. If it does not match
+  (an unversioned vendor URL now serves a new build under the same file name, or the file is damaged),
+  it is deleted and downloaded again; the new file must match the expected hash like any download.
+- Catalog and MSRC page/API requests are retried up to 3 times (backoff 2 s, 8 s) on transport errors,
+  timeouts, HTTP 429 and 5xx. A 404 is not retried.
+
+### Checkpoint cumulative updates
+
+From Windows 11 24H2, a cumulative update can require a **checkpoint** cumulative update to be installed
+first, and the catalog download dialog lists both `.msu` files. `fetch` picks the file whose name
+contains the KB (or `-file`) as the package, and packages **every other `.msu` that names its own KB**
+as a separate package `<checkpoint KB>-<arch>` (same severity, release date and applicability, verified
+by the catalog SHA-1 like the main file). The main package lists those KBs in `prerequisites`; the
+isolated server holds it back on endpoints that do not have them yet. Checkpoint KBs are never put in
+`supersedes`. Any other extra file (not `.msu`, or without its own KB) is skipped with a warning.
+`pmctl auto` does not download or send a checkpoint package again once it was delivered (it stays a
+prerequisite of later updates).
 
 ## Limits and known gaps
 
@@ -114,9 +133,8 @@ signature protect the file all the way to the endpoint.
 - `pmctl` sends `Accept-Language: en-US`. Without it, the catalog translates titles based on where the
   client is, and product/arch matching breaks.
 - Only the first page of search results is read (25 rows). A KB search normally returns far fewer.
-- One file per package. Some updates list several files, such as Windows 11 checkpoint cumulative
-  updates. For those, `fetch` picks the file whose name contains the KB, or the one you name with
-  `-file`. Each prerequisite must be fetched as its own package.
+- One file per package. When an update lists several files, `fetch` picks the file whose name contains
+  the KB, or the one you name with `-file`; checkpoint `.msu` files become their own packages (above).
 - `fetch` (Microsoft Update Catalog) handles `.msu` and `.msi` files. `fetch-url` also handles
   `deb`, `rpm`, `pkg` and `agent` packages. There is no feed integration for Linux distributions
   or macOS vendors: you choose the URL and supply the SHA-256.
@@ -149,7 +167,7 @@ pmctl fetch-url -url https://downloads.acme.example/agent/acme-agent-2.2.msi \
     -out acq/downloads -spec acq/spec.json
 
 # 5. Review acq/spec.json, then sign (on Windows, Authenticode is recorded here)
-pmctl build -key acq/bundle.key -spec acq/spec.json -out acq/out/2026-10.pmb -state acq/state.json
+pmctl build -key acq/bundle.key -spec acq/spec.json -out acq/out/2026-10.pmb -config acq/acquire.json
 pmctl inspect -bundle acq/out/2026-10.pmb -pub acq/bundle.pub
 pmctl send -bundle acq/out/2026-10.pmb -to <drop dir>
 ```
@@ -157,11 +175,32 @@ pmctl send -bundle acq/out/2026-10.pmb -to <drop dir>
 Running a `fetch` again is safe. A verified file is reused and its spec entry is replaced. To leave a
 package out of the next bundle, remove its entry from spec.json.
 
+### Bundle sequence numbers (`pmctl build` and `pmctl auto`)
+
+The isolated server accepts a bundle only if its `sequence` is above the last one it accepted for that
+`source`. The next sequence comes from a **sequence state file** (`{"sequences": {"<source>": N}}`):
+
+- `pmctl auto` uses `sequence_state` from `acquire.json` (default `<work_dir>/sequence.json`).
+- `pmctl build` uses `-state` (default **`./.pmctl-state.json` in the current directory**), or, with
+  `-config acquire.json`, the same `sequence_state` and `source` as `pmctl auto`. **Use one state file per
+  source for both**; otherwise a manual bundle reuses numbers the server has already seen and is
+  rejected as a replay. `pmctl build` warns when its state file has no sequence for the source but
+  another known state file does (`./.pmctl-state.json`, `./sequence.json`, `./work/sequence.json`, or
+  the `sequence_state` of `./acquire.json`).
+
+Rules: the number is reserved under a lock file (`<state>.lock`) and written (temp file, fsync, rename)
+**before** the bundle is signed, so two builds never share a number; a build that fails afterwards
+leaves a gap, which the server accepts. The stored value never decreases. `-seq N` must be above the
+stored value. A state file that cannot be parsed stops the build (it never restarts at 1): repair it by
+hand with a value above the last bundle sent.
+
 ## Unattended acquisition: `pmctl auto`
 
 `pmctl auto -config acquire.json` does the whole monthly run on its own, and is meant to run from a schedule on the acquisition host:
 
-1. **Microsoft:** for each product in `microsoft.products`, it reads the MSRC release for the current month and the `months − 1` before it. It keeps the KBs at or above `min_severity` and **drops any KB that another candidate supersedes**, so last month's cumulative update is not fetched once this month's is out. It then fetches each remaining KB from the Update Catalog, with the same verification as `pmctl fetch`. The current month returns 404 until Patch Tuesday; that is a warning, not an error.
+1. **Microsoft:** for each product in `microsoft.products`, it reads the MSRC release for the current month and the `months − 1` before it. It keeps the KBs at or above `min_severity` and **drops a KB that another candidate supersedes**, so last month's cumulative update is not fetched once this month's is out, but only once the superseding KB is available (fetched in this run or sent earlier): if this month's update fails, last month's is fetched meanwhile, with a warning. A checkpoint prerequisite is never dropped. It then fetches each remaining KB from the Update Catalog, with the same verification as `pmctl fetch`, including its checkpoint packages.
+   - The **newest** month returns 404 until Patch Tuesday; that is a warning, not an error.
+   - Any other MSRC error (after retries), or no month readable at all, is a failure: the Microsoft feeds show `failed`, the run report lists it under `failures.msrc`, and the run is `partial` (exit 2), so an unread feed never looks like "nothing new".
 2. **Third-party apps:** for each entry in `apps`, it reads the current version from the vendor feed (`version.url` with `json_path` or `regex`). If that version was not sent before, it downloads `download_url` (`{version}` is substituted) and verifies it. Two verification modes:
    - `sha256`: the vendor's checksum document (`url`, plus an optional `regex` or `json_path`; by default it finds the `<hash>  <file>` line). **Preferred.**
    - `authenticode_signer`: for vendors that publish no checksum. The file is accepted only if Windows reports a Valid Authenticode signature from that signer. Requires a Windows acquisition host.
@@ -170,15 +209,36 @@ package out of the next bundle, remove its entry from spec.json.
    For `.pkg` files, pmctl reads the version **inside the installer** and labels the package with it, because vendor feeds can run ahead of a fixed download link. A mismatch is reported as a warning. Set `label_from_pkg: true` when the feed value is only a change trigger (a release tag or build number such as Office `16.114.26101123` or Brave `1.97.59`); the package then takes the app version from the installer without a warning.
 
    An app without any of these is refused at config load; unverified downloads are never accepted. For `.msi` installers whose product code changes per version, set `product_code_from_msi: true` (Windows host), or give a fixed `product_code`.
-3. It builds **one** signed bundle from everything new, named after its bundle ID. It then **sends it automatically** through the configured adapter (`send.via`: `dropdir` or `command`) with a signed receipt, and appends the receipt to `send.log`.
-4. Packages are recorded as done in `work_dir/state.json` **only after a successful send**. Anything that failed (download, verification, build, send) is retried on the next run. Each run appends a JSON report to `work_dir/auto-log.jsonl`.
+3. **Each package is checked on its own** before building: the payload must exist, the manifest schema must pass, and on a Windows acquisition host its Authenticode status must not be invalid (e.g. `NotSigned`). A package that fails is left out with the reason under `failures` (retried next run); the rest is still built and sent. Without this, one bad package would make the server refuse the whole bundle.
+4. It builds signed bundles from everything new, named after their bundle IDs: **one bundle, or several** when the pending packages exceed `max_bundle_bytes` (default 28 GiB, below the server's 32 GiB) or `max_bundle_packages` (default 450, below the server's `max_files` 500). Packages keep their order (checkpoint prerequisites first). Each bundle gets its own sequence. A single package larger than `max_bundle_bytes` is a failure. Before building, the run directory's volume must hold twice the pending bytes plus a 2 GiB reserve.
+5. Each bundle is **sent automatically** through the configured adapter (`send.via`: `dropdir` or `command`) with a signed receipt, and the receipt is appended to `send.log`. If a send fails, the remaining bundles are not sent; their packages are retried next run.
+6. A bundle's packages are recorded as done in `work_dir/state.json` **right after that bundle was sent**, before anything else happens. If the bundle was delivered but the receipt or the sender log failed, that is a warning and the packages are still done (a resend would only be a duplicate). Anything that failed (download, verification, build, send) is retried on the next run. Each run appends a JSON report to `work_dir/auto-log.jsonl` (`bundles` lists every bundle ID sent).
 
 Other behaviour:
 
-- **Overlapping runs:** a lock file (`work_dir/.auto.lock`) prevents them. A lock older than 6 h is treated as stale.
-- **Exit codes:** `0` means sent, or nothing new. `2` means some items failed and will be retried. `1` means the run failed (e.g. build or send).
+- **Overlapping runs:** a lock file (`work_dir/.auto.lock`) prevents them. It records the owner's pid, and the owner refreshes its time stamp every minute. A lock is taken over only if it has not been refreshed for 15 minutes **and** its pid is not running (or it is older than `run_timeout` + 1 h, i.e. the pid was reused).
+- **Timeouts:** the whole run stops after `run_timeout` (default `6h`): what was delivered stays recorded, the rest is reported as failed and retried. An `exec:` signer call is killed after 60 s; a `command` transfer after `send.timeout` (default `2h`). The shipped systemd unit and Task Scheduler task allow 7 h, so pmctl stops itself first.
+- **Stopping:** SIGINT/SIGTERM (Ctrl-C, `systemctl stop`) stop fetching; delivered packages are saved to `state.json` and the status report is still sent.
+- **Corrupt `state.json`:** the run stops with an error instead of treating every package as new (which would fetch and send everything again). Restore it from a backup or repair the JSON.
+- **Retention:** at the end of each real run, `runs/<time>-*/` directories (spec and bundles as built) older than `keep_runs_days` (default 14) are deleted, as are the `downloads/` files of packages sent more than `keep_downloads_days` (default 14) ago (unless the current run uses them) and `.part` / unverified leftovers not touched for that long. A negative value keeps everything.
+- **Drop directory:** a `<name>.part` left by an interrupted send is removed once it is older than 1 h; a younger one is treated as a send in progress and the send fails (retried next run).
+- **Exit codes:** `0` means sent, or nothing new. `2` means some items failed, or a feed (MSRC, update intelligence) could not be read; they are retried. `1` means the run failed (e.g. build or send).
 - **`-dry-run`:** checks the feeds and prints what would be fetched. It downloads, builds and sends nothing.
 - **Approval is unchanged:** bundles still arrive in quarantine on the isolated side and still need approval there. Automation only removes the manual download work.
+
+`acquire.json` keys for these limits (all optional):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `max_bundle_bytes` | `30064771072` (28 GiB) | maximum size of one bundle; keep it below the server's `max_bundle_bytes` (32 GiB) |
+| `max_bundle_packages` | `450` | maximum packages per bundle (1–500; the server's `max_files` is 500) |
+| `run_timeout` | `"6h"` | deadline for the whole run |
+| `send.timeout` | `"2h"` | `command` adapter: kill the gateway command after this long |
+| `keep_runs_days` | `14` | delete run directories older than this (negative: keep) |
+| `keep_downloads_days` | `14` | delete downloads of packages sent longer ago than this (negative: keep) |
+
+`send.command` and `exec:` signer commands are split on spaces; quote a path that contains spaces:
+`"command": "\"C:\\Program Files\\Gateway\\push.exe\" --to outbound {file}"`.
 
 Files: [packaging/acquisition/acquire.example.json](../packaging/acquisition/acquire.example.json) (Windows 10/11/Server 2022, Firefox with Mozilla's SHA256SUMS, Chrome with Authenticode), [register-task.ps1](../packaging/acquisition/register-task.ps1) (Windows Task Scheduler, daily 03:00), and [offpatch-acquire.service](../packaging/acquisition/offpatch-acquire.service) + [.timer](../packaging/acquisition/offpatch-acquire.timer) (systemd, daily 03:00).
 
@@ -187,6 +247,8 @@ Files: [packaging/acquisition/acquire.example.json](../packaging/acquisition/acq
 Tested:
 
 - `cmd/pmctl/auto_test.go` against the recorded Microsoft fixtures and a fake vendor: dry run, first run (CU + app → one signed bundle + receipt), no-op second run, a new vendor version, checksum-mismatch refusal and retry, and the lock.
+- `cmd/pmctl/robust_test.go`: sequence state (only grows, `-seq` checks, corrupt file refused, warnings, `build -config`), splitting into several bundles, checkpoint packages end to end, a package with an invalid signature left out, receipt/log failure after delivery, MSRC failure → partial, corrupt `state.json`, retention, lock takeover and refresh, quoted commands, signer timeout, supersedence only when the superseding KB is available.
+- `internal/acquire/robust_test.go`: checkpoint packaging from a synthetic two-file download dialog (`testdata/downloaddialog-checkpoint.html`), stale same-name file replaced, mismatched `.part` dropped, retries on 503, 404 detection. `internal/transfer/robust_test.go`: stale `.part` in the drop directory, gateway command timeout.
 - A live **dry run** (read-only) against the real MSRC feed and the Firefox/Chrome version feeds listed the expected KBs and versions, and skipped three superseded September CUs. No live payload was downloaded.
 
 ### Status reports and the console

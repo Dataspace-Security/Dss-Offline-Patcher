@@ -20,11 +20,13 @@ import (
 const usage = `pmctl — offpatch acquisition-zone tool
 
   pmctl keygen  -out <prefix>                      write <prefix>.key (private, 0600) and <prefix>.pub
-  pmctl build   -key <file.key> -spec <spec.json> -out <bundle.pmb> [-source s] [-seq n] [-state f] [-ttl 720h]
+  pmctl build   -key <file.key> -spec <spec.json> -out <bundle.pmb> [-source s] [-seq n] [-ttl 720h]
+                [-state f | -config acquire.json]   sequence state: default ./.pmctl-state.json; -config uses
+                                                   pmctl auto's sequence_state (one sequence per source)
   pmctl inspect -bundle <bundle.pmb> [-pub <file.pub>]
   pmctl send    -bundle <bundle.pmb> -to <drop dir>   transfer via one-way drop-directory adapter
   pmctl auto    -config acquire.json [-dry-run]
-                                                   unattended: check MSRC + vendor feeds, download, verify, build ONE bundle, send
+                                                   unattended: check MSRC + vendor feeds, download, verify, build bundle(s), send
   pmctl trust   -root root.key -seq N -key new.pub=<source> [-retire old.pub] [-revoke <key_id>:compromised] -out keys-N.trust.json
                                                    root-signed key rotation / revocation (generate the root with keygen; keep it offline)
 
@@ -109,10 +111,6 @@ type specPackage struct {
 	Path string `json:"path"`
 }
 
-type pmctlState struct {
-	Sequences map[string]int64 `json:"sequences"`
-}
-
 func build(args []string) error {
 	fs := flag.NewFlagSet("build", flag.ExitOnError)
 	keyPath := fs.String("key", "", "private signing key file, or exec:<command> to sign via an HSM tool (see signer.go)")
@@ -120,18 +118,36 @@ func build(args []string) error {
 	specPath := fs.String("spec", "", "package spec JSON")
 	out := fs.String("out", "", "output bundle path (.pmb)")
 	source := fs.String("source", "acq-zone-1", "source identifier")
-	seq := fs.Int64("seq", 0, "sequence number (default: next from -state)")
-	statePath := fs.String("state", ".pmctl-state.json", "sequence state file")
+	seq := fs.Int64("seq", 0, "sequence number; must be above the recorded one (default: next from the state file)")
+	statePath := fs.String("state", ".pmctl-state.json", "sequence state file (shared with pmctl auto: use the same file per source)")
+	cfgPath := fs.String("config", "", "acquire.json of pmctl auto: use its sequence_state and source, so manual and unattended bundles share one sequence")
 	ttl := fs.Duration("ttl", 30*24*time.Hour, "bundle validity")
 	fs.Parse(args)
 	if *keyPath == "" || *specPath == "" || *out == "" {
 		return fmt.Errorf("-key, -spec and -out are required")
 	}
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if *cfgPath != "" {
+		c, err := loadAutoConfig(*cfgPath)
+		if err != nil {
+			return err
+		}
+		if !set["state"] {
+			*statePath = c.SequenceState
+		}
+		if !set["source"] && c.Source != "" {
+			*source = c.Source
+		}
+	}
+	for _, w := range sequenceStateWarnings(*statePath, *source) {
+		fmt.Fprintln(os.Stderr, "warning:", w)
+	}
 	r, err := buildBundle(buildOpts{Key: *keyPath, Pub: *pubPath, Spec: *specPath, Out: *out, Source: *source, Seq: *seq, State: *statePath, TTL: *ttl})
 	if err != nil {
 		return err
 	}
-	fmt.Printf("bundle:   %s\nbundle_id: %s\nsource:   %s  sequence: %d\npackages: %d\nsha256:   %s\n", r.Path, r.BundleID, *source, r.Sequence, r.Packages, r.SHA256)
+	fmt.Printf("bundle:   %s\nbundle_id: %s\nsource:   %s  sequence: %d (state %s)\npackages: %d\nsha256:   %s\n", r.Path, r.BundleID, *source, r.Sequence, *statePath, r.Packages, r.SHA256)
 	return nil
 }
 
@@ -145,15 +161,17 @@ type buildResult struct {
 	Path, BundleID, SHA256 string
 	Sequence               int64
 	Packages               int
+	// Per package_id: the payload SHA-256 and file base name in the bundle.
+	PackageSHA256 map[string]string
+	PackageFile   map[string]string
 }
+
+// vendorSig is vendorSignature; a hook for tests.
+var vendorSig = vendorSignature
 
 // buildBundle signs every entry of a spec.json into one .pmb bundle and
 // advances the per-source sequence in the state file.
 func buildBundle(o buildOpts) (buildResult, error) {
-	priv, err := openSigner(o.Key, o.Pub)
-	if err != nil {
-		return buildResult{}, err
-	}
 	sb, err := os.ReadFile(o.Spec)
 	if err != nil {
 		return buildResult{}, err
@@ -162,30 +180,34 @@ func buildBundle(o buildOpts) (buildResult, error) {
 	if err := json.Unmarshal(sb, &spec); err != nil {
 		return buildResult{}, fmt.Errorf("spec: %w", err)
 	}
-	specDir := filepath.Dir(o.Spec)
+	return buildFromSpec(o, spec, filepath.Dir(o.Spec))
+}
+
+// buildFromSpec signs spec (paths relative to specDir) into o.Out. The
+// sequence is reserved only once the manifest validates, right before
+// signing.
+func buildFromSpec(o buildOpts, spec []specPackage, specDir string) (buildResult, error) {
+	priv, err := openSigner(o.Key, o.Pub)
+	if err != nil {
+		return buildResult{}, err
+	}
 	if o.Source == "" {
 		o.Source = "acq-zone-1"
 	}
 	if o.TTL == 0 {
 		o.TTL = 30 * 24 * time.Hour
 	}
-	st := pmctlState{Sequences: map[string]int64{}}
-	if b, err := os.ReadFile(o.State); err == nil {
-		json.Unmarshal(b, &st)
-	}
-	if o.Seq == 0 {
-		o.Seq = st.Sequences[o.Source] + 1
-	}
 	now := time.Now().UTC().Truncate(time.Second)
 	m := manifest.Manifest{
 		SchemaVersion: manifest.SchemaVersion,
-		BundleID:      fmt.Sprintf("b-%s-%04d", now.Format("20060102"), o.Seq),
+		BundleID:      "b-pending",
 		Source:        o.Source,
-		Sequence:      o.Seq,
+		Sequence:      1, // placeholder until reserved
 		KeyID:         priv.KeyID(),
 		CreatedAt:     now,
 		ExpiresAt:     now.Add(o.TTL),
 	}
+	res := buildResult{PackageSHA256: map[string]string{}, PackageFile: map[string]string{}}
 	files := map[string]string{}
 	for _, sp := range spec {
 		p := sp.Package
@@ -202,16 +224,22 @@ func buildBundle(o buildOpts) (buildResult, error) {
 			p.Supersedes = []string{}
 		}
 		if p.VendorSignature.Status == "" {
-			if p.Kind == "msu" || p.Kind == "msi" {
-				p.VendorSignature = vendorSignature(path)
-			} else {
-				// Authenticode does not apply to deb/rpm/pkg/agent payloads.
-				p.VendorSignature = manifest.VendorSignature{Status: "not_checked", CheckedAt: time.Now().UTC().Format(time.RFC3339)}
-			}
+			p.VendorSignature = signatureFor(p.Kind, path)
 		}
 		files[p.File.Name] = path
+		res.PackageSHA256[p.PackageID] = sha
+		res.PackageFile[p.PackageID] = filepath.Base(path)
 		m.Packages = append(m.Packages, p)
 	}
+	if err := m.ValidateSchema(now); err != nil {
+		return buildResult{}, fmt.Errorf("manifest invalid: %w", err)
+	}
+	seq, err := reserveSequence(o.State, o.Source, o.Seq)
+	if err != nil {
+		return buildResult{}, err
+	}
+	m.Sequence = seq
+	m.BundleID = fmt.Sprintf("b-%s-%04d", now.Format("20060102"), seq)
 	if err := m.ValidateSchema(now); err != nil {
 		return buildResult{}, fmt.Errorf("manifest invalid: %w", err)
 	}
@@ -226,13 +254,21 @@ func buildBundle(o buildOpts) (buildResult, error) {
 	if err := manifest.WriteBundle(o.Out, mb, sig, files); err != nil {
 		return buildResult{}, err
 	}
-	st.Sequences[o.Source] = o.Seq
-	sbytes, _ := json.MarshalIndent(st, "", "  ")
-	if err := os.WriteFile(o.State, sbytes, 0o600); err != nil {
-		return buildResult{}, err
+	_, bsha, err := manifest.HashFile(o.Out)
+	if err != nil {
+		return buildResult{}, fmt.Errorf("hash %s: %w", o.Out, err)
 	}
-	_, bsha, _ := manifest.HashFile(o.Out)
-	return buildResult{Path: o.Out, BundleID: m.BundleID, SHA256: bsha, Sequence: o.Seq, Packages: len(m.Packages)}, nil
+	res.Path, res.BundleID, res.SHA256, res.Sequence, res.Packages = o.Out, m.BundleID, bsha, seq, len(m.Packages)
+	return res, nil
+}
+
+// signatureFor records Authenticode for msu/msi (Windows hosts); it does not
+// apply to deb/rpm/pkg/agent payloads.
+func signatureFor(kind, path string) manifest.VendorSignature {
+	if kind == "msu" || kind == "msi" {
+		return vendorSig(path)
+	}
+	return manifest.VendorSignature{Status: "not_checked", CheckedAt: time.Now().UTC().Format(time.RFC3339)}
 }
 
 func inspect(args []string) error {
@@ -288,7 +324,8 @@ func send(args []string) error {
 	bundle := fs.String("bundle", "", "bundle path")
 	via := fs.String("via", "dropdir", "transfer adapter: dropdir | command")
 	to := fs.String("to", "", "dropdir: drop directory (transfer boundary)")
-	command := fs.String("command", "", "command: gateway upload command, {file} is replaced by the path, e.g. \"diodectl push {file}\"")
+	command := fs.String("command", "", "command: gateway upload command, {file} is replaced by the path, e.g. \"diodectl push {file}\" (quote paths containing spaces)")
+	timeout := fs.Duration("timeout", transfer.DefaultCommandTimeout, "command: kill the gateway command after this long")
 	keyPath := fs.String("key", "", "sign the transfer receipt with this bundle key (recommended); file or exec:<command>")
 	pubPath := fs.String("pub", "", "public key (required with -key exec:...)")
 	logPath := fs.String("log", "sent.jsonl", "append receipts to this sender-side log")
@@ -296,7 +333,7 @@ func send(args []string) error {
 	if *bundle == "" {
 		return fmt.Errorf("-bundle is required")
 	}
-	rc, err := sendBundle(sendOpts{Via: *via, To: *to, Command: *command, Key: *keyPath, Pub: *pubPath, Log: *logPath}, *bundle)
+	rc, err := sendBundle(sendOpts{Via: *via, To: *to, Command: *command, Timeout: Duration{*timeout}, Key: *keyPath, Pub: *pubPath, Log: *logPath}, *bundle)
 	if err != nil {
 		return err
 	}
@@ -326,16 +363,15 @@ func vendorSignature(path string) manifest.VendorSignature {
 }
 
 type sendOpts struct {
-	Via     string `json:"via"`     // dropdir | command
-	To      string `json:"to"`      // dropdir target
-	Command string `json:"command"` // command adapter; {file} is replaced
-	Key     string `json:"-"`       // receipt signing key (file or exec:)
-	Pub     string `json:"-"`
-	Log     string `json:"log"` // sender-side receipt log
+	Via     string   `json:"via"`     // dropdir | command
+	To      string   `json:"to"`      // dropdir target
+	Command string   `json:"command"` // command adapter; {file} is replaced; quote paths with spaces
+	Timeout Duration `json:"timeout"` // command adapter: per invocation (default 2h)
+	Key     string   `json:"-"`       // receipt signing key (file or exec:)
+	Pub     string   `json:"-"`
+	Log     string   `json:"log"` // sender-side receipt log
 }
 
-// sendBundle hands a bundle (or trust document) to the transfer adapter,
-// then delivers a signed receipt and appends it to the sender log.
 func adapterFor(o sendOpts) (transfer.Adapter, error) {
 	switch o.Via {
 	case "", "dropdir":
@@ -344,15 +380,28 @@ func adapterFor(o sendOpts) (transfer.Adapter, error) {
 		}
 		return transfer.DropDir{Dir: o.To}, nil
 	case "command":
-		argv := strings.Fields(o.Command)
+		argv, err := splitArgs(o.Command)
+		if err != nil {
+			return nil, fmt.Errorf("send command: %w", err)
+		}
 		if len(argv) == 0 {
 			return nil, fmt.Errorf("-command is required for the command adapter")
 		}
-		return transfer.Command{Argv: argv}, nil
+		return transfer.Command{Argv: argv, Timeout: o.Timeout.Duration}, nil
 	}
 	return nil, fmt.Errorf("unknown adapter %q", o.Via)
 }
 
+// postDeliveryError: the bundle itself crossed the boundary; only the
+// receipt or the sender log failed afterwards. The packages are delivered
+// and must be recorded as done (resending would only create a duplicate).
+type postDeliveryError struct{ err error }
+
+func (e *postDeliveryError) Error() string { return "bundle delivered, but " + e.err.Error() }
+func (e *postDeliveryError) Unwrap() error { return e.err }
+
+// sendBundle hands a bundle (or trust document) to the transfer adapter,
+// then delivers a signed receipt and appends it to the sender log.
 func sendBundle(o sendOpts, path string) (transfer.Receipt, error) {
 	a, err := adapterFor(o)
 	if err != nil {
@@ -365,23 +414,36 @@ func sendBundle(o sendOpts, path string) (transfer.Receipt, error) {
 	if o.Key != "" {
 		k, err := openSigner(o.Key, o.Pub)
 		if err != nil {
-			return rc, err
+			return rc, &postDeliveryError{fmt.Errorf("receipt not signed: %w", err)}
 		}
 		if err := rc.SignWith(k.KeyID(), k.Sign); err != nil {
-			return rc, err
+			return rc, &postDeliveryError{fmt.Errorf("receipt not signed: %w", err)}
 		}
 	}
 	if err := a.SendReceipt(rc); err != nil {
-		return rc, fmt.Errorf("bundle sent, but receipt failed: %w", err)
+		return rc, &postDeliveryError{fmt.Errorf("receipt failed: %w", err)}
 	}
 	if o.Log != "" {
-		line, _ := json.Marshal(rc)
-		f, err := os.OpenFile(o.Log, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-		if err != nil {
-			return rc, err
+		if err := appendLine(o.Log, rc); err != nil {
+			return rc, &postDeliveryError{fmt.Errorf("sender log %s: %w", o.Log, err)}
 		}
-		f.Write(append(line, '\n'))
-		f.Close()
 	}
 	return rc, nil
+}
+
+// appendLine appends v as one JSON line to path.
+func appendLine(path string, v any) error {
+	line, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }

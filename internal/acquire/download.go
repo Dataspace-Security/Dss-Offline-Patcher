@@ -90,6 +90,9 @@ type DownloadResult struct {
 	SHA256  string
 	Resumed bool // a .part file was continued
 	Reused  bool // final file already existed and matched
+	// ReplacedStale: a file of the same name with other content was deleted
+	// and the expected file downloaded in its place.
+	ReplacedStale bool
 }
 
 // Download fetches req.URL into req.DestDir/req.FileName. It writes to
@@ -129,15 +132,21 @@ func Download(ctx context.Context, hc *http.Client, req DownloadRequest) (*Downl
 	}
 	final := filepath.Join(req.DestDir, req.FileName)
 	part := final + ".part"
+	replacedStale := false
 
-	// Already downloaded? Reuse only if it verifies; never overwrite silently.
+	// Already downloaded? Reuse only if it verifies. A file that no longer
+	// matches (an unversioned vendor URL now serves new content under the
+	// same name, or the file was damaged) is deleted and fetched again.
 	if _, err := os.Stat(final); err == nil {
-		res, err := verifyFile(final, req)
-		if err != nil {
-			return nil, fmt.Errorf("%s already exists and does not match the expected hash (remove it to re-download): %w", final, err)
+		res, verr := verifyFile(final, req)
+		if verr == nil {
+			res.Reused = true
+			return res, nil
 		}
-		res.Reused = true
-		return res, nil
+		if err := os.Remove(final); err != nil {
+			return nil, fmt.Errorf("%s does not match the expected hash (%v) and cannot be removed: %w", final, verr, err)
+		}
+		replacedStale = true
 	}
 
 	var lastErr error
@@ -161,6 +170,7 @@ func Download(ctx context.Context, hc *http.Client, req DownloadRequest) (*Downl
 		}
 		res.Path = final
 		res.Resumed = resumed
+		res.ReplacedStale = replacedStale
 		return res, nil
 	}
 	return nil, lastErr
@@ -224,6 +234,11 @@ func fetchToPart(ctx context.Context, hc *http.Client, req DownloadRequest, part
 	if resp.ContentLength >= 0 {
 		total = offset + resp.ContentLength
 		if total > MaxDownloadBytes || (req.Size > 0 && total != req.Size) {
+			if offset > 0 {
+				// The .part does not belong to what the server now serves:
+				// start from scratch next time instead of failing forever.
+				os.Remove(part)
+			}
 			return false, fmt.Errorf("server reports %d bytes, expected %d (limit %d)", total, req.Size, int64(MaxDownloadBytes))
 		}
 	}

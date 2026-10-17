@@ -18,17 +18,21 @@ import (
 // "vendor_signature" (filled by build via Authenticode on Windows), plus
 // "path" to the downloaded file relative to the spec file's directory.
 type SpecEntry struct {
-	PackageID     string                 `json:"package_id"`
-	Title         string                 `json:"title"`
-	Vendor        string                 `json:"vendor"`
-	Kind          string                 `json:"kind"`
-	Version       string                 `json:"version,omitempty"`
-	KB            string                 `json:"kb,omitempty"`
-	ProductCode   string                 `json:"product_code,omitempty"`
-	PackageName   string                 `json:"package_name,omitempty"`
-	Severity      string                 `json:"severity"`
-	ReleaseDate   string                 `json:"release_date"`
-	Supersedes    []string               `json:"supersedes"`
+	PackageID   string   `json:"package_id"`
+	Title       string   `json:"title"`
+	Vendor      string   `json:"vendor"`
+	Kind        string   `json:"kind"`
+	Version     string   `json:"version,omitempty"`
+	KB          string   `json:"kb,omitempty"`
+	ProductCode string   `json:"product_code,omitempty"`
+	PackageName string   `json:"package_name,omitempty"`
+	Severity    string   `json:"severity"`
+	ReleaseDate string   `json:"release_date"`
+	Supersedes  []string `json:"supersedes"`
+	// Prerequisites: KBs that must be installed first, e.g. the checkpoint
+	// cumulative update(s) a Windows 11 24H2+ update builds on. The server
+	// holds the package back on endpoints that lack them.
+	Prerequisites []string               `json:"prerequisites,omitempty"`
 	Applicability manifest.Applicability `json:"applicability"`
 	SourceURL     string                 `json:"source_url"`
 	Path          string                 `json:"path"`
@@ -76,6 +80,7 @@ func ValidateEntry(e SpecEntry, size int64, sha256hex string) error {
 			Severity:        e.Severity,
 			ReleaseDate:     e.ReleaseDate,
 			Supersedes:      sup,
+			Prerequisites:   e.Prerequisites,
 			Applicability:   e.Applicability,
 			File:            manifest.FileRef{Name: "payload/" + filepath.Base(filepath.FromSlash(e.Path)), Size: size, SHA256: sha256hex},
 			SourceURL:       e.SourceURL,

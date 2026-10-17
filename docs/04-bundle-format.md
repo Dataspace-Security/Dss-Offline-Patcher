@@ -82,6 +82,10 @@ Any other entry is rejected. That includes directories other than `payload/`, sy
 
 `max_bundle_bytes` 32 GiB · `max_files` 500 · `max_file_bytes` 16 GiB
 
+`pmctl auto` stays below these: it splits pending packages over several bundles (default at most 28 GiB and 450 packages each, `max_bundle_bytes` / `max_bundle_packages` in `acquire.json`), each with its own sequence. See [08-acquisition.md](08-acquisition.md).
+
+`prerequisites` is set by `pmctl fetch` / `pmctl auto` for Windows checkpoint cumulative updates, which are shipped as their own `msu` packages (`<KB>-<arch>`).
+
 ## Transfer receipt (recorded on every intake attempt)
 
 `bundle_file_sha256`, `bundle_file_size`, `filename`, `received_at`, `adapter` (`dropdir`), `bundle_id` (if parseable), `source`, `result` (`validated`/`rejected`), and the list of `checks` with pass/fail and detail.

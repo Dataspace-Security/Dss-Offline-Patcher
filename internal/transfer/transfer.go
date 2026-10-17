@@ -5,6 +5,7 @@
 package transfer
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -92,9 +93,22 @@ func checkBundle(path string) (string, int64, string, error) {
 // never sees a partial file.
 type DropDir struct{ Dir string }
 
+// StalePartAge: a leftover <name>.part in the drop directory older than this
+// is from an interrupted earlier send and is removed before retrying. A
+// younger one may belong to a send in progress and is left alone.
+var StalePartAge = time.Hour
+
 func atomicCopy(src io.Reader, dst string) error {
 	tmp := dst + ".part"
+	if fi, err := os.Lstat(tmp); err == nil && fi.Mode().IsRegular() && time.Since(fi.ModTime()) > StalePartAge {
+		if err := os.Remove(tmp); err != nil {
+			return fmt.Errorf("remove stale %s: %w", tmp, err)
+		}
+	}
 	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o640)
+	if errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("%s exists: another transfer is in progress, or one was interrupted less than %s ago", tmp, StalePartAge)
+	}
 	if err != nil {
 		return err
 	}
@@ -147,7 +161,13 @@ func (d DropDir) SendReceipt(r Receipt) error {
 type Command struct {
 	Argv    []string
 	TempDir string // where receipts are written before handing them over
+	// Timeout bounds one invocation (default DefaultCommandTimeout); a hung
+	// gateway CLI is killed and the send fails (and is retried next run).
+	Timeout time.Duration
 }
+
+// DefaultCommandTimeout bounds one gateway command run.
+const DefaultCommandTimeout = 2 * time.Hour
 
 func (c Command) run(path string) error {
 	if len(c.Argv) == 0 {
@@ -164,7 +184,18 @@ func (c Command) run(path string) error {
 	if !found {
 		argv = append(argv, path)
 	}
-	out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput()
+	timeout := c.Timeout
+	if timeout <= 0 {
+		timeout = DefaultCommandTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.WaitDelay = 10 * time.Second // don't hang on pipes held by grandchildren
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("gateway command timed out after %s: %s", timeout, strings.TrimSpace(string(out)))
+	}
 	if err != nil {
 		return fmt.Errorf("gateway command failed: %v: %s", err, strings.TrimSpace(string(out)))
 	}

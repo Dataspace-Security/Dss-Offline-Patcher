@@ -3,9 +3,11 @@ package main
 // pmctl auto: unattended acquisition for the connected zone. One run checks
 // Microsoft's monthly security release for the configured products and each
 // configured third-party app for a new version, downloads and verifies
-// everything new, builds ONE signed bundle and sends it through the transfer
-// boundary. Packages are recorded as done only after a successful send, so a
-// failed run is simply retried by the next scheduled run.
+// everything new, builds signed bundles (one, or several when the pending
+// packages exceed max_bundle_bytes / max_bundle_packages) and sends them
+// through the transfer boundary. Packages are recorded as done right after
+// the send of their bundle, so a failed run is simply retried by the next
+// scheduled run.
 //
 // Nothing here installs anything: bundles land in quarantine on the isolated
 // side and still need approval there.
@@ -21,13 +23,14 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"offpatch/internal/acqstatus"
@@ -44,6 +47,20 @@ type autoConfig struct {
 	TTL           Duration `json:"bundle_ttl"`
 	Schedule      string   `json:"schedule"` // shown in the console, e.g. "daily at 07:00"
 	Send          sendOpts `json:"send"`
+
+	// MaxBundleBytes / MaxBundlePackages cap one bundle below the isolated
+	// server's max_bundle_bytes (32 GiB) and max_files (500); more pending
+	// packages are split over several bundles, each with its own sequence.
+	MaxBundleBytes    int64 `json:"max_bundle_bytes"`    // default 28 GiB
+	MaxBundlePackages int   `json:"max_bundle_packages"` // default 450
+	// RunTimeout bounds a whole run (default 6h); it then stops cleanly,
+	// sends what is finished and reports the rest for the next run.
+	RunTimeout Duration `json:"run_timeout"`
+	// Retention (days; 0 = default 14, negative = keep forever): run
+	// directories (bundles as built) and downloaded files of packages that
+	// were sent that long ago.
+	KeepRunsDays      int `json:"keep_runs_days"`
+	KeepDownloadsDays int `json:"keep_downloads_days"`
 
 	Microsoft *struct {
 		Months      int          `json:"months"`       // how many monthly releases to look back (default 2)
@@ -141,6 +158,7 @@ type autoDone struct {
 	SHA256   string `json:"sha256"`
 	BundleID string `json:"bundle_id"`
 	SentAt   string `json:"sent_at"`
+	File     string `json:"file,omitempty"` // downloads/<file>, for retention
 }
 
 type autoReport struct {
@@ -151,8 +169,9 @@ type autoReport struct {
 	Skipped    int               `json:"already_sent"`
 	Superseded []string          `json:"skipped_superseded,omitempty"`
 	Failures   map[string]string `json:"failures"`
-	Bundle     string            `json:"bundle,omitempty"`
-	BundleID   string            `json:"bundle_id,omitempty"`
+	Bundle     string            `json:"bundle,omitempty"`    // last bundle sent
+	BundleID   string            `json:"bundle_id,omitempty"` // every bundle sent, comma-separated
+	Bundles    []string          `json:"bundles,omitempty"`
 	Sent       bool              `json:"sent"`
 	Warnings   []string          `json:"warnings,omitempty"`
 	Feeds      []acqstatus.Feed  `json:"feeds"`
@@ -166,7 +185,14 @@ var (
 	autoNow  = time.Now
 )
 
-const exitPartial = 2
+const (
+	exitPartial = 2
+
+	defaultMaxBundleBytes    = 28 << 30
+	defaultMaxBundlePackages = 450
+	defaultRunTimeout        = 6 * time.Hour
+	defaultKeepDays          = 14
+)
 
 func autoCmd(args []string) error {
 	fs := flag.NewFlagSet("auto", flag.ExitOnError)
@@ -174,17 +200,38 @@ func autoCmd(args []string) error {
 	dry := fs.Bool("dry-run", false, "list what would be fetched; download and send nothing")
 	reqDir := fs.String("requests", "", "directory of acquisition requests exported from the console (default: \"requests\" in the config)")
 	fs.Parse(args)
-	rep, err := runAutoRequests(context.Background(), *cfgPath, *dry, *reqDir)
+	// SIGINT/SIGTERM (systemd stop, Ctrl-C): stop fetching, keep what was
+	// delivered recorded in state.json, and still send the status report.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	rep, err := runAutoRequests(ctx, *cfgPath, *dry, *reqDir)
 	b, _ := json.MarshalIndent(rep, "", "  ")
 	fmt.Println(string(b))
 	if err != nil {
 		return err
 	}
-	if len(rep.Failures) > 0 {
-		fmt.Fprintf(os.Stderr, "%d item(s) failed; they will be retried next run\n", len(rep.Failures))
+	if partialRun(&rep) {
+		fmt.Fprintf(os.Stderr, "%d item(s) or feed(s) failed; they will be retried next run\n", len(rep.Failures)+len(failedFeeds(rep.Feeds)))
+		stop()
 		os.Exit(exitPartial)
 	}
 	return nil
+}
+
+// partialRun: some item failed, or a feed could not be read (an unread
+// feed must never look like "nothing new").
+func partialRun(rep *autoReport) bool {
+	return len(rep.Failures) > 0 || len(failedFeeds(rep.Feeds)) > 0
+}
+
+func failedFeeds(feeds []acqstatus.Feed) []string {
+	var out []string
+	for _, f := range feeds {
+		if f.Status == "failed" {
+			out = append(out, f.Type+":"+f.Name)
+		}
+	}
+	return out
 }
 
 func loadAutoConfig(path string) (*autoConfig, error) {
@@ -219,6 +266,27 @@ func loadAutoConfig(path string) (*autoConfig, error) {
 	}
 	if c.Send.Log == "" {
 		c.Send.Log = filepath.Join(c.WorkDir, "sent.jsonl")
+	}
+	if c.MaxBundleBytes == 0 {
+		c.MaxBundleBytes = defaultMaxBundleBytes
+	}
+	if c.MaxBundleBytes < 0 {
+		return nil, errors.New("config: max_bundle_bytes must be positive")
+	}
+	if c.MaxBundlePackages == 0 {
+		c.MaxBundlePackages = defaultMaxBundlePackages
+	}
+	if c.MaxBundlePackages < 0 || c.MaxBundlePackages > manifest.MaxPackages {
+		return nil, fmt.Errorf("config: max_bundle_packages must be 1..%d", manifest.MaxPackages)
+	}
+	if c.RunTimeout.Duration <= 0 {
+		c.RunTimeout.Duration = defaultRunTimeout
+	}
+	if c.KeepRunsDays == 0 {
+		c.KeepRunsDays = defaultKeepDays
+	}
+	if c.KeepDownloadsDays == 0 {
+		c.KeepDownloadsDays = defaultKeepDays
 	}
 	if c.Microsoft != nil {
 		if c.Microsoft.Months <= 0 {
@@ -258,26 +326,20 @@ var (
 	pkgVerRe = regexp.MustCompile(`^[0-9]+(\.[0-9]+){1,3}([-+][A-Za-z0-9.]+)?$`)
 )
 
-// acquireLock prevents overlapping scheduled runs; a lock older than 6h is
-// considered stale (crashed run).
-func acquireLock(dir string) (func(), error) {
-	p := filepath.Join(dir, ".auto.lock")
-	if fi, err := os.Stat(p); err == nil && time.Since(fi.ModTime()) > 6*time.Hour {
-		os.Remove(p)
-	}
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("another pmctl auto run is in progress (%s)", p)
-	}
-	fmt.Fprintf(f, "%d %s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339))
-	f.Close()
-	return func() { os.Remove(p) }, nil
-}
-
-func loadState(path string) autoState {
-	st := autoState{Done: map[string]autoDone{}, Failed: map[string]string{}}
-	if b, err := os.ReadFile(path); err == nil {
-		json.Unmarshal(b, &st)
+// loadState reads work_dir/state.json. A missing file is a first run; an
+// unreadable or corrupt one stops the run, because treating every package
+// as new would fetch and send everything again.
+func loadState(path string) (autoState, error) {
+	st := autoState{}
+	b, err := os.ReadFile(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+	case err != nil:
+		return st, fmt.Errorf("state %s: %w", path, err)
+	default:
+		if err := json.Unmarshal(b, &st); err != nil {
+			return st, fmt.Errorf("%s is corrupt (%v); refusing to run, because every package would look new and be fetched and sent again: restore it from a backup or repair the JSON", path, err)
+		}
 	}
 	if st.Done == nil {
 		st.Done = map[string]autoDone{}
@@ -288,16 +350,15 @@ func loadState(path string) autoState {
 	if st.FeedSeen == nil {
 		st.FeedSeen = map[string]string{}
 	}
-	return st
+	return st, nil
 }
 
 func saveJSON(path string, v any) error {
-	b, _ := json.MarshalIndent(v, "", "  ")
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	return writeFileAtomic(path, b, 0o600)
 }
 
 // recentMonths returns MSRC month ids, newest first ("2026-Oct", "2026-Sep").
@@ -331,23 +392,28 @@ func runAutoRequests(ctx context.Context, cfgPath string, dry bool, requestsDir 
 	if requestsDir != "" {
 		c.Requests = requestsDir
 	}
+	ctx, cancel := context.WithTimeout(ctx, c.RunTimeout.Duration)
+	defer cancel()
 	downloads := filepath.Join(c.WorkDir, "downloads")
 	if err := os.MkdirAll(downloads, 0o750); err != nil {
 		return rep, err
 	}
-	unlock, err := acquireLock(c.WorkDir)
+	unlock, err := acquireLock(c.WorkDir, c.RunTimeout.Duration)
 	if err != nil {
 		return rep, err
 	}
 	defer unlock()
 	statePath := filepath.Join(c.WorkDir, "state.json")
-	st := loadState(statePath)
+	st, err := loadState(statePath)
+	if err != nil {
+		return rep, err
+	}
 	// A fresh run directory every time (never reuse an older spec.json).
 	runs := filepath.Join(c.WorkDir, "runs")
 	if err := os.MkdirAll(runs, 0o750); err != nil {
 		return rep, err
 	}
-	runDir, err := os.MkdirTemp(runs, autoNow().UTC().Format("20060102T150405Z")+"-")
+	runDir, err := os.MkdirTemp(runs, autoNow().UTC().Format(runDirTimeFormat)+"-")
 	if err != nil {
 		return rep, err
 	}
@@ -358,109 +424,15 @@ func runAutoRequests(ctx context.Context, cfgPath string, dry bool, requestsDir 
 		st.Failed[id] = err.Error()
 	}
 	added := func(id string) {
-		rep.New = append(rep.New, id)
+		if !slices.Contains(rep.New, id) {
+			rep.New = append(rep.New, id)
+		}
 		delete(st.Failed, id)
 	}
 
 	// ---- Microsoft security updates ----
 	if m := c.Microsoft; m != nil && len(m.Products) > 0 {
-		ms := acquire.NewMSRC()
-		ms.HTTP = hc
-		if c.MSRCURL != "" {
-			ms.BaseURL = c.MSRCURL
-		}
-		cat := acquire.NewCatalog()
-		cat.HTTP = hc
-		if c.CatalogURL != "" {
-			cat.BaseURL = c.CatalogURL
-		}
-		// Collect candidates across months first, then drop any KB that a
-		// newer candidate supersedes (e.g. last month's cumulative update once
-		// this month's is out): no point carrying ~1 GB of obsolete content.
-		type cand struct {
-			id, kb, severity string
-			p                autoMSProd
-		}
-		var cands []cand
-		superseded := map[string]string{} // KB → superseding KB
-		seen := map[string]bool{}
-		for _, month := range recentMonths(autoNow(), m.Months) {
-			updates, err := ms.Month(ctx, month)
-			if err != nil {
-				// The current month 404s until Patch Tuesday; not an error.
-				rep.Warnings = append(rep.Warnings, fmt.Sprintf("MSRC %s: %v", month, err))
-				continue
-			}
-			sort.Slice(updates, func(i, j int) bool { return updates[i].KB < updates[j].KB })
-			for _, p := range m.Products {
-				for _, u := range updates {
-					fu, ok := u.ForProduct(p.MSRCProduct, p.Arch)
-					if !ok || sevRank[fu.Severity] < sevRank[m.MinSeverity] {
-						continue
-					}
-					for _, s := range fu.Supersedes {
-						superseded[strings.ToUpper(s)] = fu.KB
-					}
-					id := fu.KB + "-" + p.Arch + p.PackageSuffix
-					if seen[id] {
-						continue
-					}
-					seen[id] = true
-					cands = append(cands, cand{id: id, kb: fu.KB, severity: fu.Severity, p: p})
-				}
-			}
-		}
-		for _, cd := range cands {
-			if by, ok := superseded[strings.ToUpper(cd.kb)]; ok {
-				rep.Superseded = append(rep.Superseded, cd.id+" (superseded by "+by+")")
-				continue
-			}
-			if _, done := st.Done[cd.id]; done {
-				rep.Skipped++
-				continue
-			}
-			if dry {
-				added(cd.id)
-				continue
-			}
-			p := cd.p
-			catProd := p.CatalogProduct
-			if catProd == "" {
-				catProd = p.MSRCProduct
-			}
-			_, err := acquire.FetchKB(ctx, cat, ms, acquire.FetchKBOptions{KB: cd.kb, Product: catProd, Arch: p.Arch, Match: p.Match,
-				MinBuild: p.MinBuild, MaxBuild: p.MaxBuild, Severity: cd.severity, PackageID: cd.id, OutDir: downloads, SpecPath: spec})
-			if err != nil {
-				fail(cd.id, err)
-				continue
-			}
-			added(cd.id)
-		}
-		for _, p := range m.Products {
-			name := p.MSRCProduct + " " + p.Arch + p.PackageSuffix
-			var kbs, fresh, failed []string
-			for _, cd := range cands {
-				if cd.p != p {
-					continue
-				}
-				kbs = append(kbs, cd.kb)
-				if rep.Failures[cd.id] != "" {
-					failed = append(failed, cd.kb+": "+rep.Failures[cd.id])
-				} else if slices.Contains(rep.New, cd.id) {
-					fresh = append(fresh, cd.kb)
-				}
-			}
-			f := acqstatus.Feed{Type: "microsoft", Name: name, LatestVersion: strings.Join(kbs, ", "), Status: "up_to_date"}
-			switch {
-			case len(failed) > 0:
-				f.Status, f.Detail = "failed", strings.Join(failed, "; ")
-			case len(fresh) > 0:
-				f.Status, f.Detail = "new", strings.Join(fresh, ", ")
-			case len(kbs) == 0:
-				f.Detail = "no qualifying updates in the checked months"
-			}
-			rep.Feeds = append(rep.Feeds, f)
-		}
+		fetchMicrosoft(&msRun{ctx: ctx, c: c, hc: hc, downloads: downloads, spec: spec, st: st, dry: dry, rep: &rep, fail: fail, added: added})
 	}
 
 	// ---- third-party applications ----
@@ -492,6 +464,10 @@ func runAutoRequests(ctx context.Context, cfgPath string, dry bool, requestsDir 
 
 	defer func() {
 		rep.Finished = autoNow().UTC().Format(time.RFC3339)
+		// State first: whatever happens below, delivered packages stay done.
+		if serr := saveJSON(statePath, st); serr != nil && err == nil {
+			err = fmt.Errorf("state not saved: %w", serr)
+		}
 		if err != nil {
 			rep.Error = err.Error()
 		}
@@ -501,67 +477,45 @@ func runAutoRequests(ctx context.Context, cfgPath string, dry bool, requestsDir 
 			archiveRequests(c.Requests, reqs, &rep)
 		}
 		if !dry && c.Intel != nil && !c.Intel.Disabled {
-			d, ierr := sendIntel(ctx, c)
-			rep.Warnings = append(rep.Warnings, d.Warnings...)
-			if ierr != nil {
-				rep.Warnings = append(rep.Warnings, "update intelligence not sent: "+ierr.Error())
-			} else {
-				rep.Feeds = append(rep.Feeds, acqstatus.Feed{Type: "intel", Name: "update intelligence",
-					LatestVersion: fmt.Sprintf("%d Windows builds, %d apps", len(d.Windows), len(d.Apps)), Status: "up_to_date", Detail: d.AppsSource})
-			}
+			rep.Feeds = append(rep.Feeds, intelFeed(ctx, c, &rep))
+		}
+		if !dry {
+			applyRetention(c, st, runDir, specFiles(spec), &rep)
 		}
 		if !dry {
 			if serr := sendStatus(c, &rep); serr != nil {
 				rep.Warnings = append(rep.Warnings, "status report not sent: "+serr.Error())
 			}
 		}
-		saveJSON(statePath, st)
-		line, _ := json.Marshal(rep)
-		if f, err := os.OpenFile(filepath.Join(c.WorkDir, "auto-log.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
-			f.Write(append(line, '\n'))
-			f.Close()
+		if lerr := appendLine(filepath.Join(c.WorkDir, "auto-log.jsonl"), rep); lerr != nil {
+			fmt.Fprintln(os.Stderr, "warning: auto-log.jsonl:", lerr)
 		}
 	}()
 	if dry || len(rep.New) == 0 {
 		os.RemoveAll(runDir)
 		return rep, nil
 	}
+	return rep, deliver(&deliveryRun{ctx: ctx, c: c, runDir: runDir, spec: spec, st: st, statePath: statePath, rep: &rep, fail: fail})
+}
 
-	// ---- one signed bundle, sent automatically ----
-	tmpOut := filepath.Join(runDir, "bundle.pmb")
-	br, err := buildBundle(buildOpts{Key: c.Key, Pub: c.Pub, Spec: spec, Out: tmpOut, Source: c.Source, State: c.SequenceState, TTL: c.TTL.Duration})
-	if err != nil {
-		return rep, fmt.Errorf("build: %w", err)
-	}
-	// Name the file after the unique bundle ID (sequence-based) so it never
-	// collides with an earlier bundle still waiting in the transfer path.
-	out := filepath.Join(runDir, br.BundleID+".pmb")
-	if err := os.Rename(tmpOut, out); err != nil {
-		return rep, err
-	}
-	br.Path = out
-	rep.Bundle, rep.BundleID = br.Path, br.BundleID
-	so := c.Send
-	so.Key, so.Pub = c.Key, c.Pub
-	if _, err := sendBundle(so, br.Path); err != nil {
-		return rep, fmt.Errorf("send (packages will be retried next run): %w", err)
-	}
-	rep.Sent = true
-	var entries []struct {
-		PackageID string `json:"package_id"`
-		Path      string `json:"path"`
-	}
-	b, _ := os.ReadFile(spec)
-	json.Unmarshal(b, &entries)
-	for _, e := range entries {
-		p := e.Path
-		if !filepath.IsAbs(p) {
-			p = filepath.Join(runDir, p)
+// intelFeed sends update intelligence and reports it as a feed: failed if
+// nothing could be sent or it is incomplete (a feed that was not read must
+// not look up to date).
+func intelFeed(ctx context.Context, c *autoConfig, rep *autoReport) acqstatus.Feed {
+	d, ierr := sendIntel(ctx, c)
+	rep.Warnings = append(rep.Warnings, d.Warnings...)
+	f := acqstatus.Feed{Type: "intel", Name: "update intelligence", Status: "up_to_date", Detail: d.AppsSource}
+	switch {
+	case ierr != nil:
+		rep.Warnings = append(rep.Warnings, "update intelligence not sent: "+ierr.Error())
+		f.Status, f.Detail = "failed", "not sent: "+ierr.Error()
+	default:
+		f.LatestVersion = fmt.Sprintf("%d Windows builds, %d apps", len(d.Windows), len(d.Apps))
+		if len(d.Warnings) > 0 {
+			f.Status, f.Detail = "failed", "sent incomplete: "+strings.Join(d.Warnings, "; ")
 		}
-		_, sha, _ := manifest.HashFile(p)
-		st.Done[e.PackageID] = autoDone{SHA256: sha, BundleID: br.BundleID, SentAt: autoNow().UTC().Format(time.RFC3339)}
 	}
-	return rep, nil
+	return f
 }
 
 // ---- third-party helpers ----
@@ -916,7 +870,7 @@ func sendStatus(c *autoConfig, rep *autoReport) error {
 	switch {
 	case rep.Error != "":
 		outcome = "failed"
-	case len(rep.Failures) > 0:
+	case partialRun(rep):
 		outcome = "partial"
 	}
 	fin := rep.Finished

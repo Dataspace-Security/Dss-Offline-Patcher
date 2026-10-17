@@ -21,7 +21,7 @@ New-Item -ItemType Directory -Force $logDir | Out-Null
 $cmd = "/c `"`"$Pmctl`" auto -config `"$Config`" >> `"$logDir\auto.log`" 2>&1`""
 $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument $cmd
 $trigger = New-ScheduledTaskTrigger -Daily -At $At
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 4) -MultipleInstances IgnoreNew
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 7) -MultipleInstances IgnoreNew
 # Runs as SYSTEM so it works without a logged-on user. If the signing key is
 # in an HSM, run as the service account that can reach it instead (-User).
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -User "SYSTEM" -RunLevel Highest -Force

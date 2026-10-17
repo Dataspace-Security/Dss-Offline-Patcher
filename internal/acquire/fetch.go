@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -35,6 +36,10 @@ type FetchKBOptions struct {
 	OutDir      string
 	SpecPath    string
 	Progress    func(done, total int64)
+	// SkipPrerequisite, if set, is asked for each checkpoint package id
+	// (<KB>-<arch>); true means it was delivered earlier and is neither
+	// downloaded nor written to the spec again (it stays a prerequisite).
+	SkipPrerequisite func(packageID string) bool
 }
 
 // FetchResult reports what FetchKB/FetchURL did.
@@ -44,6 +49,11 @@ type FetchResult struct {
 	Update   *Update // catalog row (FetchKB only)
 	Replaced bool    // an existing spec entry with this package_id was replaced
 	Warnings []string
+	// Prerequisites are the checkpoint packages written to the spec next to
+	// Entry (Windows 11 24H2+ updates list them in the same download dialog).
+	Prerequisites []SpecEntry
+	// SkippedPrerequisites are checkpoint package ids SkipPrerequisite declined.
+	SkippedPrerequisites []string
 }
 
 // FetchKB searches the catalog for o.KB, picks the single row for
@@ -100,6 +110,7 @@ func FetchKB(ctx context.Context, cat *Catalog, ms *MSRC, o FetchKBOptions) (*Fe
 	if err != nil {
 		return nil, err
 	}
+	checkpoints := checkpointFiles(files, file, o.KB, warn)
 	if file.SHA1 == "" && file.SHA256 == "" {
 		return nil, fmt.Errorf("catalog gave no hash for %s; refusing an unverifiable download (use fetch-url with a vendor-published SHA-256)", file.FileName)
 	}
@@ -161,6 +172,13 @@ func FetchKB(ctx context.Context, cat *Catalog, ms *MSRC, o FetchKBOptions) (*Fe
 		sup = append(sup, msrcSup...)
 	}
 	sup = filterKBs(sup, o.KB)
+	prereqs := make([]string, 0, len(checkpoints))
+	for _, c := range checkpoints {
+		prereqs = append(prereqs, c.kb)
+	}
+	// A checkpoint update is a prerequisite, never something this update
+	// replaces: keep it out of supersedes so nothing hides it.
+	sup = slices.DeleteFunc(sup, func(kb string) bool { return slices.Contains(prereqs, kb) })
 
 	size := int64(0)
 	if len(files) == 1 {
@@ -210,8 +228,30 @@ func FetchKB(ctx context.Context, cat *Catalog, ms *MSRC, o FetchKBOptions) (*Fe
 	if kind == "msi" {
 		e.ProductCode = o.ProductCode
 	}
+	if len(prereqs) > 0 {
+		e.Prerequisites = prereqs
+	}
 	if err := ValidateEntry(e, dl.Size, dl.SHA256); err != nil {
 		return nil, err
+	}
+	// Checkpoint packages: each is its own package, downloaded and verified
+	// like the main file. All of them must succeed before the spec changes.
+	for _, c := range checkpoints {
+		id := c.kb + "-" + o.Arch
+		if o.SkipPrerequisite != nil && o.SkipPrerequisite(id) {
+			res.SkippedPrerequisites = append(res.SkippedPrerequisites, id)
+			continue
+		}
+		ce, err := fetchCheckpoint(ctx, cat.HTTP, o, upd, c, id, sev, rel)
+		if err != nil {
+			return nil, fmt.Errorf("checkpoint update %s (prerequisite of %s): %w", c.kb, o.KB, err)
+		}
+		res.Prerequisites = append(res.Prerequisites, ce)
+	}
+	for _, ce := range res.Prerequisites {
+		if _, err := UpsertSpec(o.SpecPath, ce); err != nil {
+			return nil, err
+		}
 	}
 	replaced, err := UpsertSpec(o.SpecPath, e)
 	if err != nil {
@@ -219,6 +259,79 @@ func FetchKB(ctx context.Context, cat *Catalog, ms *MSRC, o FetchKBOptions) (*Fe
 	}
 	res.Entry, res.Replaced = e, replaced
 	return res, nil
+}
+
+type checkpointFile struct {
+	DownloadFile
+	kb string
+}
+
+// checkpointFiles returns the other .msu files of a catalog download dialog
+// that carry their own KB: on Windows 11 24H2 and later the dialog lists the
+// cumulative update together with the checkpoint update(s) it requires.
+func checkpointFiles(files []DownloadFile, main DownloadFile, kb string, warn func(string, ...any)) []checkpointFile {
+	var out []checkpointFile
+	seen := map[string]bool{}
+	for _, f := range files {
+		if f.URL == main.URL && f.FileName == main.FileName {
+			continue
+		}
+		if !strings.EqualFold(filepath.Ext(f.FileName), ".msu") {
+			warn("%s: the catalog also lists %s, which is not an .msu; it was not packaged", kb, f.FileName)
+			continue
+		}
+		m := titleKBRe.FindStringSubmatch(f.FileName)
+		if m == nil || strings.EqualFold("KB"+m[1], kb) {
+			warn("%s: the catalog also lists %s, which names no separate KB; it was not packaged (endpoints may need it)", kb, f.FileName)
+			continue
+		}
+		ckb := "KB" + m[1]
+		if seen[ckb] {
+			continue
+		}
+		seen[ckb] = true
+		out = append(out, checkpointFile{DownloadFile: f, kb: ckb})
+	}
+	return out
+}
+
+func fetchCheckpoint(ctx context.Context, hc *http.Client, o FetchKBOptions, upd Update, c checkpointFile, id, sev, rel string) (SpecEntry, error) {
+	if c.SHA1 == "" && c.SHA256 == "" {
+		return SpecEntry{}, fmt.Errorf("catalog gave no hash for %s; refusing an unverifiable download", c.FileName)
+	}
+	dl, err := Download(ctx, hc, DownloadRequest{URL: c.URL, DestDir: o.OutDir, FileName: c.FileName, SHA1: c.SHA1, SHA256: c.SHA256, Progress: o.Progress})
+	if err != nil {
+		return SpecEntry{}, err
+	}
+	path, err := RelPath(o.SpecPath, dl.Path)
+	if err != nil {
+		return SpecEntry{}, err
+	}
+	verified := []string{}
+	if c.SHA1 != "" {
+		verified = append(verified, "sha1(catalog)")
+	}
+	if c.SHA256 != "" {
+		verified = append(verified, "sha256(catalog)")
+	}
+	e := SpecEntry{
+		PackageID:     id,
+		Title:         fmt.Sprintf("Checkpoint cumulative update %s (prerequisite of %s: %s)", c.kb, o.KB, upd.Title),
+		Vendor:        "Microsoft",
+		Kind:          "msu",
+		KB:            c.kb,
+		Severity:      sev,
+		ReleaseDate:   rel,
+		Supersedes:    []string{},
+		Applicability: manifest.Applicability{OS: "windows", Arch: o.Arch, MinBuild: o.MinBuild, MaxBuild: o.MaxBuild},
+		SourceURL:     c.URL,
+		Path:          path,
+		Acquired: &Provenance{
+			At: time.Now().UTC().Format(time.RFC3339), Method: "catalog", CatalogUpdateID: upd.ID,
+			SHA1: dl.SHA1, SHA256: dl.SHA256, Size: dl.Size, Verified: strings.Join(verified, "+"),
+		},
+	}
+	return e, ValidateEntry(e, dl.Size, dl.SHA256)
 }
 
 func pickFile(files []DownloadFile, kb, fileMatch string) (DownloadFile, error) {
@@ -243,7 +356,7 @@ func pickFile(files []DownloadFile, kb, fileMatch string) (DownloadFile, error) 
 	for _, f := range files {
 		fmt.Fprintf(&b, "\n  %s", f.FileName)
 	}
-	b.WriteString("\n(prerequisite files such as checkpoint cumulative updates must be fetched as separate packages)")
+	b.WriteString("\n(checkpoint updates with their own KB are packaged automatically as prerequisites of the chosen file)")
 	return DownloadFile{}, errors.New(b.String())
 }
 

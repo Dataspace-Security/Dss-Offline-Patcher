@@ -65,9 +65,72 @@ func clientOrDefault(c *http.Client) *http.Client {
 	return c
 }
 
-// doRead performs req and returns the body (bounded by limit) for a 200 response.
+// HTTPStatusError is a non-200 answer to a page/API request.
+type HTTPStatusError struct {
+	Method, URL string
+	Code        int
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("%s %s: HTTP %d", e.Method, e.URL, e.Code)
+}
+
+// IsNotFound reports whether err is an HTTP 404 from doRead.
+func IsNotFound(err error) bool {
+	var he *HTTPStatusError
+	return errors.As(err, &he) && he.Code == http.StatusNotFound
+}
+
+// Retry policy for page/API GETs and POSTs (catalog, MSRC): transient
+// failures (transport errors, timeouts, 429 and 5xx) are retried.
+const readAttempts = 3
+
+// RetryBackoff is the wait before retry n (1-based); tests shorten it.
+var RetryBackoff = func(n int) time.Duration { return time.Duration(n*n) * 2 * time.Second }
+
+func retryable(err error) bool {
+	var he *HTTPStatusError
+	if errors.As(err, &he) {
+		return he.Code == http.StatusTooManyRequests || he.Code >= 500
+	}
+	return err != nil
+}
+
+// doRead performs req and returns the body (bounded by limit) for a 200
+// response, retrying transient failures up to readAttempts times.
 func doRead(ctx context.Context, hc *http.Client, req *http.Request, limit int64) ([]byte, error) {
-	req = req.WithContext(ctx)
+	var lastErr error
+	for attempt := 1; attempt <= readAttempts; attempt++ {
+		if attempt > 1 {
+			t := time.NewTimer(RetryBackoff(attempt - 1))
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return nil, lastErr
+			case <-t.C:
+			}
+		}
+		r := req.Clone(ctx)
+		if req.GetBody != nil {
+			body, err := req.GetBody()
+			if err != nil {
+				return nil, err
+			}
+			r.Body = body
+		}
+		b, err := doReadOnce(hc, r, limit)
+		if err == nil {
+			return b, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil || !retryable(err) {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("%w (after %d attempts)", lastErr, readAttempts)
+}
+
+func doReadOnce(hc *http.Client, req *http.Request, limit int64) ([]byte, error) {
 	if req.Header.Get("User-Agent") == "" {
 		req.Header.Set("User-Agent", DefaultUserAgent)
 	}
@@ -78,7 +141,7 @@ func doRead(ctx context.Context, hc *http.Client, req *http.Request, limit int64
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
-		return nil, fmt.Errorf("%s %s: HTTP %d", req.Method, req.URL.Redacted(), resp.StatusCode)
+		return nil, &HTTPStatusError{Method: req.Method, URL: req.URL.Redacted(), Code: resp.StatusCode}
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {

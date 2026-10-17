@@ -29,6 +29,10 @@ const (
 	origURLBase  = "https://catalog.s.download.windowsupdate.com/c/msdownload/update/software/secu/2026/10/"
 	origDigest   = "bqRq2XUXbWxuncx5hZ1nxRk9b8A="
 	origSize     = "1236404149"
+
+	// CheckpointKB is the checkpoint cumulative update the download dialog
+	// lists next to KB when Server.Checkpoint is set.
+	CheckpointKB = "KB5043080"
 )
 
 // Server is a fake of the Microsoft endpoints.
@@ -41,6 +45,14 @@ type Server struct {
 	IgnoreRange bool
 	// Vendor files served at /vendor/<name>.
 	Vendor map[string][]byte
+	// Checkpoint, if set, makes the download dialog list a second .msu (a
+	// checkpoint cumulative update, CheckpointKB) with this content, as the
+	// catalog does for Windows 11 24H2 and later. CheckpointName is its
+	// catalog file name (set by SetCheckpoint).
+	Checkpoint     []byte
+	CheckpointName string
+	// Fail5xx makes the next n catalog/MSRC page requests answer 503.
+	Fail5xx int
 
 	mu          sync.Mutex
 	RangeHeader []string // Range header of each /dl/ request ("" if none)
@@ -61,6 +73,7 @@ func New(t testing.TB, fixtures string, payload []byte) *Server {
 	search := read("search-KB5126657.html")
 	noRes := read("search-noresults.html")
 	dialog := read("downloaddialog-ac395651.html")
+	dialog2 := read("downloaddialog-checkpoint.html")
 	details := read("details-ac395651.html")
 	cvrf := read("cvrf-2026-Oct.json")
 
@@ -69,7 +82,7 @@ func New(t testing.TB, fixtures string, payload []byte) *Server {
 	s.FileName = "windows10.0-kb5126657-x64_" + hex.EncodeToString(sum[:]) + ".msu"
 
 	mux := http.NewServeMux()
-	s.Server = httptest.NewTLSServer(mux)
+	s.Server = httptest.NewTLSServer(failing(s, mux))
 	t.Cleanup(s.Close)
 
 	mux.HandleFunc("/Search.aspx", func(w http.ResponseWriter, r *http.Request) {
@@ -98,6 +111,18 @@ func New(t testing.TB, fixtures string, payload []byte) *Server {
 		page = strings.ReplaceAll(page, origURLBase+origFileName, s.URL+"/dl/"+s.FileName)
 		page = strings.ReplaceAll(page, origFileName, s.FileName)
 		page = strings.ReplaceAll(page, origDigest, base64.StdEncoding.EncodeToString(sum[:]))
+		s.mu.Lock()
+		cp, cpName := s.Checkpoint, s.CheckpointName
+		s.mu.Unlock()
+		if cp != nil {
+			csum := sha1.Sum(cp)
+			page = strings.NewReplacer(
+				"{{CHECKPOINT_URL}}", s.URL+"/dl/"+cpName, "{{CHECKPOINT_NAME}}", cpName,
+				"{{CHECKPOINT_DIGEST}}", base64.StdEncoding.EncodeToString(csum[:]),
+				"{{MAIN_URL}}", s.URL+"/dl/"+s.FileName, "{{MAIN_NAME}}", s.FileName,
+				"{{MAIN_DIGEST}}", base64.StdEncoding.EncodeToString(sum[:]),
+			).Replace(string(dialog2))
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write([]byte(page))
 	})
@@ -118,7 +143,15 @@ func New(t testing.TB, fixtures string, payload []byte) *Server {
 		if served == nil {
 			served = s.Payload
 		}
-		if strings.TrimPrefix(r.URL.Path, "/dl/") != s.FileName {
+		name := strings.TrimPrefix(r.URL.Path, "/dl/")
+		s.mu.Lock()
+		if s.Checkpoint != nil && name == s.CheckpointName {
+			served = s.Checkpoint
+		} else if name != s.FileName {
+			served = nil
+		}
+		s.mu.Unlock()
+		if served == nil {
 			http.NotFound(w, r)
 			return
 		}
@@ -149,6 +182,34 @@ func New(t testing.TB, fixtures string, payload []byte) *Server {
 		http.ServeContent(w, r, "f", time.Time{}, bytes.NewReader(b))
 	})
 	return s
+}
+
+// SetCheckpoint makes the download dialog list a checkpoint update with
+// content b (see Server.Checkpoint).
+func (s *Server) SetCheckpoint(b []byte) {
+	sum := sha1.Sum(b)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Checkpoint = b
+	s.CheckpointName = "windows11.0-" + strings.ToLower(CheckpointKB) + "-x64_" + hex.EncodeToString(sum[:]) + ".msu"
+}
+
+// failing answers 503 to catalog/MSRC page requests while Fail5xx > 0.
+func failing(s *Server, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := strings.HasSuffix(r.URL.Path, ".aspx") || strings.HasPrefix(r.URL.Path, "/cvrf/")
+		s.mu.Lock()
+		fail := page && s.Fail5xx > 0
+		if fail {
+			s.Fail5xx--
+		}
+		s.mu.Unlock()
+		if fail {
+			http.Error(w, "busy", http.StatusServiceUnavailable)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Ranges returns the Range headers seen by the download host so far.

@@ -197,6 +197,12 @@ func printFetchResult(res *acquire.FetchResult, specPath string) {
 	if len(e.Supersedes) > 0 {
 		fmt.Printf("supersedes: %s\n", strings.Join(e.Supersedes, ", "))
 	}
+	if len(e.Prerequisites) > 0 {
+		fmt.Printf("requires:   %s (checkpoint updates)\n", strings.Join(e.Prerequisites, ", "))
+	}
+	for _, pe := range res.Prerequisites {
+		fmt.Printf("checkpoint: %s  %s (also added to the spec)\n", pe.PackageID, pe.Path)
+	}
 	action := "added to"
 	if res.Replaced {
 		action = "replaced in"

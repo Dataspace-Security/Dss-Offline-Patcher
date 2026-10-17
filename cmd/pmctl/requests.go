@@ -319,12 +319,20 @@ func (r *requestRun) fetchKB(k acqrequest.KB) error {
 		}
 	}
 	res, err := acquire.FetchKB(r.ctx, r.cat, r.ms, acquire.FetchKBOptions{KB: k.KB, Product: prod, Arch: k.Arch, MinBuild: k.Build, MaxBuild: k.Build,
-		PackageID: k.KB + "-" + k.Arch, OutDir: r.downloads, SpecPath: r.spec})
+		PackageID: k.KB + "-" + k.Arch, OutDir: r.downloads, SpecPath: r.spec,
+		SkipPrerequisite: func(id string) bool {
+			_, done := r.st.Done[id]
+			return done || slices.Contains(r.rep.New, id)
+		}})
 	if err != nil {
 		return err
 	}
 	for _, w := range res.Warnings {
 		autoWarn(k.KB + ": " + w)
+	}
+	for _, pe := range res.Prerequisites {
+		r.handled[pe.PackageID] = true
+		r.added(pe.PackageID)
 	}
 	return nil
 }

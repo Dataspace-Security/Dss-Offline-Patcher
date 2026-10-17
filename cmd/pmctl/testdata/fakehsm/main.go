@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"offpatch/internal/manifest"
 )
@@ -15,6 +16,9 @@ func main() {
 	switch os.Getenv("FAKEHSM_MODE") {
 	case "garbage":
 		fmt.Println("bm90IGEgc2lnbmF0dXJl")
+		return
+	case "sleep":
+		time.Sleep(time.Minute)
 		return
 	case "fail":
 		fmt.Fprintln(os.Stderr, "token not present")

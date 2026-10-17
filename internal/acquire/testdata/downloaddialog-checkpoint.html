@@ -1,0 +1,22 @@
+<!-- Synthetic DownloadDialog.aspx answer for a Windows 11 24H2-style
+     cumulative update that ships with a checkpoint cumulative update: the
+     dialog lists two .msu files (checkpoint first, as the live catalog does).
+     Placeholders are substituted by internal/acquire/acquiretest. -->
+<html><head><script language="javascript" type="text/javascript">
+        var downloadInformation = new Array();
+downloadInformation[0] = new Object();
+downloadInformation[0].updateID ='ac395651-eed0-47e7-a5cf-bd9ceccd6299';
+downloadInformation[0].isHotFix =false;
+downloadInformation[0].enTitle ='2026-10 Cumulative Update for Windows 10 Version 22H2 for x64-based Systems (KB5126657)';
+downloadInformation[0].files = new Array();
+downloadInformation[0].files[0] = new Object();
+downloadInformation[0].files[0].url = '{{CHECKPOINT_URL}}';
+downloadInformation[0].files[0].digest = '{{CHECKPOINT_DIGEST}}';
+downloadInformation[0].files[0].sha256 = '';
+downloadInformation[0].files[0].fileName = '{{CHECKPOINT_NAME}}';
+downloadInformation[0].files[1] = new Object();
+downloadInformation[0].files[1].url = '{{MAIN_URL}}';
+downloadInformation[0].files[1].digest = '{{MAIN_DIGEST}}';
+downloadInformation[0].files[1].sha256 = '';
+downloadInformation[0].files[1].fileName = '{{MAIN_NAME}}';
+</script></head><body></body></html>

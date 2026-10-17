@@ -13,7 +13,9 @@ ExecStart=/usr/local/bin/pmctl auto -config /etc/offpatch-acq/acquire.json
 # Exit 2 = partial (failed items are retried next run); treat as success for
 # the unit but keep it visible in the journal. Exit 1 = failure → OnFailure.
 SuccessExitStatus=2
-TimeoutStartSec=4h
+# Above acquire.json run_timeout (default 6h), so pmctl stops itself first and
+# still records what was delivered and sends its status report.
+TimeoutStartSec=7h
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

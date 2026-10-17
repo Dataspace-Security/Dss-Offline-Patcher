@@ -51,7 +51,7 @@ func TestAutoAcquisition(t *testing.T) {
 	  "work_dir": "work", "key": "bundle.key", "source": "acq-zone-1",
 	  "send": {"via": "dropdir", "to": "diode"},
 	  "catalog_url": %q, "msrc_url": %q,
-	  "microsoft": {"months": 2, "min_severity": "important",
+	  "microsoft": {"months": 1, "min_severity": "important",
 	    "products": [{"msrc_product": "Windows 10 Version 22H2", "catalog_product": "Windows 10 Version 22H2", "arch": "x64", "min_build": 19045, "max_build": 19045}]},
 	  "apps": [{"name": "acme-agent", "title": "Acme Endpoint Agent", "vendor": "Acme", "kind": "msi",
 	    "product_code": "{11111111-2222-3333-4444-555555555555}", "arch": "x64", "severity": "important",
