@@ -14,7 +14,17 @@
     msiexec /i offpatch-agent.msi SERVER=https://pm.corp.internal:8443 TOKEN=enr_... /qn /l*v install.log
   TOKEN is a (multi-use) enrollment token from the console. It is marked
   hidden so it does not appear in MSI logs. Without TOKEN the agent is
-  installed but not enrolled (enroll later with pmagent.exe enroll).
+  installed but not enrolled (enroll later with pmagent.exe enroll). A device
+  that is already enrolled (agent.json present) keeps its identity: the MSI
+  does not enroll it again (re-enroll by hand with pmagent.exe enroll -force).
+
+  State directory (%ProgramData%\offpatch): standard users may create folders
+  under %ProgramData%, so the MSI does not trust a folder that already exists.
+  The SecureStateDir custom action runs "pmagent.exe secure-state-dir", which
+  refuses (and fails the install, see the MSI log) if the folder is a junction
+  or is owned by anyone other than SYSTEM/Administrators, and otherwise sets a
+  protected DACL (SYSTEM + Administrators only). The service repeats this
+  check at every start and refuses to run on an untrusted folder.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
@@ -31,6 +41,12 @@
     <Property Id="SERVER" Secure="yes" />
     <Property Id="TOKEN" Secure="yes" Hidden="yes" />
     <Property Id="MSIUSEREALADMINDETECTION" Value="1" />
+    <!-- Already enrolled? Then never run enrollment again (it would be refused). -->
+    <Property Id="AGENTENROLLED">
+      <DirectorySearch Id="StateDirSearch" Path="[CommonAppDataFolder]offpatch" Depth="0">
+        <FileSearch Id="AgentJsonSearch" Name="agent.json" />
+      </DirectorySearch>
+    </Property>
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="offpatch">
@@ -71,7 +87,9 @@
       <Directory Id="STATEDIR" Name="offpatch">
         <Component Id="StateDir" Guid="*">
           <CreateFolder>
-            <!-- Agent state (device key, certificate) readable by SYSTEM and Administrators only. -->
+            <!-- Agent state (device key, certificate) readable by SYSTEM and Administrators only.
+                 LockPermissions does not change the owner of a pre-existing folder:
+                 the SecureStateDir custom action checks that. -->
             <Permission User="SYSTEM" GenericAll="yes" />
             <Permission User="Administrators" GenericAll="yes" />
           </CreateFolder>
@@ -91,11 +109,16 @@
       <?endif?>
     </Feature>
 
+    <!-- Refuse a state folder someone else created (owner / junction) and lock its DACL. -->
+    <SetProperty Id="SecureStateDir" Sequence="execute" Before="SecureStateDir"
+                 Value="&quot;[INSTALLFOLDER]pmagent.exe&quot; secure-state-dir -state-dir &quot;[CommonAppDataFolder]offpatch&quot;" />
+    <CustomAction Id="SecureStateDir" DllEntry="WixQuietExec64" BinaryRef="Wix4UtilCA_X64"
+                  Execute="deferred" Impersonate="no" Return="check" />
     <!-- Enroll before the service starts, only on first install with a token,
          and only if the device is not already enrolled. -->
     <SetProperty Id="EnrollAgent" Sequence="execute" Before="EnrollAgent"
                  Value="&quot;[INSTALLFOLDER]pmagent.exe&quot; enroll -server &quot;[SERVER]&quot; -token &quot;[TOKEN]&quot; -pubkey &quot;[INSTALLFOLDER]bundle.pub&quot; $(var.CAArg) $(var.RootArg) -state-dir &quot;[CommonAppDataFolder]offpatch&quot;"
-                 Condition="NOT Installed AND TOKEN AND SERVER" />
+                 Condition="NOT Installed AND TOKEN AND SERVER AND NOT AGENTENROLLED" />
     <CustomAction Id="EnrollAgent" DllEntry="WixQuietExec64" BinaryRef="Wix4UtilCA_X64"
                   Execute="deferred" Impersonate="no" Return="check" HideTarget="yes" />
     <!-- Run recovery actions also on non-crash failures (needed for self-upgrade restarts). -->
@@ -104,7 +127,8 @@
     <CustomAction Id="SetFailureFlag" DllEntry="WixQuietExec64" BinaryRef="Wix4UtilCA_X64"
                   Execute="deferred" Impersonate="no" Return="ignore" />
     <InstallExecuteSequence>
-      <Custom Action="EnrollAgent" Before="StartServices" Condition="NOT Installed AND TOKEN AND SERVER" />
+      <Custom Action="SecureStateDir" After="InstallFiles" Condition="NOT REMOVE=&quot;ALL&quot;" />
+      <Custom Action="EnrollAgent" Before="StartServices" Condition="NOT Installed AND TOKEN AND SERVER AND NOT AGENTENROLLED" />
       <Custom Action="SetFailureFlag" After="InstallServices" Condition="NOT REMOVE=&quot;ALL&quot;" />
     </InstallExecuteSequence>
   </Package>

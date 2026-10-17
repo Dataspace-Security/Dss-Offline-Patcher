@@ -19,7 +19,7 @@
 |---|---|---|
 | `pmctl` | Connected acquisition | Generates signing keys, builds signed bundles from downloaded vendor files, hands bundles to the transfer adapter. Never holds endpoint credentials. |
 | `pmserver` | Isolated management | Intake watcher, quarantine, validation, catalog, approval, immutable repository, deployment orchestration, endpoint API, admin API, hash-chained audit, embedded console. |
-| `pmagent` | Endpoint | Enrolls (mTLS client certificate), reports inventory and heartbeat, receives assignments, downloads only from `pmserver`, re-verifies signature and hash, installs (Windows `wusa`/`msiexec`, Linux `dpkg`/`rpm`, macOS `installer`), reports each stage, applies root-signed trust updates, and upgrades itself from approved `agent` packages. |
+| `pmagent` | Endpoint | Enrolls (mTLS client certificate), reports inventory and heartbeat, receives assignments, downloads only from `pmserver`, re-verifies signature and hash, installs (Windows `wusa`/`msiexec`, Linux `dpkg`/`rpm`, macOS `installer`), reports each stage, applies root-signed trust updates, and upgrades itself from approved `agent` packages (staged, version-checked, rolled back automatically if the new binary does not stay up). On Windows it runs as SYSTEM, refuses a state directory (`%ProgramData%\offpatch`) that is a junction or not owned by SYSTEM/Administrators, and locks it to SYSTEM + Administrators. State and certificates are replaced atomically; inventory is cached (15 min, refreshed after installs) and check-ins back off up to 15 min while the server is unreachable. |
 
 ## Data on disk (`data_dir` in `pmserver.json`)
 

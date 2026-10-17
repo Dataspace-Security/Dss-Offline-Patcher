@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -11,11 +12,41 @@ import (
 	"path/filepath"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
+	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
+
+	"offpatch/internal/agent"
 )
 
 const serviceName = "offpatch-agent"
+
+const (
+	// stopWait bounds how long a stop request waits for a running installer
+	// (the agent never kills wusa/msiexec; they have a 2 h timeout).
+	stopWait = 2*time.Hour + 5*time.Minute
+	// stopHint is the wait hint reported to the SCM, renewed every half of it.
+	stopHint = 60 * time.Second
+	// maxLogBytes: agent.log is rotated to agent.log.1 at this size.
+	maxLogBytes = 10 << 20
+)
+
+// singleInstance takes a machine-wide mutex so a manual `pmagent run` and
+// the service never install at the same time. Creating Global\ objects
+// needs SeCreateGlobalPrivilege, so a standard user cannot squat the name.
+func singleInstance() (release func(), err error) {
+	name, _ := windows.UTF16PtrFromString(`Global\offpatch-agent`)
+	h, err := windows.CreateMutex(nil, false, name)
+	if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+		windows.CloseHandle(h)
+		return nil, errors.New("another pmagent is already running on this computer (service or `pmagent run`)")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("single-instance mutex: %w", err)
+	}
+	return func() { windows.CloseHandle(h) }, nil
+}
 
 func isService() bool {
 	ok, err := svc.IsWindowsService()
@@ -40,9 +71,8 @@ func (h *handler) Execute(args []string, req <-chan svc.ChangeRequest, status ch
 			case svc.Interrogate:
 				status <- c.CurrentStatus
 			case svc.Stop, svc.Shutdown:
-				status <- svc.Status{State: svc.StopPending}
 				cancel()
-				<-done
+				waitForAgent(done, status, h.log)
 				return false, 0
 			}
 		case err := <-done:
@@ -56,6 +86,32 @@ func (h *handler) Execute(args []string, req <-chan svc.ChangeRequest, status ch
 	}
 }
 
+// waitForAgent lets a running installer finish before the service stops,
+// keeping the SCM informed (StopPending with a renewed wait hint) up to
+// stopWait. At system shutdown Windows enforces its own limit regardless.
+func waitForAgent(done <-chan error, status chan<- svc.Status, log *slog.Logger) {
+	cp := uint32(1)
+	status <- svc.Status{State: svc.StopPending, CheckPoint: cp, WaitHint: uint32(stopHint / time.Millisecond)}
+	tick := time.NewTicker(stopHint / 2)
+	defer tick.Stop()
+	deadline := time.After(stopWait)
+	for {
+		select {
+		case <-done:
+			return
+		case <-tick.C:
+			if cp == 1 {
+				log.Info("stop requested; waiting for the running installer to finish")
+			}
+			cp++
+			status <- svc.Status{State: svc.StopPending, CheckPoint: cp, WaitHint: uint32(stopHint / time.Millisecond)}
+		case <-deadline:
+			log.Error("installer still running; stopping anyway", "waited", stopWait)
+			return
+		}
+	}
+}
+
 func runService(log *slog.Logger) {
 	dir := defaultStateDir()
 	for i, a := range os.Args {
@@ -63,7 +119,18 @@ func runService(log *slog.Logger) {
 			dir = os.Args[i+1]
 		}
 	}
-	f, err := os.OpenFile(filepath.Join(dir, "agent.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	// Check the state dir before writing agent.log into it (as SYSTEM, a
+	// planted link there would redirect the log). A refusal goes to the
+	// Application event log, as there is nowhere safe to write it.
+	if err := agent.SecureStateDir(dir); err != nil {
+		if el, eerr := eventlog.Open(serviceName); eerr == nil {
+			el.Error(1, "offpatch agent refusing to start: "+err.Error())
+			el.Close()
+		}
+		log.Error("refusing to start", "err", err)
+		os.Exit(1)
+	}
+	f, err := agent.OpenRotatingFile(filepath.Join(dir, "agent.log"), maxLogBytes)
 	if err == nil {
 		log = slog.New(slog.NewTextHandler(f, nil))
 		defer f.Close()

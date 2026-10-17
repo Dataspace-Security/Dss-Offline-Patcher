@@ -14,9 +14,22 @@ quarantine, approval, staged deployment, verification.
 - The new binary travels as a package with `kind: agent` and a `version` like `1.2.3`.
 - The agent verifies the signed manifest and SHA-256 as for any package. If its own version is
   already at or above the package version, it reports `installed` without changing anything.
-- Otherwise it renames its running binary to `<binary>.old` (only one `.old` is kept), copies the
-  new binary into place, reports `installed`, and **exits** so the service manager starts the new
-  version: `pmagent run` exits with code **3**; the Windows service stops with an error code.
+- Otherwise it stages the new binary as `<binary>.new` (fsynced) and runs `<binary>.new version`:
+  the output must equal the package `version`. A binary for the wrong OS/arch, or one built without
+  `-X offpatch/internal/agent.Version=…`, is refused here and the target reports `failed` (before
+  this check such a binary was swapped in and re-installed at every check-in, restarting the agent
+  each time).
+- It then writes `<state-dir>/upgrade.json` (`state: pending`), renames its running binary to
+  `<binary>.old` (only one `.old` is kept), moves the new binary into place, reports `installed`,
+  and **exits** so the service manager starts the new version: `pmagent run` exits with code **3**;
+  the Windows service stops with an error code.
+- The new binary counts its starts in `upgrade.json`. It is confirmed healthy after its first
+  successful check-in or 10 minutes of running, and the marker is removed. If it is started
+  3 times without becoming healthy (it keeps crashing), the next start restores `<binary>.old`
+  (the failing binary is kept as `<binary>.failed`), marks the upgrade `failed`, and restarts the
+  old version, which reports the target `failed` with the reason. If the agent comes back with a
+  version other than the package version, the upgrade is also marked `failed`. A failed upgrade
+  of the same binary (same SHA-256) is not retried on that endpoint; publish a rebuilt package.
   Restart then comes from:
   - Windows: SCM recovery actions (restart after 15 s, 60 s, 5 min), set by `pmagent service install`
     and by the MSI (`util:ServiceConfig`). The service stops cleanly with exit code 1, so Windows
@@ -30,7 +43,7 @@ quarantine, approval, staged deployment, verification.
   - macOS: launchd `KeepAlive`.
 - Each check-in reports the agent version in inventory. The server marks the target `verified` once
   the reported version is at least the package version.
-- If copying the new binary fails, the agent puts the old one back and reports `failed`.
+- If staging or swapping the binary fails, the agent puts the old one back and reports `failed`.
 
 ## Prerequisites and roles
 
@@ -101,9 +114,10 @@ quarantine, approval, staged deployment, verification.
 ## Rollback / escape hatch
 
 1. **Pause or cancel** the deployment first, otherwise the agent upgrades itself again.
-2. On each affected endpoint, swap `<binary>.old` back (table in
-   [runbook 06](06-failed-update-recovery.md#agent-offpatch-agent-self-upgrade)) and restart the
-   service.
+2. Endpoints where the new binary keeps crashing restore `<binary>.old` by themselves (see above).
+   Otherwise, on each affected endpoint, swap `<binary>.old` back (table in
+   [runbook 06](06-failed-update-recovery.md#agent-offpatch-agent-self-upgrade)), delete
+   `<state-dir>/upgrade.json`, and restart the service.
 3. offpatch cannot push an older agent version: a package with a lower version than the running
    agent is treated as already installed.
 4. Interactions with OS packaging:

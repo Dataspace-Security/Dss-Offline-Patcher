@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"debug/pe"
 	"fmt"
 	"net"
 	"os"
@@ -79,8 +80,8 @@ func runHealth(checks []store.HealthCheck, serviceRunning func(string) (bool, er
 }
 
 // hardwareReporter is implemented by platforms that can describe the
-// machine (model, CPU, RAM, disks...). It must be cheap: it runs on every
-// check-in.
+// machine (model, CPU, RAM, disks...). It runs at every check-in, or every
+// inventoryTTL on slowInventory platforms.
 type hardwareReporter interface {
 	Hardware(ctx context.Context) store.Hardware
 }
@@ -126,4 +127,18 @@ func windowsProductName(product string, build int) string {
 		return "Windows 11" + strings.TrimPrefix(product, "Windows 10")
 	}
 	return product
+}
+
+// machineArch maps an IMAGE_FILE_MACHINE_* value (IsWow64Process2's native
+// machine) to the arch names used in manifests; "" if unknown.
+func machineArch(m uint16) string {
+	switch m {
+	case pe.IMAGE_FILE_MACHINE_AMD64:
+		return "x64"
+	case pe.IMAGE_FILE_MACHINE_ARM64:
+		return "arm64"
+	case pe.IMAGE_FILE_MACHINE_I386:
+		return "x86"
+	}
+	return ""
 }

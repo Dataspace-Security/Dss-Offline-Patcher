@@ -21,8 +21,9 @@ import (
 const usage = `pmagent — offpatch endpoint agent
 
   pmagent enroll -server <url> -token <enrollment token> -pubkey <bundle.pub>[,more.pub] [-ca ca.pem] [-root-pubkey root.pub]
-                 [-state-dir dir] [-platform windows|linux|macos|sim] [-hostname h -build n -sim-fail KB1,KB2 -sim-reboot]
+                 [-state-dir dir] [-force] [-platform windows|linux|macos|sim] [-hostname h -build n -sim-fail KB1,KB2 -sim-reboot]
   pmagent run    [-state-dir dir] [-once]
+  pmagent secure-state-dir [-state-dir dir]   (check ownership and lock down the state directory; used by the MSI)
   pmagent service install|uninstall [-state-dir dir]     (Windows service, systemd unit or launchd daemon)
 `
 
@@ -56,6 +57,11 @@ func main() {
 		err = run(os.Args[2:], log)
 	case "service":
 		err = serviceCmd(os.Args[2:])
+	case "secure-state-dir":
+		fs := flag.NewFlagSet("secure-state-dir", flag.ExitOnError)
+		dir := fs.String("state-dir", defaultStateDir(), "agent state directory")
+		fs.Parse(os.Args[2:])
+		err = agent.SecureStateDir(*dir)
 	case "version":
 		fmt.Println(agent.Version)
 	default:
@@ -81,6 +87,7 @@ func enroll(args []string) error {
 	build := fs.Int("build", 19045, "sim: Windows build number")
 	simFail := fs.String("sim-fail", "", "sim: KBs/product codes whose install fails")
 	simReboot := fs.Bool("sim-reboot", false, "sim: installs require a reboot")
+	force := fs.Bool("force", false, "replace an existing enrollment (new device key and identity)")
 	fs.Parse(args)
 	if *server == "" || *token == "" || *pubs == "" {
 		return fmt.Errorf("-server, -token and -pubkey are required")
@@ -105,7 +112,7 @@ func enroll(args []string) error {
 			sim.FailKBs = strings.Split(*simFail, ",")
 		}
 	}
-	if err := os.MkdirAll(*dir, 0o700); err != nil {
+	if err := agent.SecureStateDir(*dir); err != nil {
 		return err
 	}
 	p, err := agent.PlatformFor(&agent.State{Platform: *plat, Sim: sim}, *dir)
@@ -120,7 +127,11 @@ func enroll(args []string) error {
 		}
 		rootPEM = string(b)
 	}
-	st, err := agent.Enroll(*server, *token, *ca, *dir, keys, rootPEM, p, *plat, sim)
+	var opts []agent.EnrollOption
+	if *force {
+		opts = append(opts, agent.WithForce())
+	}
+	st, err := agent.Enroll(*server, *token, *ca, *dir, keys, rootPEM, p, *plat, sim, opts...)
 	if err != nil {
 		return err
 	}
@@ -143,6 +154,17 @@ func run(args []string, log *slog.Logger) error {
 }
 
 func runAgent(ctx context.Context, dir string, once bool, log *slog.Logger) error {
+	release, err := singleInstance()
+	if err != nil {
+		return err
+	}
+	defer release()
+	// The state dir holds the device key and the installers run as SYSTEM:
+	// refuse to use one that someone else owns (see SecureStateDir).
+	if err := agent.SecureStateDir(dir); err != nil {
+		log.Error("refusing to start", "err", err)
+		return err
+	}
 	st, err := agent.LoadState(dir)
 	if err != nil {
 		return err

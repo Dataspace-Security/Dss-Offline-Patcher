@@ -4,6 +4,8 @@
 & {
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+# Windows PowerShell 5.1 on older .NET still offers only SSL3/TLS 1.0; the server requires TLS 1.2+.
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $token = $t
 if (-not $token) { throw 'Set $t to the enrollment token first (copy the full command from the console).' }
 $me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
@@ -45,6 +47,8 @@ function Secure-Dir($p) {
 
 $svc = Get-Service $Service -ErrorAction SilentlyContinue
 $wasRunning = $svc -and $svc.Status -eq 'Running'
+$previous = $null    # identity moved aside for a re-enrollment, restored if it fails
+$enrolledNow = $false
 try {
   Step 'Preparing folders'
   Secure-Dir $Dir
@@ -59,6 +63,7 @@ try {
       $aside = "$State.previous-" + (Get-Date -Format 'yyyyMMddHHmmss')
       Write-Warning "this computer was enrolled with $old; moving that identity to $aside"
       Move-Item -LiteralPath $State -Destination $aside
+      $previous = $aside
       Secure-Dir $State
       $enrolled = $false
     }
@@ -111,6 +116,7 @@ try {
     Step "Enrolling with $Server"
     & $Exe @a
     if ($LASTEXITCODE -ne 0) { throw "enrollment failed (exit code $LASTEXITCODE)" }
+    $enrolledNow = $true
   }
 
   if ($svc) {
@@ -131,6 +137,16 @@ try {
   }
   Start-Service $Service
 } catch {
+  if ($previous -and -not $enrolledNow) {
+    # Re-enrollment failed: put the previous identity back so the agent keeps working.
+    Write-Warning "enrollment did not complete; restoring the previous identity from $previous"
+    try {
+      $cur = Get-Service $Service -ErrorAction SilentlyContinue
+      if ($cur -and $cur.Status -ne 'Stopped') { Stop-Service $Service -Force; $cur.WaitForStatus('Stopped', '00:00:30') }
+      if (Test-Path -LiteralPath $State) { Move-Item -LiteralPath $State -Destination ("$State.failed-" + (Get-Date -Format 'yyyyMMddHHmmss')) }
+      Move-Item -LiteralPath $previous -Destination $State
+    } catch { Write-Warning "could not restore $previous to ${State}: $_" }
+  }
   if ($wasRunning) { Start-Service $Service -ErrorAction SilentlyContinue } # leave a working agent behind
   throw
 } finally {

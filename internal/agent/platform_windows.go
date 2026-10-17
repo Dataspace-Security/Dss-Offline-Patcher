@@ -11,8 +11,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 
 	"offpatch/internal/manifest"
 	"offpatch/internal/store"
@@ -27,9 +31,16 @@ func NativePlatform(logDir string) (Platform, error) { return &Windows{LogDir: l
 
 func (w *Windows) Name() string { return "windows" }
 
+// slowInventory: WMI/PowerShell collection is cached between check-ins.
+func (w *Windows) slowInventory() {}
+
+// psPrelude makes PowerShell write UTF-8 to the pipe: with the default OEM
+// code page, non-ASCII names (and localized errors) arrive mangled.
+const psPrelude = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8; `
+
 func powershell(ctx context.Context, script string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, filepath.Join(os.Getenv("SystemRoot"), `System32\WindowsPowerShell\v1.0\powershell.exe`),
-		"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
+		"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", psPrelude+script)
 	out, err := cmd.Output()
 	if err != nil {
 		var ee *exec.ExitError
@@ -41,26 +52,42 @@ func powershell(ctx context.Context, script string) ([]byte, error) {
 	return out, nil
 }
 
+// Facts reads the version straight from the registry: no PowerShell process
+// at every check-in.
 func (w *Windows) Facts() (Facts, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	out, err := powershell(ctx, `$cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'; `+
-		`[pscustomobject]@{Product=[string]$cv.ProductName; Display=[string]$cv.DisplayVersion; Build=[int]$cv.CurrentBuildNumber; UBR=[int]$cv.UBR; Edition=[string]$cv.EditionID} | ConvertTo-Json -Compress`)
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Windows NT\CurrentVersion`, registry.QUERY_VALUE|registry.WOW64_64KEY)
 	if err != nil {
-		return Facts{}, err
-	}
-	var r struct {
-		Product, Display, Edition string
-		Build, UBR                int
-	}
-	if err := json.Unmarshal(out, &r); err != nil {
 		return Facts{}, fmt.Errorf("facts: %w", err)
 	}
+	defer k.Close()
+	str := func(name string) string {
+		v, _, _ := k.GetStringValue(name)
+		return v
+	}
+	build, err := strconv.Atoi(str("CurrentBuildNumber"))
+	if err != nil {
+		return Facts{}, fmt.Errorf("facts: CurrentBuildNumber: %w", err)
+	}
+	ubr, _, _ := k.GetIntegerValue("UBR")
+	display := str("DisplayVersion")
+	if display == "" {
+		display = str("ReleaseId") // before Windows 10 20H2
+	}
 	host, _ := os.Hostname()
-	return Facts{Hostname: host, OS: "windows", OSVersion: fmt.Sprintf("%s %s (%d.%d)", windowsProductName(r.Product, r.Build), r.Display, r.Build, r.UBR), Build: r.Build, Arch: osArch(), Edition: r.Edition}, nil
+	return Facts{Hostname: host, OS: "windows", OSVersion: fmt.Sprintf("%s %s (%d.%d)", windowsProductName(str("ProductName"), build), display, build, ubr),
+		Build: build, Arch: osArch(), Edition: str("EditionID")}, nil
 }
 
+// osArch is the native machine architecture (IsWow64Process2), so an x86 or
+// emulated agent still reports an x64 / ARM64 machine correctly. The
+// environment is the fallback where the API is missing (Windows 10 < 1511).
 func osArch() string {
+	var proc, native uint16
+	if err := windows.IsWow64Process2(windows.CurrentProcess(), &proc, &native); err == nil {
+		if a := machineArch(native); a != "" {
+			return a
+		}
+	}
 	a := os.Getenv("PROCESSOR_ARCHITEW6432")
 	if a == "" {
 		a = os.Getenv("PROCESSOR_ARCHITECTURE")
@@ -75,148 +102,182 @@ func osArch() string {
 	}
 }
 
-const inventoryScript = `
-$kb = @(Get-CimInstance -ClassName Win32_QuickFixEngineering | ForEach-Object { [string]$_.HotFixID })
-$paths = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
-$prod = @(Get-ItemProperty $paths -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^\{[0-9A-Fa-f-]{36}\}$' } |
-  ForEach-Object { [pscustomobject]@{ id=[string]$_.PSChildName; name=[string]$_.DisplayName; version=[string]$_.DisplayVersion } })
-$reboot = (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') -or
-  (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')
-[pscustomobject]@{ kbs=$kb; products=$prod; reboot=[bool]$reboot } | ConvertTo-Json -Compress -Depth 4`
+// Installed updates still come from WMI (Win32_QuickFixEngineering has no
+// registry equivalent). The agent caches inventory, so this runs every
+// inventoryTTL or after an install, not at every check-in.
+const kbScript = `ConvertTo-Json -Compress @(Get-CimInstance -ClassName Win32_QuickFixEngineering | ForEach-Object { [string]$_.HotFixID })`
+
+var uninstallKeys = []string{
+	`SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall`,
+	`SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall`,
+}
+
+var rebootKeys = []string{
+	`SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending`,
+	`SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired`,
+}
 
 func (w *Windows) Inventory() ([]store.InventoryItem, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	out, err := powershell(ctx, inventoryScript)
+	out, err := powershell(ctx, kbScript)
 	if err != nil {
 		return nil, false, err
 	}
-	var r struct {
-		KBs      []string `json:"kbs"`
-		Products []struct {
-			ID, Name, Version string
-		} `json:"products"`
-		Reboot bool `json:"reboot"`
-	}
-	if err := json.Unmarshal(out, &r); err != nil {
+	var kbs []string
+	if err := json.Unmarshal(out, &kbs); err != nil {
 		return nil, false, fmt.Errorf("inventory: %w", err)
 	}
 	items := []store.InventoryItem{}
-	for _, kb := range r.KBs {
+	for _, kb := range kbs {
 		if kb = strings.ToUpper(strings.TrimSpace(kb)); strings.HasPrefix(kb, "KB") {
 			items = append(items, store.InventoryItem{Kind: "kb", ID: kb})
 		}
 	}
-	for _, p := range r.Products {
-		items = append(items, store.InventoryItem{Kind: "product", ID: strings.ToUpper(p.ID), Name: p.Name, Version: p.Version})
+	prods, err := msiProducts()
+	if err != nil {
+		return nil, false, fmt.Errorf("inventory: %w", err)
 	}
-	return items, r.Reboot, nil
+	return append(items, prods...), rebootPending(), nil
 }
 
-// Exit codes documented by Microsoft for wusa.exe / msiexec.exe.
-const (
-	exitOK              = 0
-	exitRebootRequired  = 3010
-	exitRebootInitiated = 1641
-	exitWusaAlready     = 0x00240006 // WU_S_ALREADY_INSTALLED
-	exitWusaNotApplic   = 0x80240017 // WU_E_NOT_APPLICABLE
-	exitMsiBusy         = 1618
-	exitMsiOtherVersion = 1638
-)
+var productKeyRe = regexp.MustCompile(`^\{[0-9A-Fa-f-]{36}\}$`)
 
-func (w *Windows) Install(ctx context.Context, p manifest.Package, file string) Result {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Hour)
-	defer cancel()
-	sys := filepath.Join(os.Getenv("SystemRoot"), "System32")
-	var cmd *exec.Cmd
-	switch p.Kind {
-	case "msu":
-		cmd = exec.CommandContext(ctx, filepath.Join(sys, "wusa.exe"), file, "/quiet", "/norestart")
-	case "msi":
-		os.MkdirAll(w.LogDir, 0o750)
-		logf := filepath.Join(w.LogDir, fmt.Sprintf("%s-%d.log", p.PackageID, time.Now().Unix()))
-		cmd = exec.CommandContext(ctx, filepath.Join(sys, "msiexec.exe"), "/i", file, "/qn", "/norestart", "/l*v", logf)
-	default:
-		return Result{State: "failed", ExitCode: -1, Detail: "unsupported kind " + p.Kind}
+// msiProducts lists installed programs from the 64-bit and 32-bit registry
+// views: Windows Installer products (keys named by a product code) and
+// EXE-installed apps that Apps & features shows (keys named by the app).
+func msiProducts() ([]store.InventoryItem, error) {
+	var items []store.InventoryItem
+	for _, path := range uninstallKeys {
+		k, err := registry.OpenKey(registry.LOCAL_MACHINE, path, registry.ENUMERATE_SUB_KEYS|registry.WOW64_64KEY)
+		if errors.Is(err, registry.ErrNotExist) {
+			continue // no WOW6432Node on 32-bit Windows
+		}
+		if err != nil {
+			return nil, fmt.Errorf("open %s: %w", path, err)
+		}
+		names, err := k.ReadSubKeyNames(-1)
+		k.Close()
+		if err != nil {
+			return nil, fmt.Errorf("enumerate %s: %w", path, err)
+		}
+		for _, n := range names {
+			isMSI := productKeyRe.MatchString(n)
+			it := store.InventoryItem{Kind: "product", ID: n}
+			if isMSI {
+				it.ID = strings.ToUpper(n)
+			}
+			sk, err := registry.OpenKey(registry.LOCAL_MACHINE, path+`\`+n, registry.QUERY_VALUE|registry.WOW64_64KEY)
+			if err != nil {
+				if isMSI {
+					items = append(items, it)
+				}
+				continue
+			}
+			it.Name, _, _ = sk.GetStringValue("DisplayName")
+			it.Version, _, _ = sk.GetStringValue("DisplayVersion")
+			sysComp, _, _ := sk.GetIntegerValue("SystemComponent")
+			_, _, perr := sk.GetStringValue("ParentKeyName")
+			sk.Close()
+			// EXE-installed apps (Chrome's EXE setup, Firefox, VLC…) appear under
+			// their own key names. Keep those that Apps & features shows: a
+			// display name, not a hidden component, not an update of another entry.
+			if !isMSI && (strings.TrimSpace(it.Name) == "" || sysComp == 1 || perr == nil) {
+				continue
+			}
+			items = append(items, it)
+		}
 	}
-	err := cmd.Run()
-	code := 0
+	return items, nil
+}
+
+// rebootPending checks the servicing-stack and Windows Update flags.
+// PendingFileRenameOperations is deliberately not used: many products leave
+// entries there, which would keep endpoints flagged (and rebooted) forever.
+func rebootPending() bool {
+	for _, path := range rebootKeys {
+		if k, err := registry.OpenKey(registry.LOCAL_MACHINE, path, registry.QUERY_VALUE|registry.WOW64_64KEY); err == nil {
+			k.Close()
+			return true
+		}
+	}
+	return false
+}
+
+// installTimeout bounds one wusa/msiexec run (a cumulative update can take
+// well over an hour on slow disks).
+const installTimeout = 2 * time.Hour
+
+// runInstaller runs an installer to completion even when the agent is told
+// to stop: killing wusa/msiexec mid-way can leave a half-applied update. Only
+// installTimeout stops it, and that is reported explicitly.
+func runInstaller(ctx context.Context, name string, args ...string) (code int, res *Result) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), installTimeout)
+	defer cancel()
+	err := exec.CommandContext(ctx, name, args...).Run()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return -1, &Result{State: "failed", ExitCode: -1, Detail: fmt.Sprintf("timed out: %s still running after %s; it was stopped", filepath.Base(name), installTimeout)}
+	}
 	if err != nil {
 		var ee *exec.ExitError
 		if !errors.As(err, &ee) {
-			return Result{State: "failed", ExitCode: -1, Detail: "could not start installer: " + err.Error()}
+			return -1, &Result{State: "failed", ExitCode: -1, Detail: "could not start " + filepath.Base(name) + ": " + err.Error()}
 		}
-		code = ee.ExitCode()
+		return ee.ExitCode(), nil
 	}
-	u := uint32(code)
-	switch {
-	case u == exitOK:
-		return Result{State: "installed", ExitCode: code, Detail: p.Kind + " installed"}
-	case u == exitRebootRequired || u == exitRebootInitiated:
-		return Result{State: "pending_reboot", ExitCode: code, Detail: "installed; reboot required"}
-	case p.Kind == "msu" && u == exitWusaAlready:
-		return Result{State: "installed", ExitCode: code, Detail: "already installed"}
-	case p.Kind == "msu" && u == exitWusaNotApplic:
-		return Result{State: "not_applicable", ExitCode: code, Detail: "wusa: update not applicable to this computer"}
-	case p.Kind == "msi" && u == exitMsiBusy:
-		return Result{State: "failed", ExitCode: code, Detail: "another installation is in progress (will retry)"}
-	case p.Kind == "msi" && u == exitMsiOtherVersion:
-		return Result{State: "failed", ExitCode: code, Detail: "another version of this product is already installed"}
-	}
-	return Result{State: "failed", ExitCode: code, Detail: fmt.Sprintf("installer exit code %d (0x%08X)", code, u)}
+	return 0, nil
 }
 
-const (
-	exitWusaAlreadyRemoved = 0x00240007 // WU_S_ALREADY_UNINSTALLED
-	exitMsiUnknownProduct  = 1605       // ERROR_UNKNOWN_PRODUCT: not installed
-)
+func (w *Windows) msiLog(p manifest.Package, op string) string {
+	os.MkdirAll(w.LogDir, 0o750)
+	pruneOldest(w.LogDir, ".log", maxInstallerLogs)
+	return filepath.Join(w.LogDir, fmt.Sprintf("%s%s-%d.log", p.PackageID, op, time.Now().Unix()))
+}
+
+func (w *Windows) Install(ctx context.Context, p manifest.Package, file string) Result {
+	sys := filepath.Join(os.Getenv("SystemRoot"), "System32")
+	var code int
+	var res *Result
+	switch p.Kind {
+	case "msu":
+		code, res = runInstaller(ctx, filepath.Join(sys, "wusa.exe"), file, "/quiet", "/norestart")
+	case "msi":
+		code, res = runInstaller(ctx, filepath.Join(sys, "msiexec.exe"), "/i", file, "/qn", "/norestart", "/l*v", w.msiLog(p, ""))
+	default:
+		return Result{State: "failed", ExitCode: -1, Detail: "unsupported kind " + p.Kind}
+	}
+	if res != nil {
+		return *res
+	}
+	return classifyInstall(p.Kind, code)
+}
 
 // Uninstall rolls back an .msu (wusa /uninstall /kb:N) or an .msi
 // (msiexec /x {ProductCode}). Nothing is downloaded: the KB / product code
 // come from the signed manifest.
 func (w *Windows) Uninstall(ctx context.Context, p manifest.Package) Result {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Hour)
-	defer cancel()
 	sys := filepath.Join(os.Getenv("SystemRoot"), "System32")
-	var cmd *exec.Cmd
+	var code int
+	var res *Result
 	switch p.Kind {
 	case "msu":
 		kb := strings.TrimPrefix(strings.ToUpper(p.KB), "KB")
 		if kb == "" || strings.Trim(kb, "0123456789") != "" {
 			return Result{State: "failed", ExitCode: -1, Detail: "invalid KB " + p.KB}
 		}
-		cmd = exec.CommandContext(ctx, filepath.Join(sys, "wusa.exe"), "/uninstall", "/kb:"+kb, "/quiet", "/norestart")
+		code, res = runInstaller(ctx, filepath.Join(sys, "wusa.exe"), "/uninstall", "/kb:"+kb, "/quiet", "/norestart")
 	case "msi":
 		if !msiGUID.MatchString(p.ProductCode) {
 			return Result{State: "failed", ExitCode: -1, Detail: "invalid product code " + p.ProductCode}
 		}
-		os.MkdirAll(w.LogDir, 0o750)
-		logf := filepath.Join(w.LogDir, fmt.Sprintf("%s-uninstall-%d.log", p.PackageID, time.Now().Unix()))
-		cmd = exec.CommandContext(ctx, filepath.Join(sys, "msiexec.exe"), "/x", p.ProductCode, "/qn", "/norestart", "/l*v", logf)
+		code, res = runInstaller(ctx, filepath.Join(sys, "msiexec.exe"), "/x", p.ProductCode, "/qn", "/norestart", "/l*v", w.msiLog(p, "-uninstall"))
 	default:
 		return Result{State: "failed", ExitCode: -1, Detail: "rollback is not supported for kind " + p.Kind}
 	}
-	err := cmd.Run()
-	code := 0
-	if err != nil {
-		var ee *exec.ExitError
-		if !errors.As(err, &ee) {
-			return Result{State: "failed", ExitCode: -1, Detail: "could not start uninstaller: " + err.Error()}
-		}
-		code = ee.ExitCode()
+	if res != nil {
+		return *res
 	}
-	u := uint32(code)
-	switch {
-	case u == exitOK:
-		return Result{State: "installed", ExitCode: code, Detail: p.Kind + " uninstalled"}
-	case u == exitRebootRequired || u == exitRebootInitiated:
-		return Result{State: "pending_reboot", ExitCode: code, Detail: "uninstalled; reboot required"}
-	case p.Kind == "msu" && u == exitWusaAlreadyRemoved, p.Kind == "msi" && u == exitMsiUnknownProduct:
-		return Result{State: "installed", ExitCode: code, Detail: "not installed; nothing to remove"}
-	case p.Kind == "msi" && u == exitMsiBusy:
-		return Result{State: "failed", ExitCode: code, Detail: "another installation is in progress (will retry)"}
-	}
-	return Result{State: "failed", ExitCode: code, Detail: fmt.Sprintf("uninstaller exit code %d (0x%08X)", code, u)}
+	return classifyUninstall(p.Kind, code)
 }
 
 var msiGUID = regexp.MustCompile(`^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}$`)

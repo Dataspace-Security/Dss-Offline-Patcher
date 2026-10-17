@@ -114,3 +114,6 @@ func serviceCmd(args []string) error {
 	}
 	return nil
 }
+
+// singleInstance: systemd/launchd already run a single instance.
+func singleInstance() (release func(), err error) { return func() {}, nil }
