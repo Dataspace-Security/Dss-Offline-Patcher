@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, enc, errMsg } from "../api";
+import { paths } from "../paths";
 import { useCan } from "../auth";
 import { AgentSetupGuide } from "../components/AgentSetup";
 import { usedPct } from "../components/Hardware";
@@ -14,6 +15,7 @@ export default function Endpoints() {
   const canEdit = useCan("operator");
   const [sp, setSp] = useSearchParams();
   const statusFilter = splitList(sp.get("status") ?? "");
+  const outdatedOnly = sp.get("outdated") === "1";
   const [q, setQ] = useState("");
   const [showToken, setShowToken] = useState(sp.get("enroll") === "1");
   const [showRetired, setShowRetired] = useState(false);
@@ -30,9 +32,10 @@ export default function Endpoints() {
     return (data ?? [])
       .filter((e) => includeRetired || e.status !== "retired")
       .filter((e) => statusFilter.length === 0 || statusFilter.includes(e.status))
+      .filter((e) => !outdatedOnly || missingTotal(e) > 0)
       .filter((e) => !needle || [e.hostname, e.site, e.owner, ...(e.groups ?? [])].join(" ").toLowerCase().includes(needle))
       .sort((a, b) => STATUSES.indexOf(a.status) - STATUSES.indexOf(b.status) || a.hostname.localeCompare(b.hostname));
-  }, [data, q, statusFilter.join(","), includeRetired]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [data, q, statusFilter.join(","), includeRetired, outdatedOnly]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const counts = useMemo(() => {
     const c: Record<string, number> = {};
@@ -40,10 +43,19 @@ export default function Endpoints() {
     return c;
   }, [data]);
   const activeCount = (data ?? []).filter((e) => e.status !== "retired").length;
+  const outdatedCount = (data ?? []).filter((e) => e.status !== "retired" && missingTotal(e) > 0).length;
+
+  // Keep the other filter when one changes.
+  const setFilters = (status: string[], outdated: boolean) => {
+    const next: Record<string, string> = {};
+    if (status.length) next.status = status.join(",");
+    if (outdated) next.outdated = "1";
+    setSp(next);
+  };
 
   const toggle = (s: string) => {
     const next = statusFilter.includes(s) ? statusFilter.filter((x) => x !== s) : [...statusFilter, s];
-    setSp(next.length ? { status: next.join(",") } : {});
+    setFilters(next, outdatedOnly);
   };
 
   // Only rows currently visible (and not retired) are selectable.
@@ -61,7 +73,7 @@ export default function Endpoints() {
     <>
       <PageHeader title="Endpoints" sub={`${activeCount} enrolled${counts.retired ? ` · ${counts.retired} retired` : ""} · silent endpoints are shown as offline or stale, never as compliant`}>
         <input className="search" placeholder="Filter host, group, site, owner…" value={q} onChange={(e) => setQ(e.target.value)} />
-        <Link className="btn" to="/agent-setup">Agent setup guide</Link>
+        <Link className="btn" to={paths.addEndpoints}>Agent setup guide</Link>
         {canEdit && <button className="btn btn-primary" onClick={() => setShowToken(true)}>Create enrollment token</button>}
       </PageHeader>
       <div className="chips">
@@ -70,7 +82,11 @@ export default function Endpoints() {
             <Pill state={s} /> <b>{counts[s] ?? 0}</b>
           </button>
         ))}
-        {statusFilter.length > 0 && <button className="btn btn-sm" onClick={() => setSp({})}>Clear</button>}
+        <button className={`chip ${outdatedOnly ? "chip-on" : ""}`} onClick={() => setFilters(statusFilter, !outdatedOnly)}
+                title="Endpoints missing at least one Windows update or application update (from update intelligence)">
+          <Pill state="noncompliant" label="outdated only" /> <b>{outdatedCount}</b>
+        </button>
+        {(statusFilter.length > 0 || outdatedOnly) && <button className="btn btn-sm" onClick={() => setSp({})}>Clear</button>}
         <span className="spacer" />
         <label className="check small">
           <input type="checkbox" checked={includeRetired} disabled={statusFilter.includes("retired")}
@@ -86,7 +102,17 @@ export default function Endpoints() {
         </div>
       )}
       <ErrorBanner error={error} />
-      {data && rows.length === 0 && <Empty>No endpoints{data.length ? " match the filter" : " enrolled yet"}.</Empty>}
+      {data && data.length > 0 && rows.length === 0 && <Empty>No endpoints match the filter.</Empty>}
+      {data && data.length === 0 && (
+        <Empty>
+          <p><b>No endpoints enrolled yet.</b> Create an enrollment token, then run the one-line installer on each Windows PC.
+            Tip: put 2–5 test machines in group <span className="tag">pilot</span> — standard deployments patch these test machines first.</p>
+          {canEdit
+            ? <button className="btn btn-primary" onClick={() => setShowToken(true)}>Create enrollment token</button>
+            : <span className="muted">Ask an operator to create an enrollment token.</span>}{" "}
+          <Link className="btn" to={paths.addEndpoints}>Agent setup guide</Link>
+        </Empty>
+      )}
       {rows.length > 0 && (
         <table className="table">
           <thead>
@@ -96,7 +122,7 @@ export default function Endpoints() {
                   <input type="checkbox" className="rowcheck" checked={allOn} onChange={toggleAll} aria-label="Select all" />
                 </th>
               )}
-              <th>Hostname</th><th>Status</th><th>OS</th><th>Arch</th><th>RAM</th><th>Disk free</th><th>Groups</th><th>Site</th><th>Owner</th>
+              <th>Hostname</th><th>Status</th><th title="Missing Windows updates + application updates (update intelligence); ready = approved packages it needs">Outdated</th><th>OS</th><th>Arch</th><th>RAM</th><th>Disk free</th><th>Groups</th><th>Site</th><th>Owner</th>
               <th>Last seen</th><th>Inventory age</th><th>Reboot</th>
             </tr>
           </thead>
@@ -114,6 +140,7 @@ export default function Endpoints() {
                 )}
                 <td><Link to={`/endpoints/${enc(e.endpoint_id)}`} className="cell-title">{e.hostname}</Link></td>
                 <td><Pill state={e.status} /></td>
+                <td className="nowrap"><OutdatedCell e={e} /></td>
                 <td className="nowrap">
                   {e.os_version || e.os}
                   <div className="cell-sub">{e.edition ? `${e.edition} · ` : ""}build {e.build || "—"}</div>
@@ -215,11 +242,12 @@ function BulkGroupsModal({ endpoints, onClose, onDone }: { endpoints: Endpoint[]
       {conflict.length > 0 && <div className="banner banner-error">A group can't be both added and removed: {conflict.join(", ")}</div>}
       <div className="hint">
         Changes are applied one endpoint at a time and each is recorded in the audit log. Group membership decides which
-        deployment rings and maintenance windows apply to an endpoint.
+        deployment stages and maintenance windows apply to an endpoint.
       </div>
       {(running || finished) && (
         <>
-          <div className="countbar" title={`${results.length}/${endpoints.length}`}>
+          <div className="countbar" title={`${results.length}/${endpoints.length}`} role="progressbar" aria-label="Group changes applied"
+               aria-valuemin={0} aria-valuemax={endpoints.length} aria-valuenow={results.length}>
             <span className="seg seg-green" style={{ width: `${((results.length - failed.length) / endpoints.length) * 100}%` }} />
             <span className="seg seg-red" style={{ width: `${(failed.length / endpoints.length) * 100}%` }} />
           </div>
@@ -335,6 +363,25 @@ function DiskFree({ e }: { e: Endpoint }) {
     <span className={pct >= 90 ? "text-red" : pct >= 75 ? "text-amber" : ""} title={`${d.mount}: ${fmtBytes(d.free_bytes)} free of ${fmtBytes(d.total_bytes)} (${pct}% used)`}>
       {fmtBytes(d.free_bytes)}
       <div className="cell-sub">of {fmtBytes(d.total_bytes)}</div>
+    </span>
+  );
+}
+
+function missingTotal(e: Endpoint): number {
+  return e.missing ? (e.missing.os ?? 0) + (e.missing.apps ?? 0) : 0;
+}
+
+// "3" with "OS 1 · apps 2 · 2 ready": compliant only means no open deployment
+// problem; this column says what inventory shows is still missing.
+function OutdatedCell({ e }: { e: Endpoint }) {
+  const m = e.missing;
+  if (!m) return <span className="muted" title="No update intelligence for this endpoint yet">unknown</span>;
+  const total = missingTotal(e);
+  if (total === 0) return <Pill state="verified" label="up to date" />;
+  return (
+    <span title={`${m.os} Windows update(s), ${m.apps} application update(s) missing; ${m.ready} approved package(s) ready to deploy`}>
+      <b className="text-amber">{total}</b> <span className="muted">missing</span>
+      <div className="cell-sub">OS {m.os} · apps {m.apps}{m.ready ? <> · <b>{m.ready} ready</b></> : null}</div>
     </span>
   );
 }

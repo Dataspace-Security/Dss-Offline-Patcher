@@ -319,7 +319,7 @@ Remove-Item -Recurse -Force C:\\ProgramData\\offpatch`,
           <div className="hint">
             The endpoint appears on the Endpoints page after its first check-in
             {groups && groups.length > 0 && <> in group(s) {groups.map((g) => <span key={g} className="tag">{g}</span>)}</>}
-            {site && <> at site <b>{site}</b></>}. It only receives a deployment when one of the deployment's rings includes one of its groups (or <span className="tag">all</span>).
+            {site && <> at site <b>{site}</b></>}. It only receives a deployment when one of the deployment's stages includes one of its groups (or <span className="tag">all</span>).
           </div>
         </li>
       </ol>

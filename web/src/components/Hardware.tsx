@@ -16,7 +16,9 @@ export function DiskBar({ d }: { d: Disk }) {
         <Mono>{d.mount}</Mono> <span className="muted">· {fmtBytes(d.free_bytes)} free of {fmtBytes(d.total_bytes)}</span>
         <span className={pct >= 90 ? "text-red" : pct >= 75 ? "text-amber" : ""}> · {pct}% used</span>
       </div>
-      <div className="score-meter"><span className={meterColor(pct)} style={{ width: `${pct}%` }} /></div>
+      <div className="score-meter" role="progressbar" aria-label={`${d.mount} used`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
+        <span className={meterColor(pct)} style={{ width: `${pct}%` }} />
+      </div>
     </div>
   );
 }

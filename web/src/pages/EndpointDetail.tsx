@@ -1,10 +1,10 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, enc, errMsg } from "../api";
+import { paths } from "../paths";
 import { useCan } from "../auth";
 import { Empty, ErrorBanner, KV, Mono, PageHeader, Pill, ReasonModal, RelTime, TargetPill, Time } from "../components/ui";
-import { AvailablePatches } from "../components/AvailablePatches";
-import { UpdatesAvailable } from "../components/UpdatesAvailable";
+import { EndpointUpdatesTable } from "../components/AvailablePatches";
 import { HardwareCard } from "../components/Hardware";
 import type { Endpoint, EndpointDetail } from "../types";
 import { parseTime, splitList, useLoad, useNow } from "../util";
@@ -84,19 +84,18 @@ export default function EndpointDetailPage() {
         </section>
       </div>
 
-      <UpdatesAvailable endpointId={e.endpoint_id} os={e.os} />
-      <AvailablePatches endpointId={e.endpoint_id} hostname={e.hostname} />
+      <EndpointUpdatesTable endpointId={e.endpoint_id} hostname={e.hostname} os={e.os} />
 
       <section className="section">
         <h2>Deployment targets <span className="muted">· {(e.targets ?? []).length}</span></h2>
         {(e.targets ?? []).length === 0 ? <Empty>Not targeted by any deployment.</Empty> : (
           <table className="table">
-            <thead><tr><th>Deployment</th><th>Package</th><th>Operation</th><th>Ring</th><th>State</th><th className="num">Attempts</th><th className="num">Exit</th><th>Detail</th><th>Updated</th></tr></thead>
+            <thead><tr><th>Deployment</th><th>Package</th><th>Operation</th><th>Stage</th><th>State</th><th className="num">Attempts</th><th className="num">Exit</th><th>Detail</th><th>Updated</th></tr></thead>
             <tbody>
               {e.targets.map((t) => (
                 <tr key={t.deployment_id}>
                   <td><Link to={`/deployments/${enc(t.deployment_id)}`}><Mono>{t.deployment_id}</Mono></Link></td>
-                  <td><Link to={`/catalog/${enc(t.package_id)}`}><Mono>{t.package_id}</Mono></Link></td>
+                  <td><Link to={paths.catalog(t.package_id)}><Mono>{t.package_id}</Mono></Link></td>
                   <td>{t.operation === "rollback" ? <span className="text-amber">rollback</span> : "install"}</td>
                   <td>{t.ring + 1}</td>
                   <td><TargetPill state={t.state} operation={t.operation} /></td>

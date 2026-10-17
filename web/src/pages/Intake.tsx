@@ -1,21 +1,25 @@
 import { Fragment, useState } from "react";
 import { api } from "../api";
-import { Empty, ErrorBanner, KV, Mono, PageHeader, Pill, RelTime, Time } from "../components/ui";
+import { Empty, ErrorBanner, KV, Mono, Pill, RelTime, Time, expandRowProps } from "../components/ui";
 import type { Bundle, Reconciliation, TransferReceipt } from "../types";
-import { fmtBytes, shortHash, useLoad } from "../util";
+import { fmtBytes, shortHash } from "../util";
 
-export default function Intake() {
-  const { data, error, reload } = useLoad(() => api.get<Bundle[]>("/api/bundles"), [], 15000);
+export const fetchBundles = () => api.get<Bundle[]>("/api/bundles");
+export const fetchReconciliation = () => api.get<Reconciliation>("/api/transfer/reconcile");
+
+/**
+ * Transfers → "Arrived through the transfer": gateway receipts reconciled
+ * against the bundles received, and the bundles (newest first).
+ */
+export function ReceivedSection({ data, error, recon, reconError }: {
+  data: Bundle[] | null; error: string | null; recon: Reconciliation | null; reconError: string | null;
+}) {
   const [open, setOpen] = useState<number | null>(null);
-  const recon = useLoad(() => api.get<Reconciliation>("/api/transfer/reconcile"), [], 30000);
 
   return (
     <>
-      <PageHeader title="Intake" sub="Bundles received through the transfer boundary, newest first">
-        <button className="btn" onClick={() => { void reload(); void recon.reload(); }}>Refresh</button>
-      </PageHeader>
-      <ReconciliationPanel r={recon.data} error={recon.error} />
-      <h2>Bundles</h2>
+      <ReconciliationPanel r={recon} error={reconError} />
+      <h3>Bundles <span className="muted">· newest first</span></h3>
       <ErrorBanner error={error} />
       {data && data.length === 0 && <Empty>No bundles received yet.</Empty>}
       {data && data.length > 0 && (
@@ -33,8 +37,8 @@ export default function Intake() {
               const failed = (b.checks ?? []).filter((c) => !c.ok).length;
               return (
                 <Fragment key={b.id}>
-                  <tr className={`clickable ${isOpen ? "selected" : ""}`} onClick={() => setOpen(isOpen ? null : b.id)}>
-                    <td className="caret">{isOpen ? "▾" : "▸"}</td>
+                  <tr {...expandRowProps(isOpen, () => setOpen(isOpen ? null : b.id))}>
+                    <td className="caret" aria-hidden="true">{isOpen ? "▾" : "▸"}</td>
                     <td><Time value={b.received_at} /></td>
                     <td><Mono>{b.filename}</Mono></td>
                     <td><Mono>{b.bundle_id || "—"}</Mono></td>
@@ -99,7 +103,7 @@ function ReconciliationPanel({ r, error }: { r: Reconciliation | null; error: st
   return (
     <section className="card section">
       <div className="section-head">
-        <h2>Transfer reconciliation <span className="muted">· gateway receipts vs. bundles that arrived</span></h2>
+        <h3>Transfer reconciliation <span className="muted">· gateway receipts vs. bundles that arrived</span></h3>
       </div>
       <ErrorBanner error={error} />
       {r && (

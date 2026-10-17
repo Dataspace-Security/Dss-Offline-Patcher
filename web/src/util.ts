@@ -49,7 +49,16 @@ export function shortHash(h: string | undefined, n = 12): string {
   return h.length > n ? `${h.slice(0, n)}…` : h;
 }
 
-/** Fetch data, optionally polling every `intervalMs`. */
+/**
+ * Fetch data, optionally polling every `intervalMs`.
+ *
+ * - A timer tick is skipped while a request is still in flight (slow server:
+ *   no pile-up of identical requests).
+ * - Only the newest request may update state: a response that arrives after
+ *   a newer request was started (manual reload, dependency change) is
+ *   dropped, so an out-of-order reply never overwrites fresher data.
+ * - The sequence and in-flight state are reset whenever `deps` change.
+ */
 export function useLoad<T>(fn: () => Promise<T>, deps: unknown[], intervalMs?: number) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -58,27 +67,39 @@ export function useLoad<T>(fn: () => Promise<T>, deps: unknown[], intervalMs?: n
   const fnRef = useRef(fn);
   fnRef.current = fn;
   const alive = useRef(true);
+  const seq = useRef(0);       // id of the newest request started
+  const inFlight = useRef(0);  // id of the request in flight (0 = none)
 
-  const reload = useCallback(async () => {
+  const run = useCallback(async (fromTimer: boolean) => {
+    if (fromTimer && inFlight.current !== 0) return;
+    const my = ++seq.current;
+    inFlight.current = my;
+    const current = () => alive.current && my === seq.current;
     try {
       const d = await fnRef.current();
-      if (!alive.current) return;
+      if (!current()) return;
       setData(d);
       setError(null);
       setLoadedAt(Date.now());
     } catch (e) {
-      if (alive.current) setError(errMsg(e));
+      if (current()) setError(errMsg(e));
     } finally {
-      if (alive.current) setLoading(false);
+      if (inFlight.current === my) inFlight.current = 0;
+      if (current()) setLoading(false);
     }
   }, []);
 
+  const reload = useCallback(() => run(false), [run]);
+
   useEffect(() => {
     alive.current = true;
+    // A new dependency set: forget any request still running for the old one.
+    seq.current++;
+    inFlight.current = 0;
     setLoading(true);
-    void reload();
+    void run(false);
     let t: number | undefined;
-    if (intervalMs) t = window.setInterval(() => void reload(), intervalMs);
+    if (intervalMs) t = window.setInterval(() => void run(true), intervalMs);
     return () => {
       alive.current = false;
       if (t) window.clearInterval(t);

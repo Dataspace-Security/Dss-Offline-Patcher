@@ -1,30 +1,65 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, enc } from "../api";
+import { paths } from "../paths";
 import { useCan } from "../auth";
-import { CountsBar, Empty, ErrorBanner, KV, Mono, PageHeader, Pill, ReasonModal, RelTime, TargetPill, Time, targetLabel } from "../components/ui";
-import type { Deployment, DeploymentDetail, Package } from "../types";
-import { useLoad } from "../util";
-import { REBOOT_POLICIES, ringLabel } from "./Deployments";
+import { CountsBar, Empty, ErrorBanner, KV, Mono, PageHeader, Pill, ReasonModal, Time, targetLabel } from "../components/ui";
+import { TargetProgress } from "../components/TargetProgress";
+import { AskApproverModal, RaiseExceptionModal } from "../components/TargetException";
+import {
+  IN_FLIGHT, exhaustedInCurrentRing, isExhausted, isFailing, isLiveDeployment, readyToAdvance, ringSummaries, type RingSummary,
+} from "../components/rollout";
+import { usePageVisible } from "../components/usePageVisible";
+import type { Deployment, DeploymentDetail, Endpoint, Package, Target } from "../types";
+import { parseTime, relTime, useLoad } from "../util";
+import { ClockProvider, useClock } from "../components/Clock";
+import { REBOOT_POLICIES } from "./Deployments";
+import { stageLabel } from "../components/deployLabels";
+import "../ops.css";
 
-type Action = "pause" | "resume" | "cancel" | "advance";
+type Action = "pause" | "resume" | "cancel" | "advance" | "retry_failed";
+
+const FAST_POLL_MS = 3000;
+const SLOW_POLL_MS = 30000;
+
+// Failing first, then work in progress, then waiting, then done.
+function targetRank(t: Target): number {
+  if (isFailing(t)) return 0;
+  if (IN_FLIGHT.includes(t.state)) return 1;
+  if (t.state === "pending" || t.state === "deferred") return 2;
+  return 3;
+}
 
 export default function DeploymentDetailPage() {
   const { id = "" } = useParams();
   const canOperate = useCan("operator");
+  const canApprove = useCan("approver");
+  const visible = usePageVisible();
+  const [live, setLive] = useState(true); // until the first load says otherwise
+  const pollMs = visible && live ? FAST_POLL_MS : SLOW_POLL_MS;
   const { data: d, error, reload, loadedAt } = useLoad(
-    () => api.get<DeploymentDetail>(`/api/deployments/${enc(id)}`), [id], 5000);
+    () => api.get<DeploymentDetail>(`/api/deployments/${enc(id)}`), [id, pollMs], pollMs);
+  useEffect(() => { if (d) setLive(isLiveDeployment(d)); }, [d]);
   const pkg = useLoad(() => (d ? api.get<Package>(`/api/packages/${enc(d.package_id)}`) : Promise.resolve(null)), [d?.package_id]);
+  // Last contact per endpoint (check-ins); live heartbeats are newer when present.
+  const eps = useLoad(() => (isLiveDeployment(d) ? api.get<Endpoint[]>("/api/endpoints") : Promise.resolve(null)), [live, !!d], SLOW_POLL_MS);
   const [action, setAction] = useState<Action | null>(null);
   const [ringFilter, setRingFilter] = useState<string>("");
   const [stateFilter, setStateFilter] = useState<string>("");
+  const [excFor, setExcFor] = useState<Target | null>(null);
+
+  const lastSeen = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const e of eps.data ?? []) m.set(e.endpoint_id, e.last_seen);
+    return m;
+  }, [eps.data]);
 
   const targets = useMemo(() => {
     const t = d?.targets ?? [];
     return t
       .filter((x) => ringFilter === "" || String(x.ring) === ringFilter)
-      .filter((x) => stateFilter === "" || x.state === stateFilter)
-      .sort((a, b) => a.ring - b.ring || a.hostname.localeCompare(b.hostname));
+      .filter((x) => stateFilter === "" || (stateFilter === "_failing" ? isFailing(x) : x.state === stateFilter))
+      .sort((a, b) => a.ring - b.ring || targetRank(a) - targetRank(b) || a.hostname.localeCompare(b.hostname));
   }, [d, ringFilter, stateFilter]);
 
   const run = async (a: Action, reason: string) => {
@@ -43,38 +78,105 @@ export default function DeploymentDetailPage() {
 
   const total = d.rings?.length ?? 0;
   const canAdvance = d.state === "active" && d.current_ring < total - 1;
-  const ringName = (i: number) => d.rings?.[i]?.name ?? `ring ${i + 1}`;
+  const ringName = (i: number) => stageLabel(d.rings?.[i]?.name, i);
   const states = Array.from(new Set((d.targets ?? []).map((t) => t.state))).sort();
   const rollback = d.operation === "rollback";
   const lost = (d.targets ?? []).filter((t) => t.state === "lost_after_install");
   const deferred = (d.targets ?? []).filter((t) => t.state === "deferred");
+  const failing = (d.targets ?? []).filter(isFailing);
+  const exhausted = exhaustedInCurrentRing(d);
+  const rings = ringSummaries(d);
+  const ready = readyToAdvance(d);
+  const isLive = isLiveDeployment(d);
+  const liveCount = (d.targets ?? []).filter((t) => t.live).length;
   const p = pkg.data;
   const canRollBack = !rollback && p && (p.state === "approved" || p.state === "revoked");
+  const lastContact = (t: Target): string | undefined => {
+    const a = parseTime(t.live?.at);
+    const b = parseTime(lastSeen.get(t.endpoint_id));
+    if (a && (!b || a > b)) return t.live?.at;
+    return lastSeen.get(t.endpoint_id);
+  };
 
   return (
-    <>
+    <ClockProvider ms={1000}>
       <PageHeader
         title={<>{d.name || d.deployment_id} {d.emergency && <span className="flag-emergency">EMERGENCY</span>}{rollback && <span className="flag-emergency flag-rollback">ROLLBACK</span>}</>}
-        sub={<><Link to="/deployments">← Deployments</Link> · <Mono>{d.deployment_id}</Mono> · updated <RelTime value={new Date(loadedAt || Date.now()).toISOString()} /></>}
+        sub={<>
+          <Link to="/deployments">← Deployments</Link> · <Mono>{d.deployment_id}</Mono> ·{" "}
+          {isLive && visible
+            ? <span className="live-badge"><span className="live-dot" />Live · every {FAST_POLL_MS / 1000}s{liveCount > 0 && <> · {liveCount} agent{liveCount === 1 ? "" : "s"} reporting</>}</span>
+            : <span className="muted">refresh every {SLOW_POLL_MS / 1000}s</span>}
+          {" "}· updated {loadedAt ? <ClockRel value={new Date(loadedAt).toISOString()} /> : "—"}
+        </>}
       >
         <Pill state={d.state} />
         {canOperate && d.state === "active" && <button className="btn" onClick={() => setAction("pause")}>Pause…</button>}
         {canOperate && d.state === "paused" && <button className="btn btn-primary" onClick={() => setAction("resume")}>Resume…</button>}
-        {canOperate && canAdvance && <button className="btn btn-primary" onClick={() => setAction("advance")}>Advance ring…</button>}
-        {canOperate && (d.state === "active" || d.state === "paused") &&
+        {canOperate && canAdvance && <button className="btn btn-primary" onClick={() => setAction("advance")}>Start next stage…</button>}
+        {canOperate && isLive && exhausted.length > 0 &&
+          <button className="btn" onClick={() => setAction("retry_failed")} title="Reset the attempts of failed targets in the current stage">Retry failed ({exhausted.length})…</button>}
+        {canOperate && isLive &&
           <button className="btn btn-danger" onClick={() => setAction("cancel")}>Cancel…</button>}
         {canOperate && canRollBack && (p.rollback_unsupported
           ? <button className="btn" disabled title={p.rollback_unsupported}>Rollback not supported</button>
-          : d.state === "active" || d.state === "paused"
+          : isLive
           ? <button className="btn" disabled title="Cancel this deployment first: an install and a rollback of the same package cannot run at the same time">Roll back…</button>
           : <Link className="btn btn-danger-ghost" to={`/deployments/new?operation=rollback&package_id=${enc(d.package_id)}`}
-              title="Create a rollback deployment: agents uninstall this package, ring by ring">Roll back…</Link>)}
+              title="Create a rollback deployment: agents uninstall this package, stage by stage">Roll back…</Link>)}
       </PageHeader>
       <ErrorBanner error={error} />
       {d.state_reason && (
         <div className={`banner ${d.state === "paused" || d.state === "cancelled" ? "banner-warn" : "banner-info"}`}>
           <b>{d.state}:</b> {d.state_reason}
         </div>
+      )}
+      {ready && (
+        <div className="banner banner-ok next-step">
+          <div>
+            <b>{ready.empty ? `${stageLabel(ready.name, ready.index)} has no endpoints.` : `${stageLabel(ready.name, ready.index)} finished:`}</b>{" "}
+            {ready.empty
+              ? <>No endpoint is in {ready.groups.length ? ready.groups.map((g) => <span key={g} className="tag">{g}</span>) : "its groups"} (or none has checked in yet). The deployment waits here until the next stage is started.</>
+              : <>{ready.verified} verified, {ready.failed} failed{ready.skipped ? `, ${ready.skipped} not applicable / excepted` : ""}.</>}
+            {" "}Start <b>{ringName(ready.index + 1)}</b>?
+          </div>
+          {canOperate
+            ? <button className="btn btn-primary" onClick={() => setAction("advance")}>Start {ringName(ready.index + 1)}…</button>
+            : <span className="muted">An operator starts the next stage.</span>}
+        </div>
+      )}
+      {d.state === "paused" && (
+        <section className="card paused-help">
+          <h2>Paused — what to do</h2>
+          {failing.length === 0
+            ? <p className="muted">No failing targets right now. Resume when ready.</p>
+            : (
+              <>
+                <p><b>{failing.length}</b> target{failing.length === 1 ? "" : "s"} caused or count towards the pause (threshold {d.max_failure_pct}%):</p>
+                <table className="table table-compact">
+                  <thead><tr><th>Hostname</th><th>Stage</th><th>State</th><th className="num">Exit code</th><th className="num">Attempts</th><th>Detail</th></tr></thead>
+                  <tbody>
+                    {failing.map((t) => (
+                      <tr key={t.endpoint_id}>
+                        <td><Link to={`/endpoints/${enc(t.endpoint_id)}`}>{t.hostname || t.endpoint_id}</Link></td>
+                        <td>{ringName(t.ring)}</td>
+                        <td><Pill state={t.state} label={targetLabel(t.state, t.operation)} />{t.health === "failed" && <Pill state="failed" label="health" />}</td>
+                        <td className="num"><Mono>{t.exit_code}</Mono></td>
+                        <td className="num">{t.attempts}{isExhausted(t, d) && <div className="cell-sub">no retries left</div>}</td>
+                        <td className="detail-cell">{t.detail || t.health_detail || <span className="muted">—</span>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </>
+            )}
+          <ol className="recovery">
+            <li>Open the failing endpoints and read the exit code and detail (disk full, installer busy, missing prerequisite…).</li>
+            <li>Fix the cause, then <b>Retry failed</b> to reset their attempts{canOperate && exhausted.length > 0 && <> — <button className="btn btn-sm" onClick={() => setAction("retry_failed")}>Retry failed ({exhausted.length})…</button></>}.</li>
+            <li>If an endpoint cannot be patched, raise an exception for it (approver) so it no longer counts as a failure.</li>
+            <li><b>Resume</b> the deployment{canOperate && <> — <button className="btn btn-sm btn-primary" onClick={() => setAction("resume")}>Resume…</button></>}.</li>
+          </ol>
+        </section>
       )}
       {d.emergency && (
         <div className="banner banner-error"><b>Emergency justification:</b> {d.justification || "—"}</div>
@@ -102,27 +204,16 @@ export default function DeploymentDetailPage() {
         <section className="card">
           <h2>Progress</h2>
           <CountsBar counts={d.counts ?? {}} rollback={rollback} />
-          <div className="rings-progress">
-            {(d.rings ?? []).map((r, i) => {
-              const cls = d.state === "completed" || i < d.current_ring ? "done" : i === d.current_ring ? "current" : "future";
-              return (
-                <div key={i} className={`ring-step ring-${cls}`}>
-                  <div className="ring-num">{i + 1}</div>
-                  <div>
-                    <div className="ring-name">{r.name}</div>
-                    <div className="cell-sub">{(r.groups ?? []).join(", ")}</div>
-                  </div>
-                </div>
-              );
-            })}
+          <div className="ring-summaries">
+            {rings.map((r) => <RingRow key={r.index} r={r} d={d} />)}
           </div>
         </section>
         <section className="card">
           <h2>Settings</h2>
           <KV rows={[
-            ["Package", <Link to={`/catalog/${enc(d.package_id)}`}><Mono>{d.package_id}</Mono></Link>],
+            ["Package", <Link to={paths.catalog(d.package_id)}><Mono>{d.package_id}</Mono></Link>],
             ["Operation", rollback ? <Pill state="failed" label="rollback (uninstall)" /> : "install"],
-            ["Current ring", `${ringLabel(d)} · ${ringName(Math.min(d.current_ring, total - 1))}`],
+            ["Current stage", total ? `${ringName(Math.min(Math.max(d.current_ring, 0), total - 1))} (of ${total})` : "—"],
             ["Max failure", `${d.max_failure_pct}%`],
             ["Max retries", String(d.max_retries)],
             ["Window (UTC)", d.window_start || d.window_end ? `${d.window_start || "?"} – ${d.window_end || "?"}` : "always"],
@@ -136,7 +227,7 @@ export default function DeploymentDetailPage() {
             ["Created", <><Time value={d.created_at} /> by {d.created_by}</>],
             ["Updated", <Time value={d.updated_at} />],
           ]} />
-          <div className="panel-foot"><Link to={`/audit?object_id=${enc(d.deployment_id)}`}>Audit trail →</Link></div>
+          <div className="panel-foot"><Link to={paths.audit({ object_id: d.deployment_id })}>Audit trail →</Link></div>
         </section>
       </div>
 
@@ -145,34 +236,45 @@ export default function DeploymentDetailPage() {
           <h2>Targets <span className="muted">· {(d.targets ?? []).length}</span></h2>
           <div className="filters">
             <select value={ringFilter} onChange={(e) => setRingFilter(e.target.value)}>
-              <option value="">All rings</option>
-              {(d.rings ?? []).map((r, i) => <option key={i} value={String(i)}>{i + 1}. {r.name}</option>)}
+              <option value="">All stages</option>
+              {(d.rings ?? []).map((r, i) => <option key={i} value={String(i)}>{stageLabel(r.name, i)}</option>)}
             </select>
             <select value={stateFilter} onChange={(e) => setStateFilter(e.target.value)}>
               <option value="">All states</option>
+              {failing.length > 0 && <option value="_failing">Failing ({failing.length})</option>}
               {states.map((s) => <option key={s} value={s}>{targetLabel(s, d.operation)}</option>)}
             </select>
           </div>
         </div>
-        {targets.length === 0 ? <Empty>No targets{ringFilter || stateFilter ? " match the filter" : " yet"}.</Empty> : (
-          <table className="table">
+        {targets.length === 0 ? <Empty>No targets{ringFilter || stateFilter ? " match the filter" : " yet — endpoints in the current stage get a target when they next check in"}.</Empty> : (
+          <table className="table targets-live">
             <thead>
-              <tr><th>Hostname</th><th>Ring</th><th>State</th><th className="num">Attempts</th><th className="num">Exit code</th><th>Health</th><th>Detail</th><th>Updated</th></tr>
+              <tr><th>Hostname</th><th>Stage</th><th style={{ width: "26%" }}>Progress</th><th>Last contact</th><th className="num">Attempts</th><th className="num">Exit code</th><th>Health</th><th>Detail</th><th>Updated</th><th /></tr>
             </thead>
             <tbody>
-              {targets.map((t) => (
-                <tr key={t.endpoint_id}>
-                  <td><Link to={`/endpoints/${enc(t.endpoint_id)}`}>{t.hostname || t.endpoint_id}</Link></td>
-                  <td>{t.ring + 1}. {ringName(t.ring)}</td>
-                  <td><TargetPill state={t.state} operation={t.operation} /></td>
-                  <td className="num">{t.attempts}</td>
-                  <td className="num"><Mono>{t.exit_code}</Mono></td>
-                  <td>{t.health ? <span title={t.health_detail || undefined}><Pill state={t.health === "ok" ? "verified" : "failed"} label={t.health} /></span> : <span className="muted">—</span>}
-                    {t.health === "failed" && t.health_detail && <div className="cell-sub">{t.health_detail}</div>}</td>
-                  <td className="detail-cell">{t.detail || <span className="muted">—</span>}</td>
-                  <td className="nowrap"><RelTime value={t.updated_at} /></td>
-                </tr>
-              ))}
+              {targets.map((t) => {
+                const contact = lastContact(t);
+                const bad = isFailing(t);
+                return (
+                  <tr key={t.endpoint_id} className={bad ? "row-bad" : ""}>
+                    <td><Link to={`/endpoints/${enc(t.endpoint_id)}`}>{t.hostname || t.endpoint_id}</Link></td>
+                    <td className="nowrap">{ringName(t.ring)}</td>
+                    <td><LiveTargetProgress t={t} currentRing={d.current_ring} deploymentLive={d.state === "active"} /></td>
+                    <td className="nowrap">{contact ? <span title={contact}><ClockRel value={contact} /></span> : <span className="muted">—</span>}</td>
+                    <td className="num">{t.attempts}{d.max_retries >= 0 && <span className="muted"> / {d.max_retries + 1}</span>}</td>
+                    <td className="num">{t.exit_code || t.state === "failed" ? <Mono>{t.exit_code}</Mono> : <span className="muted">—</span>}</td>
+                    <td>{t.health ? <span title={t.health_detail || undefined}><Pill state={t.health === "ok" ? "verified" : "failed"} label={t.health} /></span> : <span className="muted">—</span>}
+                      {t.health === "failed" && t.health_detail && <div className="cell-sub">{t.health_detail}</div>}</td>
+                    <td className="detail-cell">{t.detail || <span className="muted">—</span>}</td>
+                    <td className="nowrap"><ClockRel value={t.updated_at} /></td>
+                    <td className="nowrap">
+                      {bad && !rollback && (canApprove
+                        ? <button className="btn btn-sm" onClick={() => setExcFor(t)}>Raise exception…</button>
+                        : <button className="btn btn-sm" onClick={() => setExcFor(t)} title="Only approvers can create exceptions">Ask an approver…</button>)}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
@@ -180,20 +282,77 @@ export default function DeploymentDetailPage() {
 
       {action && (
         <ReasonModal
-          title={{ pause: "Pause deployment", resume: "Resume deployment", cancel: "Cancel deployment", advance: "Advance to next ring" }[action]}
+          title={{ pause: "Pause deployment", resume: "Resume deployment", cancel: "Cancel deployment", advance: "Start next stage", retry_failed: "Retry failed targets" }[action]}
           description={
-            action === "advance" ? <>Move from ring <b>{ringName(d.current_ring)}</b> to <b>{ringName(d.current_ring + 1)}</b>. The server refuses if the current ring still has in-flight targets.</>
+            action === "advance" ? <>Finish <b>{ringName(d.current_ring)}</b> and start <b>{ringName(d.current_ring + 1)}</b>. The server refuses if the current stage still has targets in progress.</>
               : action === "cancel" ? "Cancelling is final. No further assignments will be issued."
               : action === "pause" ? "Stops new assignments until resumed."
-              : "New assignments will be issued for the current ring again."
+              : action === "retry_failed" ? <>
+                  Reset the attempts of <b>{exhausted.length}</b> failed target{exhausted.length === 1 ? "" : "s"} in <b>{ringName(d.current_ring)}</b>
+                  {" "}({exhausted.slice(0, 8).map((t) => t.hostname || t.endpoint_id).join(", ")}{exhausted.length > 8 ? ", …" : ""}); agents try again at their next check-in.
+                  {d.state === "paused" && <> The deployment stays paused: resume it afterwards.</>}
+                </>
+              : "New assignments will be issued for the current stage again."
           }
-          confirmLabel={{ pause: "Pause", resume: "Resume", cancel: "Cancel deployment", advance: "Advance" }[action]}
+          confirmLabel={{ pause: "Pause", resume: "Resume", cancel: "Cancel deployment", advance: "Start next stage", retry_failed: "Retry failed" }[action]}
           danger={action === "cancel"}
           required={action !== "advance"}
           onClose={() => setAction(null)}
           onSubmit={(r) => run(action, r)}
         />
       )}
-    </>
+      {excFor && (canApprove
+        ? <RaiseExceptionModal target={excFor} deployment={d} onClose={() => setExcFor(null)} onDone={() => void reload()} />
+        : <AskApproverModal target={excFor} deployment={d} onClose={() => setExcFor(null)} />)}
+    </ClockProvider>
+  );
+}
+
+/** Relative time that follows the page clock (only this text re-renders each second). */
+function ClockRel({ value }: { value: string | undefined }) {
+  return <>{relTime(value, useClock())}</>;
+}
+
+function LiveTargetProgress(props: { t: Target; currentRing: number; deploymentLive: boolean }) {
+  return <TargetProgress {...props} now={useClock()} />;
+}
+
+function RingRow({ r, d }: { r: RingSummary; d: DeploymentDetail }) {
+  const cls = d.state === "completed" || r.index < d.current_ring ? "done" : r.index === d.current_ring ? "current" : "future";
+  const reached = r.index <= d.current_ring;
+  const pct = (v: number) => (r.total ? `${(v / r.total) * 100}%` : "0%");
+  return (
+    <div className={`ring-sum ring-${cls}`}>
+      <div className="ring-num">{r.index + 1}</div>
+      <div className="ring-sum-body">
+        <div className="ring-sum-head">
+          <span className="ring-name">{stageLabel(r.name, r.index)}</span>
+          <span className="cell-sub">{r.groups.join(", ")}</span>
+          <span className="spacer" />
+          {r.finished && <Pill state="verified" label="finished" />}
+          {cls === "current" && !r.finished && !r.empty && d.state === "active" && <Pill state="active" label="in progress" />}
+        </div>
+        {r.empty
+          ? <div className="cell-sub">{reached ? "no endpoints in this stage (yet)" : "not reached yet"}</div>
+          : (
+            <>
+              <div className="countbar ring-bar" title={`${r.verified} verified, ${r.failed} failed, ${r.inProgress} in progress, ${r.waiting} waiting, ${r.skipped} skipped`}
+                   role="progressbar" aria-label={`${stageLabel(r.name, r.index)}: verified`} aria-valuemin={0} aria-valuemax={r.total} aria-valuenow={r.verified}
+                   aria-valuetext={`${r.verified} of ${r.total} verified`}>
+                <span className="seg seg-green" style={{ width: pct(r.verified) }} />
+                <span className="seg seg-blue" style={{ width: pct(r.inProgress) }} />
+                <span className="seg seg-red" style={{ width: pct(r.failed) }} />
+                <span className="seg seg-not_applicable" style={{ width: pct(r.skipped) }} />
+              </div>
+              <div className="ring-sum-text">
+                <b className="text-green">{r.verified}</b> verified · <b className={r.failed ? "text-red" : ""}>{r.failed}</b> failed
+                {r.exhausted > 0 && <span className="muted"> ({r.exhausted} no retries left)</span>}
+                {" "}· <b>{r.inProgress}</b> in progress · {r.waiting} waiting{r.skipped ? ` · ${r.skipped} skipped` : ""}
+                <span className="muted"> · {r.total} total</span>
+              </div>
+            </>
+          )}
+      </div>
+    </div>
   );
 }

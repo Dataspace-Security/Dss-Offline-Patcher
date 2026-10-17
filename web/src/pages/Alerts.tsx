@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { api, enc } from "../api";
+import { api } from "../api";
+import { paths } from "../paths";
 import { useRefreshAlerts } from "../alertsContext";
 import { useCan } from "../auth";
 import { Empty, ErrorBanner, Mono, PageHeader, ReasonModal, RelTime, Time } from "../components/ui";
@@ -18,11 +19,11 @@ export function SeverityPill({ s }: { s: Alert["severity"] | string }) {
 export function alertObjectLink(a: Pick<Alert, "object_type" | "object_id">): string | null {
   if (!a.object_id) return null;
   switch (a.object_type) {
-    case "deployment": return `/deployments/${enc(a.object_id)}`;
-    case "endpoint": return `/endpoints/${enc(a.object_id)}`;
-    case "package": return `/catalog/${enc(a.object_id)}`;
-    case "exception": return "/exceptions";
-    case "bundle": return "/intake";
+    case "deployment": return paths.deployment(a.object_id);
+    case "endpoint": return paths.endpoint(a.object_id);
+    case "package": return paths.catalog(a.object_id);
+    case "exception": return paths.exceptions;
+    case "bundle": return paths.transfers;
     default: return null;
   }
 }

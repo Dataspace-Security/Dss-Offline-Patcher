@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
 import { api } from "../api";
+import { paths } from "../paths";
 import { ErrorBanner, KV, Mono, PageHeader, Pill, Time } from "../components/ui";
 import { fmtBytes, useLoad } from "../util";
 
@@ -44,7 +45,7 @@ export default function ServerPage() {
                 ["Running since", <><Time value={s.started_at} /> <span className="muted">(up {uptime(s.uptime_seconds)})</span></>],
                 ["Listening on", <Mono>{s.listen}</Mono>],
                 ["Platform", `${s.platform} · ${s.go_version}`],
-                ["Open alerts", <Link to="/alerts">{s.open_alerts}</Link>],
+                ["Open alerts", <Link to={paths.alerts}>{s.open_alerts}</Link>],
               ]} />
             </section>
             <section className="card">
@@ -72,7 +73,7 @@ export default function ServerPage() {
                 ["Content scanner", yes(s.intake.content_scanner)],
                 ["Max bundle size", fmtBytes(s.intake.max_bundle_bytes)],
               ]} />
-              <p><Link to="/intake">Intake &amp; transfer reconciliation →</Link> · <Link to="/acquisition">Acquisition status →</Link></p>
+              <p><Link to={paths.transfers}>Transfers: acquisition status, intake &amp; reconciliation →</Link></p>
             </section>
             <section className="card">
               <h2>Signing keys</h2>

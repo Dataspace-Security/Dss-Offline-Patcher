@@ -1,0 +1,84 @@
+/* Live deployment progress, fleet status matrix, "Your work" (UX iteration). */
+
+/* Live indicator */
+.live-badge { display: inline-flex; align-items: center; gap: 6px; color: var(--green); font-weight: 600; }
+.live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); margin-right: 6px;
+  box-shadow: 0 0 0 0 rgba(26, 127, 55, .5); animation: live-pulse 1.6s ease-out infinite; vertical-align: middle; }
+@keyframes live-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(26, 127, 55, .55); }
+  70% { box-shadow: 0 0 0 7px rgba(26, 127, 55, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(26, 127, 55, 0); }
+}
+
+/* Per-target progress */
+.tprog { display: flex; flex-direction: column; gap: 4px; min-width: 180px; }
+.tprog-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tprog-label { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tprog-bar { position: relative; height: 6px; border-radius: 3px; background: var(--grey-bg); overflow: hidden; }
+.tprog-bar > span { display: block; height: 100%; border-radius: 3px; transition: width .8s ease; }
+.tprog-blue > span { background: var(--blue); }
+.tprog-green > span { background: #2da44e; }
+.tprog-amber > span { background: #d4a72c; }
+.tprog-red > span { background: var(--red); }
+.tprog-grey > span { background: #afb8c1; }
+.tprog-indet > span { position: absolute; width: 35%; animation: tprog-slide 1.4s ease-in-out infinite; }
+@keyframes tprog-slide {
+  0% { left: -35%; }
+  100% { left: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-dot, .tprog-indet > span { animation: none; }
+  .tprog-indet > span { width: 100%; opacity: .5; }
+}
+.targets-live td { vertical-align: top; }
+
+/* Ring summaries */
+.ring-summaries { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
+.ring-sum { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); }
+.ring-sum-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.ring-sum-head { display: flex; align-items: center; gap: 8px; }
+.ring-sum-text { font-size: 12px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.ring-bar { height: 7px; }
+.ring-sum.ring-current { border-color: var(--accent); background: #f4f8ff; }
+
+/* Next-step and paused help */
+.next-step { display: flex; align-items: center; gap: 12px; justify-content: space-between; flex-wrap: wrap; }
+.paused-help { border-left: 4px solid var(--amber); margin-bottom: 14px; }
+.paused-help .table { margin: 8px 0; }
+.recovery { margin: 8px 0 0 18px; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.copy-area { width: 100%; font-size: 12px; resize: vertical; }
+
+/* Fleet status matrix */
+.fs-intel { margin: 0 0 8px; }
+.fs-table td { vertical-align: top; }
+.fs-catalog { display: flex; flex-direction: column; gap: 4px; }
+.fs-cell { min-width: 34px; padding: 1px 8px; border-radius: 10px; border: 1px solid transparent; font-weight: 600;
+  font-variant-numeric: tabular-nums; cursor: pointer; background: var(--grey-bg); color: var(--text); }
+.fs-cell:hover { filter: brightness(.96); }
+.fs-green { background: var(--green-bg); border-color: var(--green-bd); color: var(--green); }
+.fs-amber { background: var(--amber-bg); border-color: var(--amber-bd); color: var(--amber); }
+.fs-blue { background: var(--blue-bg); border-color: var(--blue-bd); color: var(--blue); }
+.fs-red { background: var(--red-bg); border-color: var(--red-bd); color: var(--red); }
+.fs-purple { background: var(--purple-bg); border-color: var(--purple-bd); color: var(--purple); }
+.fs-cell-on { outline: 2px solid var(--accent); outline-offset: 1px; }
+.fs-drill { padding: 4px 0; }
+
+/* Your work */
+.your-work { margin-bottom: 14px; }
+.work-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 8px 16px; }
+.work-list li { display: flex; gap: 10px; align-items: flex-start; }
+.work-count { min-width: 40px; text-align: center; font-size: 20px; font-weight: 700; border-radius: var(--radius); padding: 2px 6px;
+  font-variant-numeric: tabular-nums; border: 1px solid var(--border); }
+.work-count:hover { text-decoration: none; }
+.work-red { color: var(--red); background: var(--red-bg); border-color: var(--red-bd); }
+.work-amber { color: var(--amber); background: var(--amber-bg); border-color: var(--amber-bd); }
+.work-blue { color: var(--blue); background: var(--blue-bg); border-color: var(--blue-bd); }
+.work-green { color: var(--green); background: var(--green-bg); border-color: var(--green-bd); }
+.work-grey { color: var(--grey); background: var(--grey-bg); border-color: var(--grey-bd); }
+.work-detail { margin-top: 3px; display: flex; flex-wrap: wrap; gap: 4px; }
+
+/* Patches → Updates: per-state counts in one cell */
+.fs-counts { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.fs-counts .fs-cell { font-size: 12px; cursor: pointer; }
+.fs-cell-label { font-weight: 400; }
+.fs-names { margin-top: 3px; }

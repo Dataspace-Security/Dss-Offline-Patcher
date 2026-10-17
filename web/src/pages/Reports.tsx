@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { api, downloadFile, enc, errMsg } from "../api";
+import { api, downloadFile, errMsg } from "../api";
+import { paths } from "../paths";
 import { Empty, ErrorBanner, PageHeader, Pill, RelTime, Time } from "../components/ui";
 import type { ComplianceReport, SeverityStats } from "../types";
 import { useLoad } from "../util";
@@ -100,7 +101,7 @@ export default function Reports() {
               <h2>Exceptions</h2>
               <table className="table table-compact">
                 <tbody>
-                  <tr><td><Link to="/exceptions">Active</Link></td><td className="num"><b>{r.exceptions.active}</b></td></tr>
+                  <tr><td><Link to={paths.exceptions}>Active</Link></td><td className="num"><b>{r.exceptions.active}</b></td></tr>
                   <tr><td>Expiring in 7 days</td><td className={`num ${r.exceptions.expiring_in_7d ? "text-amber" : ""}`}><b>{r.exceptions.expiring_in_7d}</b></td></tr>
                   <tr><td>Oldest active</td><td className="num"><b>{r.exceptions.active ? `${days(r.exceptions.oldest_age_days)} d` : "—"}</b></td></tr>
                 </tbody>
@@ -110,7 +111,7 @@ export default function Reports() {
               <h2>Intake</h2>
               <table className="table table-compact">
                 <tbody>
-                  <tr><td><Link to="/intake">Bundles validated</Link></td><td className="num"><b>{r.intake.validated}</b></td></tr>
+                  <tr><td><Link to={paths.transfers}>Bundles validated</Link></td><td className="num"><b>{r.intake.validated}</b></td></tr>
                   <tr><td>Bundles rejected</td><td className={`num ${r.intake.rejected ? "text-red" : ""}`}><b>{r.intake.rejected}</b></td></tr>
                 </tbody>
               </table>
@@ -136,7 +137,7 @@ export default function Reports() {
                   {r.packages.map((p) => (
                     <tr key={p.package_id} className={p.overdue > 0 ? "row-overdue" : ""}>
                       <td>
-                        <Link to={`/catalog/${enc(p.package_id)}`} className="cell-title">{p.title || p.package_id}</Link>
+                        <Link to={paths.catalog(p.package_id)} className="cell-title">{p.title || p.package_id}</Link>
                         {p.title && <div className="cell-sub mono">{p.package_id}</div>}
                       </td>
                       <td><Severity s={p.severity} /></td>

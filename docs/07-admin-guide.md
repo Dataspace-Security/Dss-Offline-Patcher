@@ -70,6 +70,15 @@ tampering").
 
 ### 1.4 Deployments, rings and targets
 
+**Glossary (console wording):**
+
+- **Stage (ring)**: one step of a deployment. The console says "stage"; the API, the audit log and
+  this guide's technical sections say "ring" (`rings`, `current_ring`). "Start next stage" in the
+  console is the **Advance** action.
+- **Test machines**: the endpoints in group `pilot`. Standard deployments patch them first
+  (stage 1 "Test machines", groups `pilot`), then everything else (stage 2 "All machines",
+  groups `all`). Older deployments show the stored names `pilot` / `broad` as the same labels.
+
 - A **deployment** installs one approved package. It has 1–10 ordered **rings**, for example `pilot`
   then `broad`. Each ring names one or more endpoint **groups**. The group `all` matches every
   endpoint.
@@ -378,7 +387,7 @@ The full commands are in [runbooks/02-acquisition-zone-setup-and-monthly-run.md]
 | 6 | Isolated | approver(s) | Catalog: review and approve each package with the change reference. Critical patches may need two approvers. |
 | 7 | Isolated | operator (not an approver, if SoD is on) | Create the deployment: rings `pilot` → `broad`, deadline from your policy, `max_failure_pct`, `max_retries`, reboot policy, health checks for the business services on pilot machines. |
 | 8 | Isolated | operator | Watch the pilot ring. Fix failures. Get sign-off from pilot owners. |
-| 9 | Isolated | operator | Advance to `broad`. Watch for auto-pause, `install_failed`, `health_check_failed`. |
+| 9 | Isolated | operator | Advance to `broad` (console: **Start next stage**). Watch for auto-pause, `install_failed`, `health_check_failed`. |
 | 10 | Isolated | operator / support | Work the remainder: offline endpoints, pending reboots, failures, exceptions. |
 | 11 | Isolated | viewer | Reports: compliance by severity, overdue targets, latency (release → received → approved → first verified → 90 % verified). Export CSV and the lifecycle JSON per package for the change record. |
 

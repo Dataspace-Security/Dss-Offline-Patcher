@@ -1,20 +1,21 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, clearToken, errMsg, setToken, UNAUTHORIZED_EVENT } from "./api";
 import { AuthContext, hasRole } from "./auth";
 import type { Alert, AuthConfig, LogoutResponse, Me } from "./types";
 import { useLoad } from "./util";
 import Overview from "./pages/Overview";
-import Intake from "./pages/Intake";
-import Catalog from "./pages/Catalog";
 import { DeploymentList, NewDeploymentPage } from "./pages/Deployments";
 import DeploymentDetailPage from "./pages/DeploymentDetail";
 import Endpoints from "./pages/Endpoints";
-import Updates from "./pages/Updates";
 import EndpointDetailPage from "./pages/EndpointDetail";
 import Exceptions from "./pages/Exceptions";
 import Audit from "./pages/Audit";
-import AcquisitionPage from "./pages/Acquisition";
+import { paths } from "./paths";
+import { DeploymentsArea, EndpointsArea, OverviewArea, PatchesArea, ReportsArea, SettingsArea } from "./pages/Areas";
+import PatchUpdates from "./pages/PatchUpdates";
+import Catalog from "./pages/Catalog";
+import Transfers from "./pages/Transfers";
 import ServerPage from "./pages/Server";
 import AgentSetupPage from "./pages/AgentSetup";
 import Users from "./pages/Users";
@@ -83,6 +84,7 @@ function Shell({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
   const alerts = useLoad(() => api.get<Alert[]>("/api/alerts?open=1"), [], 15000);
   const openAlerts = alerts.data?.length ?? 0;
   const critical = (alerts.data ?? []).some((a) => a.severity === "critical");
+  const { pathname } = useLocation();
 
   return (
     <AlertsRefreshContext.Provider value={() => void alerts.reload()}>
@@ -92,27 +94,18 @@ function Shell({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
             <span className="brand-mark">◆</span> offpatch
             <div className="brand-sub">offline patch management</div>
           </div>
-          <nav>
-            <NavLink to="/" end>Overview</NavLink>
-            <NavLink to="/alerts">
-              Alerts
-              {openAlerts > 0 && (
-                <span className={`nav-badge ${critical ? "" : "nav-badge-warn"}`} title={`${openAlerts} open alert(s)`}>{openAlerts}</span>
-              )}
-            </NavLink>
-            <NavLink to="/acquisition">Acquisition</NavLink>
-            <NavLink to="/intake">Intake</NavLink>
-            <NavLink to="/catalog">Catalog</NavLink>
-            <NavLink to="/deployments">Deployments</NavLink>
-            <NavLink to="/windows">Windows</NavLink>
-            <NavLink to="/endpoints">Endpoints</NavLink>
-            <NavLink to="/updates">Updates</NavLink>
-            <NavLink to="/agent-setup">Agent setup</NavLink>
-            <NavLink to="/exceptions">Exceptions</NavLink>
-            <NavLink to="/reports">Reports</NavLink>
-            <NavLink to="/audit">Audit</NavLink>
-            <NavLink to="/server">Server</NavLink>
-            {isAdmin && <NavLink to="/users">Users</NavLink>}
+          <nav aria-label="Main">
+            {NAV.map((n) => {
+              const active = n.match(pathname);
+              return (
+                <Link key={n.to} to={n.to} className={active ? "active" : undefined} aria-current={active ? "page" : undefined}>
+                  {n.label}
+                  {n.to === paths.overview && openAlerts > 0 && (
+                    <span className={`nav-badge ${critical ? "" : "nav-badge-warn"}`} title={`${openAlerts} open alert(s)`}>{openAlerts}</span>
+                  )}
+                </Link>
+              );
+            })}
           </nav>
         </aside>
         <div className="main">
@@ -134,25 +127,57 @@ function Shell({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
           </header>
           <main className="content">
             <Routes>
-              <Route path="/" element={<Overview />} />
-              <Route path="/alerts" element={<Alerts />} />
-              <Route path="/intake" element={<Intake />} />
-              <Route path="/acquisition" element={<AcquisitionPage />} />
-              <Route path="/server" element={<ServerPage />} />
-              <Route path="/catalog" element={<Catalog />} />
-              <Route path="/catalog/:packageId" element={<Catalog />} />
-              <Route path="/deployments" element={<DeploymentList />} />
+              {/* Six areas; each is a layout route whose children are its tabs. */}
+              <Route element={<OverviewArea openAlerts={openAlerts} critical={critical} />}>
+                <Route path="/" element={<Overview />} />
+                <Route path="/alerts" element={<Alerts />} />
+              </Route>
+              <Route element={<PatchesArea />}>
+                <Route path="/patches/updates" element={<PatchUpdates />} />
+                <Route path="/patches/catalog" element={<Catalog />} />
+                <Route path="/patches/catalog/:packageId" element={<Catalog />} />
+                <Route path="/patches/transfers" element={<Transfers />} />
+              </Route>
+              <Route element={<DeploymentsArea />}>
+                <Route path="/deployments" element={<DeploymentList />} />
+                <Route path="/deployments/windows" element={<MaintenanceWindows />} />
+                <Route path="/deployments/exceptions" element={<Exceptions />} />
+              </Route>
               <Route path="/deployments/new" element={<NewDeploymentPage />} />
               <Route path="/deployments/:id" element={<DeploymentDetailPage />} />
-              <Route path="/windows" element={<MaintenanceWindows />} />
-              <Route path="/endpoints" element={<Endpoints />} />
-              <Route path="/updates" element={<Updates />} />
+              <Route element={<EndpointsArea />}>
+                <Route path="/endpoints" element={<Endpoints />} />
+                <Route path="/endpoints/add" element={<AgentSetupPage />} />
+              </Route>
               <Route path="/endpoints/:id" element={<EndpointDetailPage />} />
-              <Route path="/agent-setup" element={<AgentSetupPage />} />
-              <Route path="/exceptions" element={<Exceptions />} />
-              <Route path="/reports" element={<Reports />} />
-              <Route path="/audit" element={<Audit />} />
-              <Route path="/users" element={isAdmin ? <Users /> : <Navigate to="/" replace />} />
+              <Route element={<ReportsArea />}>
+                <Route path="/reports" element={<Reports />} />
+                <Route path="/reports/audit" element={<Audit />} />
+              </Route>
+              <Route element={<SettingsArea isAdmin={isAdmin} />}>
+                <Route path="/settings/server" element={<ServerPage />} />
+                <Route path="/settings/users" element={isAdmin ? <Users /> : <Navigate to={paths.server} replace />} />
+              </Route>
+
+              {/* Old addresses (bookmarks, alert e-mails, other links) keep working, query string included. */}
+              <Route path="/patches" element={<Moved to={paths.updates()} />} />
+              <Route path="/patches/needed" element={<Moved to={paths.updates()} />} />
+              <Route path="/patches/status" element={<Moved to={paths.updates()} add={{ view: "all" }} />} />
+              <Route path="/patches/downloads" element={<Moved to={paths.transfers} />} />
+              <Route path="/patches/received" element={<Moved to={paths.transfers} />} />
+              <Route path="/patches/*" element={<Moved to={paths.updates()} />} />
+              <Route path="/updates" element={<Moved to={paths.updates()} />} />
+              <Route path="/catalog" element={<Moved to={paths.catalog()} />} />
+              <Route path="/catalog/:packageId" element={<MovedPackage />} />
+              <Route path="/acquisition" element={<Moved to={paths.transfers} />} />
+              <Route path="/intake" element={<Moved to={paths.transfers} />} />
+              <Route path="/windows" element={<Moved to={paths.windows} />} />
+              <Route path="/exceptions" element={<Moved to={paths.exceptions} />} />
+              <Route path="/agent-setup" element={<Moved to={paths.addEndpoints} />} />
+              <Route path="/audit" element={<Moved to={paths.audit()} />} />
+              <Route path="/settings" element={<Moved to={paths.server} />} />
+              <Route path="/server" element={<Moved to={paths.server} />} />
+              <Route path="/users" element={<Moved to={paths.users} />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </main>
@@ -161,6 +186,36 @@ function Shell({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
     </AlertsRefreshContext.Provider>
   );
 }
+
+/**
+ * Redirect from an old address, keeping its query string (e.g.
+ * ?state=quarantined) and hash; `to` may carry its own query and `add`
+ * sets further parameters (the old address's own values win).
+ */
+function Moved({ to, add }: { to: string; add?: Record<string, string> }) {
+  const { search, hash } = useLocation();
+  const [pathname, toQuery = ""] = to.split("?");
+  const merged = new URLSearchParams(toQuery);
+  for (const [k, v] of Object.entries(add ?? {})) merged.set(k, v);
+  new URLSearchParams(search).forEach((v, k) => merged.set(k, v));
+  const q = merged.toString();
+  return <Navigate to={{ pathname, search: q ? `?${q}` : "", hash }} replace />;
+}
+
+function MovedPackage() {
+  const { packageId } = useParams();
+  return <Moved to={paths.catalog(packageId)} />;
+}
+
+/** Sidebar: one entry per area; active on any of the area's addresses. */
+const NAV: { to: string; label: string; match: (p: string) => boolean }[] = [
+  { to: paths.overview, label: "Overview", match: (p) => p === "/" || p.startsWith("/alerts") },
+  { to: paths.updates(), label: "Patches", match: (p) => p.startsWith("/patches") },
+  { to: paths.deployments, label: "Deployments", match: (p) => p.startsWith("/deployments") },
+  { to: paths.endpoints, label: "Endpoints", match: (p) => p.startsWith("/endpoints") },
+  { to: paths.reports, label: "Reports", match: (p) => p.startsWith("/reports") },
+  { to: paths.server, label: "Settings", match: (p) => p.startsWith("/settings") },
+];
 
 function Login({ onLogin, ssoError }: { onLogin: (me: Me) => void; ssoError: string | null }) {
   const location = useLocation();

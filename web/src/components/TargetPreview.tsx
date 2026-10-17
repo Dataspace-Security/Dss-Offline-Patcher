@@ -1,23 +1,23 @@
-import { api } from "../api";
-import type { Endpoint, Package } from "../types";
+import { Link } from "react-router-dom";
+import { api, enc } from "../api";
+import type { Endpoint, Package, PackageFleet } from "../types";
 import { useLoad } from "../util";
+import { stageIndexFor } from "./patchPlan";
 import { Pill } from "./ui";
+import { stageLabel } from "./deployLabels";
 
 type RingDraft = { name: string; groups: string };
 
-const split = (s: string) => s.split(",").map((g) => g.trim().toLowerCase()).filter(Boolean);
+const split = (s: string) => s.split(",").map((g) => g.trim()).filter(Boolean);
 
 // Mirrors the server's targeting (internal/store/deployments.go ringFor +
-// applicable): an endpoint belongs to the FIRST ring whose groups match one
+// applicable): an endpoint belongs to the FIRST stage whose groups match one
 // of its groups (or "all"), and is then checked against the package's
-// applicability. Inventory ("already installed") is only known server-side.
-function ringFor(rings: RingDraft[], groups: string[], endpointId: string): number {
-  for (let i = 0; i < rings.length; i++) {
-    const rg = split(rings[i].groups);
-    if (rg.includes("all") || rg.some((g) => groups.includes(g) || g === `endpoint:${endpointId}`)) return i;
-  }
-  return -1;
-}
+// applicability. What the endpoint already has comes from the server
+// (GET /api/packages-needs: needed / up to date / not installed per endpoint).
+// Not modelled here: active exceptions and app-store-managed apps, which the
+// server also skips when it assigns targets — hence "unless an exception
+// covers it" in the wording.
 
 function notApplicable(p: Package, e: Endpoint): string | null {
   const a = p.applicability;
@@ -30,52 +30,89 @@ function notApplicable(p: Package, e: Endpoint): string | null {
   return null;
 }
 
-/** Live "who will this deployment reach?" preview for the New deployment form. */
-export function TargetPreview({ pkg, rings }: { pkg: Package | undefined; rings: RingDraft[] }) {
-  const { data: eps } = useLoad(() => api.get<Endpoint[]>("/api/endpoints"), []);
+/** What the deployment will do on one machine. */
+type Outcome = "install" | "install_later" | "up_to_date" | "not_installed" | "not_applicable" | "unknown";
+
+const OUTCOME: Record<Outcome, { state: string; label: string }> = {
+  install: { state: "pending", label: "will install (unless an exception covers it)" },
+  install_later: { state: "pending", label: "will install when back online (unless an exception covers it)" },
+  up_to_date: { state: "verified", label: "already up to date · skipped" },
+  not_installed: { state: "not_applicable", label: "app not installed · skipped" },
+  not_applicable: { state: "not_applicable", label: "not applicable" },
+  unknown: { state: "pending", label: "decided at its next check-in (no inventory yet)" },
+};
+
+type TargetPreviewProps = {
+  pkg: Package | undefined;
+  rings: RingDraft[];
+  /** Already loaded by the caller (Patch this): skips this component's own fetch. */
+  endpoints?: Endpoint[] | null;
+  fleet?: Record<string, PackageFleet> | null;
+};
+
+/** Live "which machines get this, and what happens on each?" preview for the deployment form and Patch this. */
+export function TargetPreview({ pkg, rings, endpoints, fleet: fleetProp }: TargetPreviewProps) {
+  const ownEps = endpoints === undefined;
+  const ownFleet = fleetProp === undefined;
+  const epsL = useLoad(() => (ownEps ? api.get<Endpoint[]>("/api/endpoints") : Promise.resolve(null)), [ownEps]);
+  const fleetL = useLoad(() => (ownFleet ? api.get<Record<string, PackageFleet>>("/api/packages-needs") : Promise.resolve(null)), [ownFleet]);
+  const eps = ownEps ? epsL.data : endpoints;
+  const fleetData = ownFleet ? fleetL.data : fleetProp;
   if (!eps) return null;
+  const pf = pkg ? fleetData?.[pkg.package_id] : undefined;
+  const needed = new Set(pf?.endpoint_ids ?? []);
+  const upToDate = new Set(pf?.up_to_date_ids ?? []);
+  const notInstalled = new Set(pf?.not_installed_ids ?? []);
+  const stageGroups = rings.map((r) => ({ groups: split(r.groups) }));
+
   const active = eps.filter((e) => e.status !== "retired");
   const rows = active.map((e) => {
-    const ring = ringFor(rings, e.groups ?? [], e.endpoint_id);
+    const ring = stageIndexFor(stageGroups, e);
     const na = pkg && ring >= 0 ? notApplicable(pkg, e) : null;
-    return { e, ring, na };
+    let outcome: Outcome = "unknown";
+    if (na) outcome = "not_applicable";
+    else if (needed.has(e.endpoint_id)) outcome = e.status === "offline" || e.status === "stale" ? "install_later" : "install";
+    else if (upToDate.has(e.endpoint_id)) outcome = "up_to_date";
+    else if (notInstalled.has(e.endpoint_id)) outcome = "not_installed";
+    return { e, ring, na, outcome };
   });
   const targeted = rows.filter((r) => r.ring >= 0);
-  const willInstall = targeted.filter((r) => !r.na);
+  const count = (o: Outcome[]) => targeted.filter((r) => o.includes(r.outcome)).length;
+  const willInstall = count(["install", "install_later"]);
+  const skipped = count(["up_to_date", "not_installed", "not_applicable"]);
+  const unknown = count(["unknown"]);
   const missed = rows.filter((r) => r.ring < 0);
   const allGroups = Array.from(new Set(active.flatMap((e) => e.groups ?? []))).sort();
 
   return (
     <fieldset className="fieldset target-preview">
-      <legend>Who will receive this patch? <span className="muted">— live preview</span></legend>
-      {!pkg && <div className="hint">Choose a package to check applicability.</div>}
-      {pkg && willInstall.length === 0 && (
+      <legend>Which machines get this patch? <span className="muted">— live preview</span></legend>
+      {!pkg && <div className="hint">Choose a package to see what happens on each machine.</div>}
+      {pkg && targeted.length === 0 && (
         <div className="banner banner-error">
-          <b>No endpoint will install this patch.</b>{" "}
-          {targeted.length === 0
-            ? <>No endpoint is in the groups of these rings.</>
-            : <>The targeted endpoints are not applicable ({pkg.applicability.os} package).</>}{" "}
-          Groups in use: {allGroups.length ? allGroups.map((g) => <span key={g} className="tag">{g}</span>) : "none"} — or use <span className="tag">all</span>.
+          <b>No machine is in these stages.</b> Groups in use: {allGroups.length ? allGroups.map((g) => <span key={g} className="tag">{g}</span>) : "none"} — or use <span className="tag">all</span>.
         </div>
       )}
-      {pkg && willInstall.length > 0 && (
-        <div className="banner banner-ok">
-          <b>{willInstall.length}</b> endpoint{willInstall.length === 1 ? "" : "s"} will install it
-          {targeted.length > willInstall.length && <> · {targeted.length - willInstall.length} targeted but not applicable</>}
-          {missed.length > 0 && <> · {missed.length} not in any ring</>}.
+      {pkg && targeted.length > 0 && (
+        <div className={`banner ${willInstall + unknown > 0 ? "banner-ok" : "banner-warn"}`}>
+          <b>{willInstall}</b> machine{willInstall === 1 ? "" : "s"} will install it (unless an exception covers {willInstall === 1 ? "it" : "them"})
+          {skipped > 0 && <> · {skipped} skipped (already up to date, app not installed or not applicable)</>}
+          {unknown > 0 && <> · {unknown} decided at their next check-in</>}
+          {missed.length > 0 && <> · {missed.length} not in any stage</>}.
+          {willInstall + unknown === 0 && <> Nothing to do: every machine in these stages is up to date or doesn't have the app.</>}
         </div>
       )}
       {targeted.length > 0 && (
         <table className="table table-compact">
-          <thead><tr><th>Ring</th><th>Endpoint</th><th>OS</th><th>Groups</th><th>Result</th></tr></thead>
+          <thead><tr><th>Stage</th><th>Machine</th><th>Groups</th><th>Installed now</th><th>What happens</th></tr></thead>
           <tbody>
-            {targeted.sort((a, b) => a.ring - b.ring || a.e.hostname.localeCompare(b.e.hostname)).map(({ e, ring, na }) => (
+            {targeted.sort((a, b) => a.ring - b.ring || a.e.hostname.localeCompare(b.e.hostname)).map(({ e, ring, na, outcome }) => (
               <tr key={e.endpoint_id}>
-                <td>{ring + 1}. {rings[ring]?.name || "—"}</td>
-                <td>{e.hostname}</td>
-                <td>{e.os}</td>
+                <td className="nowrap">{stageLabel(rings[ring]?.name, ring)}</td>
+                <td><Link to={`/endpoints/${enc(e.endpoint_id)}`}>{e.hostname}</Link> {e.status === "offline" || e.status === "stale" ? <span className="muted">({e.status})</span> : null}</td>
                 <td>{(e.groups ?? []).map((g) => <span key={g} className="tag">{g}</span>)}</td>
-                <td>{na ? <Pill state="not_applicable" label={`not applicable: ${na}`} /> : <Pill state="pending" label="will install" />}</td>
+                <td className="muted">{e.os_version || e.os}</td>
+                <td><Pill state={OUTCOME[outcome].state} label={na ? `not applicable: ${na}` : OUTCOME[outcome].label} /></td>
               </tr>
             ))}
           </tbody>
@@ -83,7 +120,7 @@ export function TargetPreview({ pkg, rings }: { pkg: Package | undefined; rings:
       )}
       {missed.length > 0 && (
         <details>
-          <summary className="muted">{missed.length} endpoint{missed.length === 1 ? " is" : "s are"} not in any ring</summary>
+          <summary className="muted">{missed.length} machine{missed.length === 1 ? " is" : "s are"} not in any stage (not touched)</summary>
           <ul className="plain">
             {missed.map(({ e }) => (
               <li key={e.endpoint_id}>{e.hostname} <span className="muted">({e.os})</span> — groups {(e.groups ?? []).map((g) => <span key={g} className="tag">{g}</span>)}</li>
@@ -91,7 +128,10 @@ export function TargetPreview({ pkg, rings }: { pkg: Package | undefined; rings:
           </ul>
         </details>
       )}
-      <div className="hint">Endpoints that already have this version show as <b>verified</b> right after the deployment is created.</div>
+      <div className="hint">
+        Third-party apps are only updated where they are installed; they are never installed on new machines.
+        The server also skips machines covered by an active exception and apps managed by an app store when it assigns the deployment.
+      </div>
     </fieldset>
   );
 }

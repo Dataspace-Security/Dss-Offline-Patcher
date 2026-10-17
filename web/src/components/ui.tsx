@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { fmtTime, relTime, useNow } from "../util";
 
 const GREEN = ["verified", "compliant", "approved", "validated", "completed", "installed", "downloaded", "success", "active-ok"];
@@ -46,7 +46,24 @@ export function Empty({ children }: { children: ReactNode }) {
   return <div className="empty">{children}</div>;
 }
 
+/**
+ * Set by a tabbed area (Patches) whose pages are shown inside one shared
+ * header: PageHeader then keeps the page's description and controls but
+ * drops its own title.
+ */
+export const EmbeddedHeader = createContext(false);
+
 export function PageHeader({ title, sub, children }: { title: ReactNode; sub?: ReactNode; children?: ReactNode }) {
+  const embedded = useContext(EmbeddedHeader);
+  if (embedded) {
+    if (!sub && !children) return null;
+    return (
+      <div className="page-header page-header-embedded">
+        <div>{sub && <div className="sub">{sub}</div>}</div>
+        <div className="actions">{children}</div>
+      </div>
+    );
+  }
   return (
     <div className="page-header">
       <div>
@@ -54,6 +71,32 @@ export function PageHeader({ title, sub, children }: { title: ReactNode; sub?: R
         {sub && <div className="sub">{sub}</div>}
       </div>
       <div className="actions">{children}</div>
+    </div>
+  );
+}
+
+/**
+ * Props for a table row that expands/collapses on click: also focusable and
+ * operable with Enter / Space, and announces its state to assistive tech.
+ */
+export function expandRowProps(isOpen: boolean, toggle: () => void, className = "") {
+  return {
+    className: `clickable ${isOpen ? "selected" : ""} ${className}`.trim(),
+    onClick: toggle,
+    tabIndex: 0,
+    "aria-expanded": isOpen,
+    onKeyDown: (e: ReactKeyboardEvent<HTMLElement>) => {
+      if (e.target !== e.currentTarget) return; // keys inside buttons/links/inputs keep their meaning
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+    },
+  };
+}
+
+/** Accessible meter for a 0–100 share (score bars). */
+export function Meter({ pct, tone, label }: { pct: number; tone: string; label: string }) {
+  return (
+    <div className="score-meter" role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
+      <span className={`bg-${tone}`} style={{ width: `${pct}%` }} />
     </div>
   );
 }
@@ -203,7 +246,9 @@ export function CountsBar({ counts, compact, rollback }: { counts: Partial<Recor
   return (
     <div className={`counts ${compact ? "counts-compact" : ""}`}>
       {!compact && <PatchScore counts={counts} rollback={rollback} />}
-      <div className="countbar" title={entries.map(([k, v]) => `${k}: ${v}`).join(", ")}>
+      <div className="countbar" title={entries.map(([k, v]) => `${k}: ${v}`).join(", ")}
+           role="progressbar" aria-label={rollback ? "Removed" : "Patched"} aria-valuemin={0} aria-valuemax={100}
+           aria-valuenow={patchScore(counts).pct} aria-valuetext={entries.map(([k, v]) => `${targetLabel(k, rollback ? "rollback" : undefined)} ${v}`).join(", ")}>
         {entries.map(([k, v]) => (
           <span key={k} className={`seg seg-${pillTone(k)} seg-${k}`} style={{ width: `${(v / total) * 100}%` }} />
         ))}

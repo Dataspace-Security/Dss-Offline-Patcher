@@ -1,6 +1,7 @@
 import { useMemo, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { api, enc, errMsg } from "../api";
+import { paths } from "../paths";
 import { useCan } from "../auth";
 import { Empty, ErrorBanner, Mono, Modal, PageHeader, Pill, ReasonModal, Time } from "../components/ui";
 import type { Endpoint, Exception, NewException, Package } from "../types";
@@ -52,7 +53,7 @@ export default function Exceptions() {
                 <tr key={x.exception_id}>
                   <td><Link to={`/endpoints/${enc(x.endpoint_id)}`}>{host(x.endpoint_id) ?? <Mono>{x.endpoint_id}</Mono>}</Link></td>
                   <td>{x.package_id
-                    ? <Link to={`/catalog/${enc(x.package_id)}`}>{pkgTitle(x.package_id) ?? <Mono>{x.package_id}</Mono>}</Link>
+                    ? <Link to={paths.catalog(x.package_id)}>{pkgTitle(x.package_id) ?? <Mono>{x.package_id}</Mono>}</Link>
                     : <i>All packages</i>}</td>
                   <td><Pill state={st === "active" ? "exception" : st} label={st} /></td>
                   <td>{x.owner}</td>

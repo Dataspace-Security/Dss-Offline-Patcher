@@ -1,0 +1,52 @@
+/* Styles for the UX iteration: Patch this drawer, fleet columns, lifecycle timeline, endpoint updates. */
+
+.fleet-line { display: inline-flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--text-2); }
+.fleet-part b { color: var(--text); }
+.fleet-part.text-amber b, .fleet-part.text-green b, .fleet-part.text-red b, .fleet-part.text-blue b { color: inherit; }
+.text-blue { color: var(--blue); }
+
+.patch-head { display: flex; flex-direction: column; gap: 6px; margin-bottom: 4px; }
+.patch-fleet { padding: 6px 10px; background: var(--grey-bg); border: 1px solid var(--grey-bd); border-radius: var(--radius); }
+.patch-steps { margin-top: 10px; }
+.patch-steps .field textarea { width: 100%; }
+.patch-preview { margin: 10px 0; }
+.patch-preview > summary { cursor: pointer; color: var(--accent); font-size: 12px; margin-bottom: 6px; }
+
+.preset-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-bottom: 10px; }
+.preset { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 8px 10px; border: 1px solid var(--border); background: var(--surface); border-radius: var(--radius); cursor: pointer; font: inherit; }
+.preset span { font-size: 11px; color: var(--text-3); }
+.preset:hover { border-color: var(--border-strong); }
+.preset-on { border-color: var(--accent); background: #eef4ff; box-shadow: 0 0 0 1px var(--accent) inset; }
+.preset-danger.preset-on { border-color: var(--red); background: var(--red-bg); box-shadow: 0 0 0 1px var(--red) inset; }
+
+.plan-summary { margin: 6px 0 10px; }
+.plan-summary th { width: 90px; text-align: left; color: var(--text-2); font-weight: 500; vertical-align: top; }
+.plan-ring { white-space: nowrap; }
+.plan-ring .tag { margin-left: 2px; }
+
+.btn-link { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
+.btn-link:hover { text-decoration: underline; }
+
+.row-action { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; justify-content: flex-end; }
+.requested { font-size: 11px; color: var(--text-3); }
+
+.fleet-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin: 6px 0 4px; }
+.fleet-cell { border: 1px solid var(--border); border-radius: var(--radius); padding: 4px 8px; }
+.fleet-cell .n { font-size: 16px; font-weight: 600; }
+.fleet-cell .l { font-size: 11px; color: var(--text-3); }
+
+.next-step { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+/* Lifecycle timeline (P2.1) */
+.timeline { list-style: none; margin: 6px 0 0; padding: 0; }
+.timeline > li { position: relative; padding: 0 0 12px 22px; }
+.timeline > li::before { content: ""; position: absolute; left: 3px; top: 4px; width: 10px; height: 10px; border-radius: 50%; background: var(--surface); border: 2px solid var(--border-strong); }
+.timeline > li:not(:last-child)::after { content: ""; position: absolute; left: 8px; top: 16px; bottom: 0; width: 2px; background: var(--border); }
+.timeline > li.tl-done::before { background: var(--green); border-color: var(--green); }
+.timeline > li.tl-current::before { background: var(--blue); border-color: var(--blue); }
+.timeline > li.tl-bad::before { background: var(--red); border-color: var(--red); }
+.tl-title { font-weight: 600; font-size: 12px; }
+.tl-meta { font-size: 11px; color: var(--text-3); }
+
+.cat-filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.advanced > summary { cursor: pointer; font-weight: 600; font-size: 12px; }

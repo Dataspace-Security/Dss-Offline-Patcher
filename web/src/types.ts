@@ -48,6 +48,8 @@ export type Endpoint = {
   // v1.1
   edition: string; cert_not_after: string; retired_at: string; retired_reason: string; reboot_requested_at: string;
   hardware?: Hardware;
+  // UX iteration: counts from update intelligence + catalog (null without intelligence)
+  missing?: EndpointMissing | null;
 };
 export type Hardware = {
   manufacturer?: string; model?: string; serial_number?: string; cpu?: string; cpu_cores?: number; memory_bytes?: number;
@@ -90,6 +92,7 @@ export type Target = {
   health: "" | "ok" | "failed"; health_detail: string;
   // v1.2: the deployment's operation
   operation: DeploymentOperation;
+  live?: TargetLive | null; // UX iteration: live progress from heartbeats
 };
 export type DeploymentDetail = Deployment & { targets: Target[] };
 
@@ -219,5 +222,64 @@ export type AcquisitionRequest = {
 export type FleetUpdates = {
   intel: IntelSummary | null;
   updates: { kind: "os" | "app"; key: string; name: string; latest: string; catalog: CatalogLink | null;
+    requested?: AcquisitionRequestRef | null; // latest export listing it
     endpoints: { endpoint_id: string; hostname: string; installed: string }[] }[];
+};
+
+// ---- UX iteration (docs/proposals/ux-simplification.md, contract: docs/proposals/ux-api-contract.md) ----
+
+/** GET /api/policy (viewer). Durations are Go strings, e.g. "168h0m0s". */
+export type Policy = {
+  approvals_required: Record<string, number>; // by severity; missing = 1
+  separation_of_duties: boolean;
+  deadlines: Record<string, string>; // by severity: release date + this = install deadline
+};
+
+/** GET /api/packages-needs → Record<package_id, PackageFleet> (extended; old fields kept). */
+export type PackageFleet = {
+  package_id: string;
+  needed: number; endpoint_ids: string[]; hostnames: string[]; // endpoints that still need it (unchanged meaning)
+  up_to_date: number;    // inventory shows it (or a superseding KB / newer version)
+  not_installed: number; // third-party app not on the endpoint (never targeted)
+  up_to_date_ids: string[]; not_installed_ids: string[]; // which endpoints those are
+  deploying: number;     // targets pending..installed / pending_reboot in an active or paused deployment
+  verified: number;      // targets verified (any deployment, operation install)
+  failed: number;        // targets failed / lost_after_install
+  exception: number;     // active exceptions
+  active_deployment_id: string; // "" if none (active or paused, operation install)
+};
+
+/** Endpoint gains `missing` (null/absent when there is no update intelligence). */
+export type EndpointMissing = { os: number; apps: number; ready: number }; // ready = approved catalog packages it needs
+
+/** GET /api/fleet/status (viewer): one row per KB or app across the fleet. */
+export type FleetStatusEndpoint = {
+  endpoint_id: string; hostname: string;
+  status: "up_to_date" | "outdated" | "being_patched" | "verified" | "failed" | "exception";
+  installed: string; // installed version or OS version
+};
+export type FleetStatusRow = {
+  kind: "os" | "app"; key: string; name: string; latest: string;
+  catalog: CatalogLink | null;
+  requested: AcquisitionRequestRef | null;
+  up_to_date: number; outdated: number; being_patched: number; verified: number; failed: number; exception: number;
+  endpoints: FleetStatusEndpoint[];
+};
+export type FleetStatus = { intel: IntelSummary | null; rows: FleetStatusRow[] };
+
+/** Acquisition request tracking (P2.3). */
+export type AcquisitionRequestRef = { request_id: string; at: string; status: "requested" | "seen" | "fulfilled" };
+export type AcquisitionRequestItem = { kind: "app" | "kb"; key: string; version: string; status: "requested" | "seen" | "fulfilled"; fulfilled_at: string; package_id: string };
+export type AcquisitionRequestRecord = {
+  request_id: string; created_at: string; created_by: string; intel_generated_at: string;
+  seen_at: string; // first acquisition status report that lists it ("" if none)
+  items: AcquisitionRequestItem[];
+};
+
+/** Live progress of a target (in memory on the server, from agent heartbeats; not audited). */
+export type TargetLive = {
+  stage: "downloading" | "verifying" | "installing" | "waiting_reboot";
+  pct: number;            // 0..100 for downloading, -1 when unknown
+  bytes_done: number; bytes_total: number;
+  at: string;             // last heartbeat time
 };

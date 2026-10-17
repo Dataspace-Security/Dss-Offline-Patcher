@@ -1,53 +1,107 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { api, enc, errMsg, qs } from "../api";
-import { deployToEndpoints } from "../components/AvailablePatches";
-
-type Need = { package_id: string; needed: number; endpoint_ids: string[]; hostnames: string[] };
+import { api, enc, qs } from "../api";
+import { paths } from "../paths";
 import { useCan, useMe } from "../auth";
-import { Empty, ErrorBanner, KV, Mono, PageHeader, Pill, ReasonModal, Time } from "../components/ui";
-import type { Package, PackageState } from "../types";
+import { LifecycleTimeline } from "../components/LifecycleTimeline";
+import { FleetLine, PatchThis } from "../components/PatchThis";
+import { approvedBy, fetchFleet, fetchPolicy } from "../components/patchPlan";
+import { CopyBox, Empty, ErrorBanner, KV, Mono, PageHeader, Pill, ReasonModal, Time, expandRowProps } from "../components/ui";
+import type { Package, PackageFleet, PackageKind, PackageState } from "../types";
 import { fmtBytes, shortHash, useLoad } from "../util";
+import "../patch.css";
 
 const STATES: PackageState[] = ["quarantined", "approved", "rejected", "revoked"];
+
+/** Kind filter: Windows updates (.msu), applications, or the offpatch agent itself. */
+type KindFilter = "" | "windows" | "apps" | "agent";
+const KIND_FILTERS: { value: KindFilter; label: string }[] = [
+  { value: "", label: "All" }, { value: "windows", label: "Windows" }, { value: "apps", label: "Apps" }, { value: "agent", label: "Agent" },
+];
+function kindGroup(k: PackageKind): Exclude<KindFilter, ""> {
+  return k === "msu" ? "windows" : k === "agent" ? "agent" : "apps";
+}
+
+function FleetNum({ n, tone }: { n: number | undefined; tone?: string }) {
+  if (n === undefined) return <span className="muted">…</span>;
+  return n ? <b className={tone ? `text-${tone}` : undefined}>{n}</b> : <span className="muted">0</span>;
+}
 
 export default function Catalog() {
   const [sp, setSp] = useSearchParams();
   const state = sp.get("state") ?? "";
+  const kind = (sp.get("kind") ?? "") as KindFilter;
+  const onlyNeeded = sp.get("needed") === "1";
   const { packageId } = useParams();
   const navigate = useNavigate();
   const list = useLoad(() => api.get<Package[]>(`/api/packages${qs({ state })}`), [state], 30000);
-  const needs = useLoad(() => api.get<Record<string, Need>>("/api/packages-needs"), [], 60000);
+  const needs = useLoad(fetchFleet, [], 60000);
+  const setParam = (k: string, v: string) => {
+    const n = new URLSearchParams(sp);
+    if (v) n.set(k, v); else n.delete(k);
+    setSp(n);
+  };
+  const all = list.data ?? [];
+  const kindCount = (k: KindFilter) => all.filter((p) => !k || kindGroup(p.kind) === k).length;
+  const fleetOf = (id: string): PackageFleet | undefined => needs.data?.[id];
+  const rows = all.filter((p) => (!kind || kindGroup(p.kind) === kind) && (!onlyNeeded || (fleetOf(p.package_id)?.needed ?? 0) > 0));
+  const num = (id: string, f: (x: PackageFleet) => number) => (needs.data ? (fleetOf(id) ? f(fleetOf(id)!) : 0) : undefined);
 
   const select = (id: string | null) =>
-    navigate({ pathname: id ? `/catalog/${enc(id)}` : "/catalog", search: sp.toString() ? `?${sp}` : "" });
+    navigate({ pathname: paths.catalog(id), search: sp.toString() ? `?${sp}` : "" });
 
   return (
     <>
       <PageHeader title="Catalog" sub="Packages extracted from validated bundles. Nothing is deployable until approved.">
-        <label className="inline-field">
-          State
-          <select value={state} onChange={(e) => setSp(e.target.value ? { state: e.target.value } : {})}>
-            <option value="">All</option>
-            {STATES.map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
-        </label>
+        <div className="cat-filters">
+          <label className="inline-field">
+            State
+            <select value={state} onChange={(e) => setParam("state", e.target.value)}>
+              <option value="">All</option>
+              {STATES.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </label>
+          <label className="check" title="Only packages that at least one endpoint still needs">
+            <input type="checkbox" checked={onlyNeeded} onChange={(e) => setParam("needed", e.target.checked ? "1" : "")} /> needed only
+          </label>
+        </div>
       </PageHeader>
+      <div className="chips">
+        {KIND_FILTERS.map((k) => (
+          <button key={k.value} className={`chip ${kind === k.value ? "chip-on" : ""}`} onClick={() => setParam("kind", k.value)}>
+            {k.label} <b>{list.data ? kindCount(k.value) : "…"}</b>
+          </button>
+        ))}
+      </div>
       <ErrorBanner error={list.error} />
+      <ErrorBanner error={needs.error ? `Fleet status: ${needs.error}` : null} />
       <div className={packageId ? "split" : ""}>
         <div className="split-main">
-          {list.data && list.data.length === 0 && <Empty>No packages{state ? ` in state “${state}”` : ""}.</Empty>}
-          {list.data && list.data.length > 0 && (
+          {list.data && all.length === 0 && !state && (
+            <Empty>
+              The catalog is empty. Packages arrive in signed bundles: check <Link to={paths.transfers}>Transfers</Link> (what the
+              acquisition zone fetched and what came through the transfer).
+            </Empty>
+          )}
+          {list.data && (all.length > 0 || !!state) && rows.length === 0 && (
+            <Empty>No packages match{state ? ` state “${state}”` : ""}{kind ? ` · ${kind}` : ""}{onlyNeeded ? " · needed" : ""}.</Empty>
+          )}
+          {rows.length > 0 && (
             <table className="table">
               <thead>
                 <tr>
-                  <th>Title</th><th>KB / Product</th><th>Severity</th><th>Kind</th><th>Size</th><th>State</th><th title="Endpoints whose inventory shows they still need this patch">Needed by</th><th>Created</th>
+                  <th>Title</th><th>KB / Product</th><th>Severity</th><th>Kind</th>{!packageId && <th>Size</th>}<th>State</th>
+                  <th className="num" title="Endpoints whose inventory shows they still need this patch">Needed</th>
+                  <th className="num" title="Inventory already shows it (or a newer version / superseding KB)">Up to date</th>
+                  <th className="num" title="Targets in an active or paused deployment that are not finished">Deploying</th>
+                  <th className="num" title="Installed by offpatch and confirmed by inventory">Verified</th>
+                  <th className="num" title="Failed or lost after install">Failed</th>
+                  {!packageId && <th>Created</th>}
                 </tr>
               </thead>
               <tbody>
-                {list.data.map((p) => (
-                  <tr key={p.package_id} className={`clickable ${packageId === p.package_id ? "selected" : ""}`}
-                      onClick={() => select(p.package_id)}>
+                {rows.map((p) => (
+                  <tr key={p.package_id} {...expandRowProps(packageId === p.package_id, () => select(p.package_id))}>
                     <td>
                       <div className="cell-title">{p.title || p.package_id}</div>
                       <div className="cell-sub">
@@ -58,15 +112,26 @@ export default function Catalog() {
                     <td><Mono>{p.kb || p.product_code || "—"}</Mono></td>
                     <td><Severity s={p.severity} /></td>
                     <td><span className="tag">{p.kind}</span></td>
-                    <td className="nowrap">{fmtBytes(p.size)}</td>
+                    {!packageId && <td className="nowrap">{fmtBytes(p.size)}</td>}
                     <td>
                       <Pill state={p.state} />
                       {p.state === "quarantined" && (p.approvals_required ?? 0) > 1 && (
                         <div className="cell-sub">{(p.approvals ?? []).length} of {p.approvals_required} approvals</div>
                       )}
                     </td>
-                    <td className="num">{needs.data ? (needs.data[p.package_id]?.needed ? <b className="text-amber">{needs.data[p.package_id].needed}</b> : <span className="muted">0</span>) : "…"}</td>
-                    <td><Time value={p.created_at} hideRel /></td>
+                    <td className="num"><FleetNum n={num(p.package_id, (f) => f.needed)} tone="amber" /></td>
+                    <td className="num"><FleetNum n={num(p.package_id, (f) => f.up_to_date)} /></td>
+                    <td className="num">
+                      {fleetOf(p.package_id)?.active_deployment_id ? (
+                        <Link to={`/deployments/${enc(fleetOf(p.package_id)!.active_deployment_id)}`} onClick={(e) => e.stopPropagation()}
+                              title="Open the active deployment">
+                          <FleetNum n={num(p.package_id, (f) => f.deploying)} tone="blue" />
+                        </Link>
+                      ) : <FleetNum n={num(p.package_id, (f) => f.deploying)} tone="blue" />}
+                    </td>
+                    <td className="num"><FleetNum n={num(p.package_id, (f) => f.verified)} tone="green" /></td>
+                    <td className="num"><FleetNum n={num(p.package_id, (f) => f.failed)} tone="red" /></td>
+                    {!packageId && <td><Time value={p.created_at} hideRel /></td>}
                   </tr>
                 ))}
               </tbody>
@@ -89,15 +154,16 @@ type Action = "approve" | "reject" | "revoke";
 
 function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => void; onChanged: () => void }) {
   const { data: p, error, setData } = useLoad(() => api.get<Package>(`/api/packages/${enc(id)}`), [id]);
-  const needs = useLoad(() => api.get<Record<string, Need>>("/api/packages-needs"), [id]);
+  const needs = useLoad(fetchFleet, [id], 60000);
+  const policy = useLoad(fetchPolicy, []);
   const need = needs.data?.[id];
-  const [deploying, setDeploying] = useState(false);
-  const [deployErr, setDeployErr] = useState<string | null>(null);
   const canApprove = useCan("approver");
   const canDeploy = useCan("operator");
   const me = useMe();
   const [action, setAction] = useState<Action | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [justApproved, setJustApproved] = useState(false);
+  const [patching, setPatching] = useState(false);
   const navigate = useNavigate();
 
   const run = async (a: Action, reason: string) => {
@@ -106,13 +172,15 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
     setNotice(a === "approve" && updated.state === "quarantined"
       ? `Recorded; needs another approver (${(updated.approvals ?? []).length} of ${updated.approvals_required || "?"} approvals).`
       : null);
+    setJustApproved(a === "approve" && updated.state === "approved");
+    void needs.reload();
     onChanged();
   };
 
   const approvals = p?.approvals ?? [];
   const approvalsRequired = p?.approvals_required ?? 0;
-  // The server records approvers as "user:<name>".
-  const alreadyApproved = !!me && approvals.some((a) => a.by === me.user || a.by === `user:${me.user}`);
+  const alreadyApproved = approvedBy(p ?? undefined, me);
+  const sod = !!policy.data?.separation_of_duties;
 
   return (
     <aside className="panel">
@@ -138,41 +206,60 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
                 <button className="btn btn-danger" onClick={() => setAction("reject")}>Reject…</button>
               </>
             )}
-            {p.state === "approved" && canDeploy && need && need.needed > 0 && (
-              <button className="btn btn-primary" disabled={deploying} title={need.hostnames.join(", ")}
-                onClick={async () => {
-                  setDeploying(true);
-                  try {
-                    const d = await deployToEndpoints(p.package_id, p.title, need.endpoint_ids.slice(0, 500), `${need.needed} endpoint${need.needed === 1 ? "" : "s"} that need it`);
-                    navigate(`/deployments/${enc(d.deployment_id)}`);
-                  } catch (e) {
-                    setDeployErr(errMsg(e));
-                    setDeploying(false);
-                  }
-                }}>
-                Deploy to the {need.needed} endpoint{need.needed === 1 ? "" : "s"} that need it
-              </button>
-            )}
             {p.state === "approved" && canDeploy && (
-              <button className="btn btn-primary" onClick={() => navigate(`/deployments/new?package_id=${enc(p.package_id)}`)}>
-                Deploy…
+              <button className="btn btn-primary" onClick={() => setPatching(true)}
+                      title="Guided deployment: Standard (test machines first, then all machines), Emergency, or the full form">
+                Patch this…
               </button>
             )}
             {(p.state === "approved" || p.state === "revoked") && canDeploy && (p.rollback_unsupported
               ? <button className="btn" disabled title={p.rollback_unsupported}>Rollback not supported</button>
-              : <button className="btn btn-danger-ghost" title="Agents uninstall this package, ring by ring"
+              : <button className="btn btn-danger-ghost" title="Agents uninstall this package, stage by stage"
                   onClick={() => navigate(`/deployments/new?operation=rollback&package_id=${enc(p.package_id)}`)}>Roll back…</button>)}
             {p.state === "approved" && canApprove && (
               <button className="btn btn-danger" onClick={() => setAction("revoke")}>Revoke…</button>
             )}
           </div>
           {p.superseded_by && (
-            <div className="banner banner-warn">Superseded by <Link to={`/catalog/${enc(p.superseded_by)}`}><Mono>{p.superseded_by}</Mono></Link>; prefer deploying the newer package.</div>
+            <div className="banner banner-warn">Superseded by <Link to={paths.catalog(p.superseded_by)}><Mono>{p.superseded_by}</Mono></Link>; prefer deploying the newer package.</div>
           )}
           {p.state === "quarantined" && !canApprove && (
             <div className="hint">Approval requires the approver role.</div>
           )}
+          {p.state === "quarantined" && canApprove && sod && !alreadyApproved && (
+            <div className="hint">Separation of duties is on: if you approve this package, another operator must deploy it.</div>
+          )}
           {notice && <div className="banner banner-info">{notice}</div>}
+          {justApproved && p.state === "approved" && (
+            <div className="banner banner-ok next-step">
+              <span><b>Approved.</b> {need && <><b>{need.needed}</b> endpoint{need.needed === 1 ? "" : "s"} need it.</>}</span>
+              {sod ? (
+                <span>Separation of duties is on: hand it to an operator. <CopyBox value={`${window.location.origin}${paths.catalog(p.package_id)}`} /></span>
+              ) : canDeploy ? (
+                <button className="btn btn-sm btn-primary" onClick={() => setPatching(true)}>Patch this…</button>
+              ) : (
+                <span>Hand off to an operator to deploy it.</span>
+              )}
+            </div>
+          )}
+          <h3>Fleet</h3>
+          {need ? (
+            <>
+              <div className="fleet-grid">
+                {([["needs it", need.needed, "amber"], ["up to date", need.up_to_date, ""], ["not installed", need.not_installed, ""],
+                   ["deploying", need.deploying, "blue"], ["verified", need.verified, "green"], ["failed", need.failed, "red"]] as [string, number, string][]).map(([l, n, t]) => (
+                  <div key={l} className="fleet-cell"><div className={`n ${n && t ? `text-${t}` : ""}`}>{n ?? 0}</div><div className="l">{l}</div></div>
+                ))}
+              </div>
+              {(need.exception ?? 0) > 0 && <div className="hint">{need.exception} active exception{need.exception === 1 ? "" : "s"}.</div>}
+              {need.active_deployment_id && (
+                <div className="hint">Deploying in <Link to={`/deployments/${enc(need.active_deployment_id)}`}><Mono>{need.active_deployment_id}</Mono></Link>.</div>
+              )}
+            </>
+          ) : (
+            <div className="muted small">{needs.error ? `Fleet status unavailable: ${needs.error}` : needs.data ? <FleetLine fleet={null} /> : "…"}</div>
+          )}
+          <LifecycleTimeline pkg={p} fleet={need} />
           {(approvalsRequired > 1 || approvals.length > 0) && (
             <>
               <h3>Approvals · {approvals.length} of {approvalsRequired || 1}</h3>
@@ -192,7 +279,6 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
             </>
           )}
           <h3>Package</h3>
-          <ErrorBanner error={deployErr} />
           <KV rows={[
             ["Needed by", need ? (need.needed ? <><b>{need.needed}</b> endpoint{need.needed === 1 ? "" : "s"}: {need.hostnames.slice(0, 20).join(", ")}{need.hostnames.length > 20 ? " …" : ""}</> : "no endpoint needs it (up to date, not installed, or not applicable)") : "…"],
             ["Vendor", p.vendor],
@@ -205,9 +291,9 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
             ["Severity", <Severity s={p.severity} />],
             ["Release date", p.release_date],
             ["Supersedes", (p.supersedes ?? []).length ? (p.supersedes.map((s) => <Mono key={s}>{s}</Mono>)) : ""],
-            ["Superseded by", p.superseded_by ? <Link to={`/catalog/${enc(p.superseded_by)}`}><Mono>{p.superseded_by}</Mono></Link> : ""],
+            ["Superseded by", p.superseded_by ? <Link to={paths.catalog(p.superseded_by)}><Mono>{p.superseded_by}</Mono></Link> : ""],
             ["Prerequisites", (p.prerequisites ?? []).length ? p.prerequisites.map((s) => <Mono key={s}>{s}</Mono>) : ""],
-            ["Bundle", <Link to="/intake"><Mono>{p.bundle_id}</Mono></Link>],
+            ["Bundle", <Link to={paths.transfers}><Mono>{p.bundle_id}</Mono></Link>],
           ]} />
           <h3>Applicability</h3>
           <KV rows={[
@@ -239,7 +325,7 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
             ["Created", <Time value={p.created_at} />],
           ]} />
           <div className="panel-foot">
-            <Link to={`/audit?package_id=${enc(p.package_id)}`}>Audit trail for this package →</Link>
+            <Link to={paths.audit({ package_id: p.package_id })}>Audit trail for this package →</Link>
             <span className="muted small"> sha {shortHash(p.sha256)}</span>
           </div>
         </>
@@ -264,6 +350,9 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
           onClose={() => setAction(null)}
           onSubmit={(r) => run(action, r)}
         />
+      )}
+      {patching && p && (
+        <PatchThis packageId={p.package_id} onClose={() => setPatching(false)} onChanged={(u) => { setData(u); onChanged(); }} />
       )}
     </aside>
   );
