@@ -120,6 +120,10 @@ export type AgentSetup = {
   agent_dist_dir: string;
   // v1.1
   ca_certificate: string; // PEM; "" in lab mode
+  ca_sha256?: string; // upper-case hex SHA-256 of the CA certificate (DER)
+  root_public_key?: string; // PEM; "" when no root key is configured
+  windows_bootstrap?: boolean; // pmagent.exe staged and CA served in the TLS chain
+  server_cert_hosts?: string[]; // DNS names / IPs in the server certificate
 };
 
 // ---- v1.1: auth & users (B2, C8) ----

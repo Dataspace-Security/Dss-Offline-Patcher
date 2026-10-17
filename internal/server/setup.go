@@ -37,11 +37,12 @@ func (s *Server) distDir() string {
 	return d
 }
 
-func (s *Server) agentSetup(w http.ResponseWriter, r *http.Request) {
+// setupKeys returns the bundle keys agents must pin and the root public key
+// PEM ("" when no root key is configured).
+func (s *Server) setupKeys(r *http.Request) ([]setupKey, string, error) {
 	icfg, err := s.cfg.IntakeConfig()
 	if err != nil {
-		s.fail(w, err)
-		return
+		return nil, "", err
 	}
 	keys := []setupKey{}
 	// After a key rotation the latest verified trust document is authoritative.
@@ -60,7 +61,19 @@ func (s *Server) agentSetup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	sort.Slice(keys, func(i, j int) bool { return keys[i].KeyID < keys[j].KeyID })
+	root := ""
+	if icfg.RootPub != nil {
+		root = string(manifest.EncodePublic(icfg.RootPub))
+	}
+	return keys, root, nil
+}
 
+func (s *Server) agentSetup(w http.ResponseWriter, r *http.Request) {
+	keys, root, err := s.setupKeys(r)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
 	files := []setupFile{}
 	if entries, err := os.ReadDir(s.distDir()); err == nil {
 		for _, e := range entries {
@@ -80,6 +93,10 @@ func (s *Server) agentSetup(w http.ResponseWriter, r *http.Request) {
 		"agent_files":              files,
 		"agent_dist_dir":           s.distDir(),
 		"ca_certificate":           caPEM(s),
+		"ca_sha256":                caFingerprint(s),
+		"root_public_key":          root,
+		"windows_bootstrap":        agentDistHas(s, bootstrapExe) && s.caInChain,
+		"server_cert_hosts":        s.certHosts,
 	})
 }
 

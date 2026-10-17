@@ -118,3 +118,12 @@ func fillNetwork(h *store.Hardware) {
 		}
 	}
 }
+
+// windowsProductName corrects the registry ProductName, which still reads
+// "Windows 10 …" on Windows 11 (first Windows 11 build: 22000).
+func windowsProductName(product string, build int) string {
+	if build >= 22000 && strings.HasPrefix(product, "Windows 10") {
+		return "Windows 11" + strings.TrimPrefix(product, "Windows 10")
+	}
+	return product
+}

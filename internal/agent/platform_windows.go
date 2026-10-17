@@ -56,7 +56,7 @@ func (w *Windows) Facts() (Facts, error) {
 		return Facts{}, fmt.Errorf("facts: %w", err)
 	}
 	host, _ := os.Hostname()
-	return Facts{Hostname: host, OS: "windows", OSVersion: fmt.Sprintf("%s %s (%d.%d)", r.Product, r.Display, r.Build, r.UBR), Build: r.Build, Arch: osArch(), Edition: r.Edition}, nil
+	return Facts{Hostname: host, OS: "windows", OSVersion: fmt.Sprintf("%s %s (%d.%d)", windowsProductName(r.Product, r.Build), r.Display, r.Build, r.UBR), Build: r.Build, Arch: osArch(), Edition: r.Edition}, nil
 }
 
 func osArch() string {

@@ -428,3 +428,8 @@ ul.plain li { padding: 2px 0; }
 /* Endpoint hardware: storage bars */
 .disk-row { margin: 8px 0 12px; }
 .disk-label { font-size: 13px; }
+
+/* One-command agent install */
+.setup-quick { border: 1px solid var(--border, #d0d7de); border-radius: 8px; padding: 12px 14px; margin: 8px 0 14px; }
+.setup-quick h3 { margin: 0 0 6px; }
+.setup-quick .codeblock pre { white-space: pre-wrap; word-break: break-all; }

@@ -12,23 +12,24 @@ Product workflow: [docs/00-product-workflow.md](docs/00-product-workflow.md) · 
 | `pmserver` | Isolated management | Intake → quarantine → validation → catalog → approval → immutable repository → staged deployments → verification → hash-chained audit, plus the React console at `/` |
 | `pmagent` | Endpoint | Windows (`.msu` / `.msi`), Linux (`.deb` / `.rpm`) and macOS (`.pkg`). Enrolls with a CSR and gets an mTLS certificate that renews automatically. Re-verifies signatures and hashes. Respects maintenance windows, bandwidth limits and reboot policy. Runs health checks and signed self-upgrades. Runs as a Windows service, systemd unit or launchd daemon. `-platform sim` simulates a Windows endpoint for demos. |
 
-## One-command install on Ubuntu
+## Install: one command per machine
 
-On Ubuntu 22.04 or 24.04 (amd64 or arm64), from the repository root:
+**1. Server (Ubuntu 22.04 / 24.04 / 26.04, amd64 or arm64).** Build the release once (`make dist`, needs Go and Node), check the tarball against `offpatch-<version>.SHA256SUMS`, copy it to the server and run:
 
 ```bash
-sudo ./install-ubuntu.sh
+tar xzf offpatch-<version>-linux-amd64.tar.gz && cd offpatch-<version>-linux-amd64 && sudo ./install-ubuntu.sh --hosts pm.corp.internal
 ```
 
-This installs Go (SHA-256 verified) if needed and builds everything. It then sets up an all-in-one lab:
+Nothing is downloaded or compiled, so this works in an offline zone. It sets up:
 
 - the management server as a systemd service with **TLS + mTLS** (internal CA), a break-glass admin token and audit export
 - the daily `pmctl auto` acquisition timer (07:00)
-- this machine enrolled as a managed endpoint
 
-It prints the console URL and where to find the admin token. It is safe to re-run: existing keys, certificates, token and agent identity are kept.
+`--hosts` lists the extra DNS names / IPs endpoints use to reach the server (they go into its certificate). It prints the console URL and where to find the admin token. Re-running it is also how you upgrade: keys, certificates, token and data are kept. Run from a repository checkout instead, it builds from source and installs Go (SHA-256 verified) if needed.
 
-For a split production setup, install each role on its own machine: `--role server`, `--role acquisition`, or `--role agent --server … --token … --ca … --pubkey …`. Other commands: `--status`, `--uninstall` (`--purge` also deletes keys and data), `--insecure-lab` (plain HTTP). Tested on Ubuntu 24.04 with systemd and without it (containers).
+**2. Windows endpoints.** In the console, **Endpoints → Create enrollment token** (use *max uses* for several machines) and paste the one-line command it shows into **Windows PowerShell as Administrator** on each endpoint. The command pins the server's CA by SHA-256 fingerprint, downloads and verifies `pmagent.exe`, enrolls the machine and starts the `offpatch-agent` service. Re-running it with a new token repairs the install and keeps the enrollment; a machine enrolled with another server is re-enrolled.
+
+Other options: `--role server`, `--role acquisition` or `--role agent --server … --token … --ca … --pubkey …` for split setups; `--with-agent` also enrolls the Ubuntu machine itself; `--status`; `--uninstall` (`--purge` also deletes keys and data); `--insecure-lab` (plain HTTP).
 
 ## Quick start (single machine, simulated endpoints)
 

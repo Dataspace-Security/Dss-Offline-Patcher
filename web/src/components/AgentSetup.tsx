@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
+import { Link } from "react-router-dom";
 import { api, errMsg, saveBlob } from "../api";
 import type { AgentSetup } from "../types";
 import { fmtBytes, useLoad } from "../util";
@@ -32,6 +33,44 @@ export function CodeBlock({ code, lang }: { code: string; lang?: string }) {
   );
 }
 
+/** Shows the step-by-step guide directly, or folded away when a quicker path exists. */
+function ManualWrap({ collapsed, children }: { collapsed: boolean; children: ReactNode }) {
+  if (!collapsed) return <>{children}</>;
+  return (
+    <details className="setup-more">
+      <summary>Manual install (step by step)</summary>
+      {children}
+    </details>
+  );
+}
+
+/**
+ * One line for an elevated Windows PowerShell. It trusts the server only if
+ * the certificate chain is valid apart from the (not yet trusted) root, the
+ * host name matches, and the root is exactly this server's CA (SHA-256 pin).
+ * It then runs the installer the server generates for this enrollment token.
+ *
+ * The check is compiled C# (Add-Type): Windows PowerShell 5.1 cannot run a
+ * script-block certificate callback on the TLS thread ("no Runspace available").
+ */
+const PIN_CSHARP =
+  "using System;using System.Net;using System.Net.Security;using System.Security.Cryptography;using System.Security.Cryptography.X509Certificates;" +
+  "public static class OffpatchPin{public static void Install(string pin){" +
+  "ServicePointManager.SecurityProtocol=SecurityProtocolType.Tls12;" +
+  "ServicePointManager.ServerCertificateValidationCallback=delegate(object s,X509Certificate c,X509Chain ch,SslPolicyErrors e){" +
+  "if((e&(SslPolicyErrors.RemoteCertificateNotAvailable|SslPolicyErrors.RemoteCertificateNameMismatch))!=0)return false;" +
+  "foreach(X509ChainStatus st in ch.ChainStatus){X509ChainStatusFlags f=st.Status;" +
+  "if(f!=X509ChainStatusFlags.NoError&&f!=X509ChainStatusFlags.UntrustedRoot&&f!=X509ChainStatusFlags.RevocationStatusUnknown&&f!=X509ChainStatusFlags.OfflineRevocation)return false;}" +
+  "X509Certificate2 root=ch.ChainElements[ch.ChainElements.Count-1].Certificate;" +
+  "using(SHA256 h=SHA256.Create()){return BitConverter.ToString(h.ComputeHash(root.RawData)).Replace(\"-\",\"\")==pin;}};}}";
+
+export function windowsOneLiner(url: string, token: string, caSha256: string): string {
+  return (
+    `$t='${token}'; Add-Type -TypeDefinition '${PIN_CSHARP}'; [OffpatchPin]::Install('${caSha256.toUpperCase()}'); ` +
+    `iex (irm '${url}/api/agent-setup/bootstrap/windows.ps1' -Headers @{'X-Enrollment-Token'=$t})`
+  );
+}
+
 /**
  * Step-by-step agent installation, with the server URL, pinned signing
  * key(s) and (optionally) a freshly created enrollment token filled in.
@@ -60,6 +99,9 @@ export function AgentSetupGuide({ token, groups, site }: { token?: string; group
   const isLocal = LOCAL_HOSTS.includes(host);
   const isHttp = serverURL.trim().startsWith("http://");
   const url = serverURL.trim().replace(/\/$/, "");
+  const certHosts = data?.server_cert_hosts ?? [];
+  const hostInCert = certHosts.length === 0 || certHosts.includes(host.replace(/^\[|\]$/g, ""));
+  const canOneLiner = hasCA && !isHttp && urlValid && hostInCert && !!data?.windows_bootstrap && !!data?.ca_sha256;
 
   const winCmds = useMemo(() => {
     const pub = keys.map((_, i) => `C:\\offpatch\\${keyFile(i)}`).join(",") || "C:\\offpatch\\bundle.pub";
@@ -165,6 +207,40 @@ Remove-Item -Recurse -Force C:\\ProgramData\\offpatch`,
         </div>
       )}
 
+      {platform === "windows" && canOneLiner && (
+        <div className="setup-quick">
+          <h3>One-command install</h3>
+          <div className="hint">
+            On the endpoint, open <b>Windows PowerShell as Administrator</b> (not PowerShell 7) and paste this line. It
+            checks the server against this CA fingerprint, downloads and verifies <Mono>pmagent.exe</Mono>, enrolls the
+            computer and starts the <Mono>offpatch-agent</Mono> service. To repair or reinstall later, run it again with a new
+            token; the existing enrollment is kept. Routine agent upgrades go through signed agent packages.
+          </div>
+          {token ? (
+            <CodeBlock lang="PowerShell (Administrator)" code={windowsOneLiner(url, tok, data?.ca_sha256 ?? "")} />
+          ) : (
+            <div className="banner banner-info">
+              The command contains an enrollment token. <Link to="/endpoints">Endpoints → Create enrollment token</Link> shows
+              it ready to paste (set <i>max uses</i> to enroll several machines with one command).
+            </div>
+          )}
+          <div className="hint">CA SHA-256 <Mono>{data?.ca_sha256}</Mono></div>
+        </div>
+      )}
+      {platform === "windows" && hasCA && urlValid && !hostInCert && (
+        <div className="banner banner-warn">
+          <b>{host}</b> is not in this server's certificate ({certHosts.join(", ")}), so endpoints would refuse the connection.
+          Use one of those addresses, or reissue the certificate with <Mono>pmserver reissue-server-cert -hosts …</Mono>.
+        </div>
+      )}
+      {platform === "windows" && hasCA && !data?.windows_bootstrap && data && (
+        <div className="banner banner-info">
+          One-command install is unavailable: stage <Mono>pmagent.exe</Mono> in <Mono>{data.agent_dist_dir}</Mono>, and serve a
+          certificate issued by this server's CA (<Mono>pki_dir</Mono>).
+        </div>
+      )}
+
+      <ManualWrap collapsed={platform === "windows" && canOneLiner}>
       <ol className="steps">
         <li>
           <h3>Get the files</h3>
@@ -247,6 +323,7 @@ Remove-Item -Recurse -Force C:\\ProgramData\\offpatch`,
           </div>
         </li>
       </ol>
+      </ManualWrap>
 
       {platform === "windows" && (
         <details className="setup-more">

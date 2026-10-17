@@ -1,4 +1,4 @@
-.PHONY: all ui build windows test demo clean
+.PHONY: all ui build windows test demo dist clean
 
 all: ui build
 
@@ -22,6 +22,10 @@ test:
 
 demo: build
 	./scripts/demo.sh
+
+# One-command install tarballs: dist/offpatch-<version>-linux-{amd64,arm64}.tar.gz
+dist: ui
+	./scripts/dist.sh
 
 clean:
 	rm -rf bin demo

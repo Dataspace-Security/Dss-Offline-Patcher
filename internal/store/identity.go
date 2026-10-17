@@ -78,6 +78,24 @@ func (s *Store) Enroll(ctx context.Context, r EnrollRequest, issue CertIssuer) (
 
 var errEnrollDenied = errors.New("enroll denied")
 
+// EnrollmentTokenUsable reports whether tok exists, has not expired and has
+// uses left. It does not consume a use; Enroll does that.
+func (s *Store) EnrollmentTokenUsable(ctx context.Context, tok string) bool {
+	if !strings.HasPrefix(tok, "enr_") {
+		return false
+	}
+	var exp, used string
+	var uses, maxUses int
+	err := s.db.QueryRowContext(ctx, `SELECT expires_at, used_at, uses, max_uses FROM enrollment_tokens WHERE token_hash=?`, HashSecret(tok)).Scan(&exp, &used, &uses, &maxUses)
+	if err != nil {
+		return false
+	}
+	if maxUses < 1 {
+		maxUses = 1
+	}
+	return uses < maxUses && !(maxUses == 1 && used != "") && !s.Now().After(parseTime(exp))
+}
+
 // EndpointIDBySecret authenticates an agent in lab (HTTP) mode.
 func (s *Store) EndpointIDBySecret(ctx context.Context, secret string) (string, error) {
 	var id string

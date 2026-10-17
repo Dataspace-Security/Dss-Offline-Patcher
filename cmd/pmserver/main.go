@@ -147,7 +147,9 @@ func run(cfgPath string, log *slog.Logger) error {
 		srv.Shutdown(sctx)
 	}()
 	log.Info("pmserver listening", "addr", cfg.Listen, "tls", cfg.TLSCert != "", "mtls_agents", cfg.PKIDir != "", "data", cfg.DataDir, "inbox", icfg.Inbox)
-	if cfg.TLSCert != "" {
+	if cfg.TLSCert != "" && len(srv.TLSConfig.Certificates) > 0 {
+		err = srv.ListenAndServeTLS("", "") // certificate chain already loaded in TLSConfig
+	} else if cfg.TLSCert != "" {
 		err = srv.ListenAndServeTLS(cfg.TLSCert, cfg.TLSKey)
 	} else {
 		log.Warn("insecure_http: TLS disabled and agents use bearer secrets — isolated lab only (docs/01-decisions.md D10)")

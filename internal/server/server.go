@@ -3,6 +3,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -15,6 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +35,11 @@ type Server struct {
 	th    store.Thresholds
 	ca    *pki.CA // nil in insecure_http lab mode
 	auth  *authState
+
+	// Set by TLSConfig before serving: whether the CA is sent in the chain
+	// (needed to pin it) and the names/IPs the server certificate covers.
+	caInChain bool
+	certHosts []string
 }
 
 func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger) (*Server, error) {
@@ -57,12 +64,43 @@ func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger
 // TLSConfig requests (but does not require) client certificates: browsers
 // using the console present none; agents must present one (enforced in
 // requireAgent).
+//
+// With the internal CA, the server certificate is served together with the CA
+// certificate, so a client can pin the CA by fingerprint before it trusts it
+// (the one-command endpoint install does this).
 func (s *Server) TLSConfig() *tls.Config {
 	pool := x509.NewCertPool()
-	if s.ca != nil {
-		pool.AddCert(s.ca.Cert)
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12, ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: pool}
+	if s.ca == nil {
+		return cfg
 	}
-	return &tls.Config{MinVersion: tls.VersionTLS12, ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: pool}
+	pool.AddCert(s.ca.Cert)
+	if s.cfg.TLSCert == "" {
+		return cfg
+	}
+	pair, err := tls.LoadX509KeyPair(s.cfg.TLSCert, s.cfg.TLSKey)
+	if err != nil {
+		s.log.Warn("could not load server certificate to add the CA to the chain", "err", err)
+		return cfg
+	}
+	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		s.log.Warn("could not parse server certificate", "err", err)
+		cfg.Certificates = []tls.Certificate{pair}
+		return cfg
+	}
+	s.certHosts = append([]string{}, leaf.DNSNames...)
+	for _, ip := range leaf.IPAddresses {
+		s.certHosts = append(s.certHosts, ip.String())
+	}
+	if leaf.CheckSignatureFrom(s.ca.Cert) == nil {
+		s.caInChain = true
+		if !slices.ContainsFunc(pair.Certificate[1:], func(c []byte) bool { return bytes.Equal(c, s.ca.Cert.Raw) }) {
+			pair.Certificate = append(pair.Certificate, s.ca.Cert.Raw)
+		}
+	}
+	cfg.Certificates = []tls.Certificate{pair}
+	return cfg
 }
 
 type principal struct {
@@ -127,6 +165,8 @@ func (s *Server) Handler() http.Handler {
 	admin("admin", "GET /api/users", s.listUsers)
 	admin("admin", "POST /api/users/{name}/{action}", s.userAction)
 
+	mux.HandleFunc("GET /api/agent-setup/bootstrap/windows.ps1", s.bootstrapWindows)
+	mux.HandleFunc("GET /api/agent-setup/bootstrap/files/{name}", s.bootstrapFile)
 	mux.HandleFunc("POST /api/agent/enroll", s.agentEnroll)
 	mux.Handle("POST /api/agent/checkin", s.requireAgent(s.agentCheckin))
 	mux.Handle("GET /api/agent/manifest/{id}", s.requireAgent(s.agentManifest))

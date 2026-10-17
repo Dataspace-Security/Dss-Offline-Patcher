@@ -113,12 +113,10 @@ func newEnvOpts(t *testing.T, tlsMode bool, extra string) *env {
 	e.hc = http.DefaultClient
 	if tlsMode {
 		e.srv = httptest.NewUnstartedServer(h.Handler())
-		e.srv.TLS = h.TLSConfig()
-		pair, err := tls.LoadX509KeyPair(cfg.TLSCert, cfg.TLSKey)
-		if err != nil {
-			t.Fatal(err)
+		e.srv.TLS = h.TLSConfig() // server certificate + CA chain, as pmserver serves it
+		if len(e.srv.TLS.Certificates) == 0 {
+			t.Fatal("TLSConfig did not load the server certificate")
 		}
-		e.srv.TLS.Certificates = []tls.Certificate{pair}
 		e.srv.StartTLS()
 		e.caFile = filepath.Join(dir, "pki", pki.CAFile)
 		pool := x509.NewCertPool()

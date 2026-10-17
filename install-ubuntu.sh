@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# offpatch — one-command setup for Ubuntu (22.04 / 24.04, amd64 or arm64).
+# offpatch — one-command setup for Ubuntu (22.04 / 24.04 / 26.04, amd64 or arm64).
 #
-#   sudo ./install-ubuntu.sh                       # all-in-one lab: server + acquisition + local agent
+#   sudo ./install-ubuntu.sh                       # server + acquisition on this machine (endpoints enroll separately)
 #   sudo ./install-ubuntu.sh --role server         # isolated-zone management server only
 #   sudo ./install-ubuntu.sh --role acquisition    # connected-zone downloader (pmctl auto) only
 #   sudo ./install-ubuntu.sh --role agent --server https://pm.example:8443 --token enr_... \
@@ -12,11 +12,12 @@
 # Options: --hosts "pm.corp.local,10.0.0.5"  extra names/IPs for the server TLS certificate
 #          --port 8443                        server port
 #          --insecure-lab                     plain HTTP (isolated lab only; NOT for production)
-#          --no-agent                         all-in-one without the local agent
+#          --with-agent                       also enroll this Linux machine as a managed endpoint
 #          --go-version 1.27.2                Go toolchain to install if needed
 #
-# Safe to re-run: existing keys, certificates, tokens and data are kept.
-# Run from the repository root (the folder containing this script).
+# Safe to re-run (also how you upgrade): existing keys, certificates, tokens and data are kept.
+# Run it from an unpacked release tarball (`make dist`: prebuilt, works offline) or from the
+# repository root (builds from source; downloads Go if needed).
 set -euo pipefail
 
 # ---------------------------------------------------------------- settings
@@ -24,7 +25,7 @@ ROLE="all"
 PORT=8443
 EXTRA_HOSTS=""
 INSECURE=0
-WITH_AGENT=1
+WITH_AGENT=0
 GO_VERSION="1.27.2"
 AGENT_SERVER="" AGENT_TOKEN="" AGENT_CA="" AGENT_PUB="" AGENT_ROOT=""
 UNINSTALL=0 PURGE=0 STATUS=0
@@ -52,7 +53,8 @@ while [ $# -gt 0 ]; do
     --port) PORT="$2"; shift ;;
     --hosts) EXTRA_HOSTS="$2"; shift ;;
     --insecure-lab) INSECURE=1 ;;
-    --no-agent) WITH_AGENT=0 ;;
+    --with-agent) WITH_AGENT=1 ;;
+    --no-agent) WITH_AGENT=0 ;;   # default; kept for older scripts
     --go-version) GO_VERSION="$2"; shift ;;
     --server) AGENT_SERVER="$2"; shift ;;
     --token) AGENT_TOKEN="$2"; shift ;;
@@ -117,17 +119,44 @@ case "$(uname -m)" in
   aarch64|arm64) GOARCH=arm64 ;;
   *) die "unsupported CPU architecture $(uname -m)" ;;
 esac
-[ -f "$SRC/go.mod" ] && [ -d "$SRC/cmd/pmserver" ] || die "run this script from the offpatch repository root"
-ok "${PRETTY_NAME:-Linux} ($GOARCH), systemd: $([ $HAVE_SYSTEMD = 1 ] && echo yes || echo 'no — processes will be started directly')"
-
-# ---------------------------------------------------------------- packages + Go
-step "Installing build prerequisites"
-export DEBIAN_FRONTEND=noninteractive
-if command -v apt-get >/dev/null; then
-  apt-get update -qq
-  apt-get install -y -qq ca-certificates curl tar >/dev/null
+# A release tarball (`make dist`) ships prebuilt binaries next to this script:
+# then nothing is downloaded or compiled, so it works in an offline zone.
+PREBUILT="$SRC/bin/linux-$GOARCH"
+if [ -f "$PREBUILT/pmserver" ] && [ -f "$PREBUILT/pmctl" ] && [ -f "$PREBUILT/pmagent" ]; then
+  MODE=prebuilt
+else
+  MODE=source
+  [ -f "$SRC/go.mod" ] && [ -d "$SRC/cmd/pmserver" ] || die "run this from the offpatch repository root or an unpacked release tarball"
 fi
-ok "curl, tar, CA certificates"
+ok "${PRETTY_NAME:-Linux} ($GOARCH), systemd: $([ $HAVE_SYSTEMD = 1 ] && echo yes || echo 'no — processes will be started directly'), install from: $MODE"
+
+need() { command -v "$1" >/dev/null; }
+if [ $MODE = source ] || ! need curl || ! need tar; then
+  step "Installing prerequisites"
+  export DEBIAN_FRONTEND=noninteractive
+  if need apt-get; then
+    apt-get update -qq
+    apt-get install -y -qq ca-certificates curl tar >/dev/null
+  fi
+  need curl && need tar || die "curl and tar are required"
+  ok "curl, tar, CA certificates"
+fi
+
+if [ $MODE = prebuilt ]; then
+  step "Installing prebuilt binaries"
+  VERSION=$(cat "$SRC/VERSION" 2>/dev/null || echo dev)
+  # Integrity of the unpacked files. Authenticity comes from checking the tarball
+  # against the published offpatch-<version>.SHA256SUMS before unpacking it.
+  [ -f "$SRC/SHA256SUMS" ] || die "SHA256SUMS missing from the release folder"
+  ( cd "$SRC" && sha256sum -c --quiet SHA256SUMS ) || die "release files failed their SHA-256 check (SHA256SUMS)"
+  ok "release checksums verified"
+  mkdir -p "$PREFIX/bin"
+  for b in pmserver pmctl pmagent; do install -m 0755 "$PREBUILT/$b" "$PREFIX/bin/$b"; done
+  ln -sf "$PREFIX/bin/pmserver" /usr/local/bin/pmserver
+  ln -sf "$PREFIX/bin/pmctl" /usr/local/bin/pmctl
+  ln -sf "$PREFIX/bin/pmagent" /usr/local/bin/pmagent
+  ok "pmserver, pmctl, pmagent → $PREFIX/bin (version $VERSION)"
+else
 
 need_go=1
 if command -v go >/dev/null; then
@@ -165,13 +194,14 @@ ln -sf "$PREFIX/bin/pmserver" /usr/local/bin/pmserver
 ln -sf "$PREFIX/bin/pmctl" /usr/local/bin/pmctl
 ln -sf "$PREFIX/bin/pmagent" /usr/local/bin/pmagent
 ok "pmserver, pmctl, pmagent → $PREFIX/bin (version $VERSION)"
+fi
 
 id "$SVC_USER" >/dev/null 2>&1 || useradd --system --home "$SRV_DATA" --shell /usr/sbin/nologin "$SVC_USER"
 install -d -m 0750 -o root -g "$SVC_USER" "$ETC"
 
 SCHEME=https; [ $INSECURE = 1 ] && SCHEME=http
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-HOSTS="$(hostname),localhost,127.0.0.1${IP:+,$IP}${EXTRA_HOSTS:+,$EXTRA_HOSTS}"
+HOSTS=$(printf '%s\n' "$(hostname)" localhost 127.0.0.1 "$IP" "$EXTRA_HOSTS" | tr ',' '\n' | awk 'NF && !seen[$0]++' | paste -sd, -)
 URL_LOCAL="$SCHEME://127.0.0.1:$PORT"
 URL_PUBLIC="$SCHEME://${IP:-$(hostname)}:$PORT"
 
@@ -186,8 +216,6 @@ if [ "$ROLE" = all ] || [ "$ROLE" = acquisition ] || [ "$ROLE" = server ]; then
     ok "keeping existing keys in $ETC/keys"
   fi
   chown root:"$SVC_USER" "$ETC/keys"/*; chmod 0640 "$ETC/keys"/*.key; chmod 0644 "$ETC/keys"/*.pub
-  # Only `pmctl trust` needs the root key; no service may read it.
-  chown root:root "$ETC/keys/root.key"; chmod 0600 "$ETC/keys/root.key"
   # Only `pmctl trust` needs the root key; no service may read it.
   chown root:root "$ETC/keys/root.key"; chmod 0600 "$ETC/keys/root.key"
   if [ "$ROLE" = server ]; then
@@ -272,11 +300,17 @@ EOF
   else
     ok "keeping existing $ETC/pmserver.json"
   fi
-  # Offer agent binaries for download in the console (Agent setup page).
-  ( cd "$SRC" && for t in windows/amd64:pmagent.exe linux/amd64:pmagent-linux-amd64 linux/arm64:pmagent-linux-arm64 darwin/arm64:pmagent-macos-arm64; do
-      os=${t%%/*}; rest=${t#*/}; arch=${rest%%:*}; name=${rest#*:}
-      GOOS=$os GOARCH=$arch $GO build -ldflags "-s -w" -o "$SRV_DATA/agent-dist/$name" ./cmd/pmagent || exit 1
-    done ) && ok "agent binaries for Windows, Linux and macOS staged for the console's Agent setup page"
+  # Offer agent binaries for download in the console (Agent setup page and the
+  # one-command Windows install).
+  if [ $MODE = prebuilt ]; then
+    cp -f "$SRC/bin/agent-dist/"* "$SRV_DATA/agent-dist/" || die "bin/agent-dist missing from the release folder"
+    ok "agent binaries staged for the console's Agent setup page"
+  else
+    ( cd "$SRC" && for t in windows/amd64:pmagent.exe linux/amd64:pmagent-linux-amd64 linux/arm64:pmagent-linux-arm64 darwin/arm64:pmagent-macos-arm64; do
+        os=${t%%/*}; rest=${t#*/}; arch=${rest%%:*}; name=${rest#*:}
+        GOOS=$os GOARCH=$arch $GO build -ldflags "-s -w -X offpatch/internal/agent.Version=0.1.0" -o "$SRV_DATA/agent-dist/$name" ./cmd/pmagent || exit 1
+      done ) && ok "agent binaries for Windows, Linux and macOS staged for the console's Agent setup page"
+  fi
   chown -R "$SVC_USER":"$SVC_USER" "$SRV_DATA"; chmod 0770 "$SRV_DATA/inbox"
   start_server
   [ $INSECURE = 0 ] && CURL_CA=(--cacert "$ETC/pki/ca.pem")
@@ -428,8 +462,9 @@ EOF
   [ $INSECURE = 0 ] && cat <<EOF
   TLS:            the console uses the internal CA $ETC/pki/ca.pem — import it into your browser /
                   OS trust store, or accept the certificate warning once for this lab.
-  Enroll others:  console → Endpoints → Create enrollment token (shows ready-to-copy commands),
-                  or on another Ubuntu box:
+  Windows:        console → Endpoints → Create enrollment token → paste the one-line command into
+                  an elevated Windows PowerShell on the endpoint.
+  Other Ubuntu:   from the same release folder:
                     sudo ./install-ubuntu.sh --role agent --server $URL_PUBLIC --token <enr_…> \\
                          --ca ca.pem --pubkey bundle.pub --root-pubkey root.pub
                   (copy ca.pem, bundle.pub, root.pub from $ETC/pki and $ETC/keys)
