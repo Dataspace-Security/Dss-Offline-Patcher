@@ -1008,6 +1008,7 @@ func (s *Store) PackageAssigned(ctx context.Context, endpointID, packageID strin
 // ("10.0.19045.5011" >= "10.0.19045.4894"; "3.0.13-1" >= "3.0.13"). Non-numeric
 // suffixes are compared as strings when numeric parts are equal.
 func VersionAtLeast(have, want string) bool {
+	have, want = strings.TrimPrefix(strings.TrimPrefix(have, "v"), "V"), strings.TrimPrefix(strings.TrimPrefix(want, "v"), "V")
 	split := func(v string) []string {
 		return strings.FieldsFunc(v, func(r rune) bool { return r == '.' || r == '-' || r == '+' || r == '~' || r == ':' })
 	}

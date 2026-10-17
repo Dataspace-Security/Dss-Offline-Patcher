@@ -165,7 +165,11 @@ package out of the next bundle, remove its entry from spec.json.
 2. **Third-party apps:** for each entry in `apps`, it reads the current version from the vendor feed (`version.url` with `json_path` or `regex`). If that version was not sent before, it downloads `download_url` (`{version}` is substituted) and verifies it. Two verification modes:
    - `sha256`: the vendor's checksum document (`url`, plus an optional `regex` or `json_path`; by default it finds the `<hash>  <file>` line). **Preferred.**
    - `authenticode_signer`: for vendors that publish no checksum. The file is accepted only if Windows reports a Valid Authenticode signature from that signer. Requires a Windows acquisition host.
-   An app without either is refused at config load; unverified downloads are never accepted. For `.msi` installers whose product code changes per version, set `product_code_from_msi: true` (Windows host), or give a fixed `product_code`.
+   - `pkg_signer`: for macOS `.pkg` installers with no published checksum. The file is accepted only if `pkgutil --check-signature` reports a valid, notarized Developer ID signature whose certificate contains this text. Include the Team ID, e.g. `Developer ID Installer: Google LLC (EQHXZ8M8AV)`. Requires a macOS acquisition host.
+
+   For `.pkg` files, pmctl reads the version **inside the installer** and labels the package with it, because vendor feeds can run ahead of a fixed download link. A mismatch is reported as a warning. Set `label_from_pkg: true` when the feed value is only a change trigger (a release tag or build number such as Office `16.114.26101123` or Brave `1.97.59`); the package then takes the app version from the installer without a warning.
+
+   An app without any of these is refused at config load; unverified downloads are never accepted. For `.msi` installers whose product code changes per version, set `product_code_from_msi: true` (Windows host), or give a fixed `product_code`.
 3. It builds **one** signed bundle from everything new, named after its bundle ID. It then **sends it automatically** through the configured adapter (`send.via`: `dropdir` or `command`) with a signed receipt, and appends the receipt to `send.log`.
 4. Packages are recorded as done in `work_dir/state.json` **only after a successful send**. Anything that failed (download, verification, build, send) is retried on the next run. Each run appends a JSON report to `work_dir/auto-log.jsonl`.
 

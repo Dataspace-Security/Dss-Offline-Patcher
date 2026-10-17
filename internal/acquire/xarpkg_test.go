@@ -43,18 +43,19 @@ func TestPkgVersion(t *testing.T) {
 	}
 }
 
-// The real Chrome installer downloaded by the demo, if present.
-func TestPkgVersionRealChrome(t *testing.T) {
-	p := "../../demo/acq/auto/downloads/GoogleChrome-156.0.8078.36.pkg"
-	if _, err := os.Stat(p); err != nil {
-		t.Skip("demo Chrome pkg not present")
-	}
-	v, err := PkgVersion(p, "com.google.Chrome")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("GoogleChrome.pkg labelled 156 really contains Chrome %s", v)
-	if v == "156.0.8078.36" {
-		t.Fatal("expected the mislabelled pkg to contain an older build")
+// Real vendor installers downloaded by the demo, if present: Edge (bzip2
+// metadata), Node.js (leading "v").
+func TestPkgVersionRealInstallers(t *testing.T) {
+	dl := "../../demo/acq/auto/downloads/"
+	for _, c := range []struct{ file, id, want string }{
+		{"MicrosoftEdge-155.0.4283.62.pkg", "com.microsoft.edgemac", "155.0.4283.62"},
+		{"node-v24.22.0.pkg", "org.nodejs.node.pkg", "24.22.0"},
+	} {
+		if _, err := os.Stat(dl + c.file); err != nil {
+			continue
+		}
+		if v, err := PkgVersion(dl+c.file, c.id); err != nil || v != c.want {
+			t.Errorf("%s: got %q %v, want %s", c.file, v, err, c.want)
+		}
 	}
 }

@@ -96,7 +96,11 @@ type autoApp struct {
 	// package whose Apple signature is valid (Developer ID, notarized) and
 	// whose signing certificate contains this text, ideally including the
 	// Team ID, e.g. "Developer ID Installer: Google LLC (EQHXZ8M8AV)".
-	PkgSigner          string `json:"pkg_signer"`
+	PkgSigner string `json:"pkg_signer"`
+	// LabelFromPkg: the feed version is only a change trigger (e.g. a release
+	// tag or build number); the package is always labelled with the app
+	// version inside the .pkg, without a mismatch warning.
+	LabelFromPkg       bool   `json:"label_from_pkg"`
 	ProductCode        string `json:"product_code"`          // msi: fixed product code
 	ProductCodeFromMSI bool   `json:"product_code_from_msi"` // msi: read it from the file (Windows host)
 	PackageName        string `json:"package_name"`          // deb/rpm/pkg
@@ -237,6 +241,8 @@ var (
 	nameRe  = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,40}$`)
 	sevRank = map[string]int{"low": 1, "moderate": 2, "important": 3, "critical": 4}
 	verRe   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`)
+	// pkgVerRe mirrors the manifest's version rule.
+	pkgVerRe = regexp.MustCompile(`^[0-9]+(\.[0-9]+){1,3}([-+][A-Za-z0-9.]+)?$`)
 )
 
 // acquireLock prevents overlapping scheduled runs; a lock older than 6h is
@@ -683,11 +689,15 @@ func fetchAppInner(ctx context.Context, hc *http.Client, a autoApp, downloads, s
 		switch {
 		case perr != nil:
 			autoWarn(a.Name + ": could not read the version inside the .pkg (" + perr.Error() + "); using the feed version " + ver)
-		case realV != ver && verRe.MatchString(realV):
-			autoWarn(fmt.Sprintf("%s: vendor feed says %s but the installer contains %s; labelled with the real version", a.Name, ver, realV))
+		case realV != ver && !pkgVerRe.MatchString(realV):
+			autoWarn(fmt.Sprintf("%s: the installer reports version %q, which is not a valid package version; using the feed version %s", a.Name, realV, ver))
+		case realV != ver:
+			if !a.LabelFromPkg {
+				autoWarn(fmt.Sprintf("%s: vendor feed says %s but the installer contains %s; labelled with the real version", a.Name, ver, realV))
+			}
 			st.FeedSeen[a.Name] = ver + "=" + realV
 			if a.FileName != "" {
-				newName := sub(a.FileName, realV)
+				newName := strings.ReplaceAll(sub(a.FileName, realV), "+", "_")
 				if newName != name {
 					if err := os.Rename(filepath.Join(downloads, name), filepath.Join(downloads, newName)); err == nil {
 						name = newName
@@ -757,8 +767,14 @@ func downloadVerified(ctx context.Context, hc *http.Client, rawURL, downloads, n
 	hold := filepath.Join(downloads, ".unverified")
 	os.MkdirAll(hold, 0o750)
 	p := filepath.Join(hold, name)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	resp, err := hc.Do(req)
+	// Large installers (Office is 1+ GB) outlive the client's short total
+	// timeout: allow up to 2 h per file, but abort if no data arrives for 2 min.
+	big := *hc
+	big.Timeout = 0
+	dctx, cancel := context.WithTimeout(ctx, 2*time.Hour)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(dctx, http.MethodGet, rawURL, nil)
+	resp, err := big.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -770,7 +786,7 @@ func downloadVerified(ctx context.Context, hc *http.Client, rawURL, downloads, n
 	if err != nil {
 		return "", err
 	}
-	_, err = io.Copy(f, io.LimitReader(resp.Body, 4<<30))
+	_, err = io.Copy(f, io.LimitReader(&stallReader{r: resp.Body, cancel: cancel, idle: 2 * time.Minute}, 4<<30))
 	f.Close()
 	if err != nil {
 		os.Remove(p)
@@ -894,4 +910,26 @@ func sendStatus(c *autoConfig, rep *autoReport) error {
 	}
 	rep.StatusSent = true
 	return nil
+}
+
+// stallReader cancels the download if no bytes arrive for idle.
+type stallReader struct {
+	r      io.Reader
+	cancel context.CancelFunc
+	idle   time.Duration
+	t      *time.Timer
+}
+
+func (s *stallReader) Read(p []byte) (int, error) {
+	if s.t == nil {
+		s.t = time.AfterFunc(s.idle, s.cancel)
+	}
+	n, err := s.r.Read(p)
+	if n > 0 {
+		s.t.Reset(s.idle)
+	}
+	if err != nil {
+		s.t.Stop()
+	}
+	return n, err
 }
