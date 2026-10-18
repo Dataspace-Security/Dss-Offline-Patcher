@@ -17,7 +17,7 @@ export function AcquisitionRequests({ data, error, onChanged }: {
   data: AcquisitionRequestRecord[] | null; error: string | null; onChanged?: () => void;
 }) {
   const [open, setOpen] = useState<string | null>(null);
-  const canRequest = useCan("operator");
+  const canRequest = useCan("user");
   const imp = useImportRequest(onChanged);
   // "Ask again" for one item that was not picked up / failed: a new request for just that item.
   const askAgain = (i: AcquisitionRequestItem, busyKey: string) =>

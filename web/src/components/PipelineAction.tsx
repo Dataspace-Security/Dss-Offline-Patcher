@@ -64,6 +64,8 @@ type Props = {
   requesting?: boolean;
   /** Any request is in flight (disables the button). */
   disabled?: boolean;
+  /** An offpatch agent version: only the super admin (vendor) approves and deploys it. */
+  agent?: boolean;
 };
 
 function RequestButton({ label, title, onRequest, requesting, disabled }:
@@ -79,12 +81,14 @@ function RequestButton({ label, title, onRequest, requesting, disabled }:
  * The one next action for an update, by where it stands in the pipeline:
  * not imported → Import (or "Can't import: why" / "Import failed: why · Try again");
  * rejected → state + Import again; revoked → cannot be imported again;
- * quarantined → Review & approve (approvers) or Awaiting approval;
+ * quarantined → Review & approve (Users and Admins) or Awaiting approval;
  * approved → Patch this…; deploying → the deployment.
  */
-export function PipelineAction({ link, requested, fleet, onPatch, onRequest, requesting, disabled }: Props) {
-  const canApprove = useCan("approver");
-  const canDeploy = useCan("operator");
+export function PipelineAction({ link, requested, fleet, onPatch, onRequest, requesting, disabled, agent = false }: Props) {
+  const isUser = useCan("user");
+  const isSuper = useCan("super_admin");
+  const canApprove = agent ? isSuper : isUser;
+  const canDeploy = agent ? isSuper : isUser;
   const canRequest = !!onRequest && canDeploy;
   const unsupported = requested?.status === "unsupported";
   const failed = requested?.status === "failed";

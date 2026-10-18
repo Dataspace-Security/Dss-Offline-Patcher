@@ -60,7 +60,7 @@ export function alertObjectLink(a: Pick<Alert, "object_type" | "object_id">): st
 }
 
 export default function Alerts() {
-  const canAck = useCan("operator");
+  const canAck = useCan("user");
   const refreshBadge = useRefreshAlerts();
   const [openOnly, setOpenOnly] = useState(true);
   const { data, error, reload } = useLoad(

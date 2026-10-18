@@ -2,16 +2,17 @@ import { useEffect, useState, type FormEvent } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api, ApiError, enc, errMsg } from "../api";
 import { paths } from "../paths";
-import { useCan } from "../auth";
+import { deploymentApprovalsRequired, needsApprovalsText, othersMustApprove, useCan } from "../auth";
+import { DeploymentStatePill } from "../components/DeploymentApproval";
 import { AlreadyRunning, runningDeploymentFrom } from "../components/PatchThis";
 import { TargetPreview, nothingToDo, type TargetSummary } from "../components/TargetPreview";
 import { STAGES_HINT, stageLabel } from "../components/deployLabels";
-import { CountsBar, Empty, ErrorBanner, Mono, PageHeader, Pill, Time, patchScore, scoreTone } from "../components/ui";
+import { CountsBar, Empty, ErrorBanner, Mono, PageHeader, Time, patchScore, scoreTone } from "../components/ui";
 import type { Deployment, DeploymentOperation, HealthCheck, NewDeployment, Package, RebootPolicy } from "../types";
 import { splitList, toRFC3339, useLoad } from "../util";
 import {
   autoName, decodeRings, fetchEndpoints, fetchFleet, fetchPolicy, humanDuration, localToUtcHHMM, policyDeadline,
-  REBOOT_VALUES, ringCounts, ringMembers, toLocalInput, utcToLocalHHMM,
+  REBOOT_VALUES, ringCounts, ringMembers, toLocalInput, utcToLocalHHMM, isAgentPackage,
 } from "../components/patchPlan";
 import "../patch.css";
 
@@ -32,8 +33,9 @@ function currentStageName(d: Deployment): string {
 }
 
 export function DeploymentList() {
-  const canCreate = useCan("operator");
+  const canCreate = useCan("user");
   const { data, error } = useLoad(() => api.get<Deployment[]>("/api/deployments"), [], 5000);
+  const policy = useLoad(fetchPolicy, []);
   const pkgs = useLoad(() => api.get<Package[]>("/api/packages"), []);
   const fleet = useLoad(fetchFleet, []);
   const title = (id: string) => pkgs.data?.find((p) => p.package_id === id)?.title;
@@ -73,7 +75,7 @@ export function DeploymentList() {
                 <td>
                   <Link to={paths.catalog(d.package_id)}>{title(d.package_id) ?? <Mono>{d.package_id}</Mono>}</Link>
                 </td>
-                <td><Pill state={d.state} /></td>
+                <td><DeploymentStatePill d={d} policy={policy.data} /></td>
                 <td className="nowrap">
                   {ringLabel(d)}
                   {currentStageName(d) && <div className="cell-sub">{currentStageName(d)}</div>}
@@ -147,7 +149,8 @@ function PackageOption({ p, needed, rollback }: { p: Package; needed?: number; r
 export function NewDeploymentPage() {
   const [sp] = useSearchParams();
   const navigate = useNavigate();
-  const canCreate = useCan("operator");
+  const canCreate = useCan("user");
+  const isSuper = useCan("super_admin");
   const pkgs = useLoad(() => api.get<Package[]>("/api/packages"), []);
   const [operation, setOperation] = useState<DeploymentOperation>(sp.get("operation") === "rollback" ? "rollback" : "install");
   const rollback = operation === "rollback";
@@ -196,7 +199,8 @@ export function NewDeploymentPage() {
   ].filter((x): x is string => !!x);
 
   // Rollbacks may also target revoked packages (removing a bad patch is often why it was revoked).
-  const approved = (pkgs.data ?? []).filter((p) => p.state === "approved" || (rollback && p.state === "revoked"));
+  // Agent versions are deployed (and rolled back) by the super admin only (Settings → Agent versions).
+  const approved = (pkgs.data ?? []).filter((p) => (p.state === "approved" || (rollback && p.state === "revoked")) && (isSuper || !isAgentPackage(p)));
   const selected = approved.find((p) => p.package_id === packageId);
   // Install: packages machines need first (most needed first); nobody-needs-it ones in their own group.
   const neededOf = (p: Package) => fleet.data?.[p.package_id]?.needed ?? 0;
@@ -298,7 +302,7 @@ export function NewDeploymentPage() {
     return (
       <>
         <PageHeader title="New deployment" />
-        <div className="banner banner-error">Creating deployments requires the operator role.</div>
+        <div className="banner banner-error">Only Users and Admins can create deployments.</div>
       </>
     );
   }
@@ -541,9 +545,15 @@ export function NewDeploymentPage() {
             {conflict && (
               <div className="small" style={{ marginTop: 4 }}>
                 The server refused this deployment. If <b>separation of duties</b> is enabled, someone who approved the
-                package cannot also deploy it — ask another operator to create the deployment.
+                package cannot also deploy it — ask another User to create the deployment.
               </div>
             )}
+          </div>
+        )}
+        {!runningId && (
+          <div className="banner banner-warn">
+            <b>{needsApprovalsText(deploymentApprovalsRequired(policy.data))}.</b> {othersMustApprove(deploymentApprovalsRequired(policy.data))}{" "}
+            Nothing is {rollback ? "removed" : "installed"} until then.
           </div>
         )}
         {runningId ? <AlreadyRunning deploymentId={runningId} /> : problems.length > 0 && (

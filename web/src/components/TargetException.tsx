@@ -88,11 +88,11 @@ export function RaiseExceptionModal({ target, deployment, onClose, onDone }: {
   );
 }
 
-/** Operators and viewers cannot create exceptions: give them text to send to an approver. */
+/** Users cannot create exceptions: give them text to send to an Admin. */
 export function AskApproverModal({ target, deployment, onClose }: { target: Target; deployment: Deployment; onClose: () => void }) {
   const link = `${window.location.origin}/deployments/${encodeURIComponent(deployment.deployment_id)}`;
   const text = [
-    "Exception request (offpatch)",
+    "Exception request (DSS Patcher)",
     `Endpoint: ${target.hostname || target.endpoint_id} (${target.endpoint_id})`,
     `Package: ${target.package_id}`,
     `Deployment: ${deployment.name || deployment.deployment_id} (${deployment.deployment_id})`,
@@ -111,13 +111,13 @@ export function AskApproverModal({ target, deployment, onClose }: { target: Targ
     }
   };
   return (
-    <Modal title="Ask an approver for an exception" onClose={onClose} wide footer={
+    <Modal title="Ask an Admin for an exception" onClose={onClose} wide footer={
       <>
         <button className="btn" onClick={onClose}>Close</button>
         <button className="btn btn-primary" onClick={() => void copy()}>{copied ? "Copied" : "Copy text"}</button>
       </>
     }>
-      <div className="modal-desc">Only approvers can create exceptions. Send this to an approver:</div>
+      <div className="modal-desc">Only Admins can create exceptions. Send this to an Admin:</div>
       <textarea className="mono copy-area" readOnly rows={8} value={text} onFocus={(e) => e.currentTarget.select()} />
     </Modal>
   );

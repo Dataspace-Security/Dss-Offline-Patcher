@@ -5,12 +5,12 @@ import { useCan } from "../auth";
 import { paths } from "../paths";
 
 export default function AgentSetupPage() {
-  const canEnroll = useCan("operator");
+  const canEnroll = useCan("user");
   return (
     <>
       <PageHeader
         title="Agent setup"
-        sub="Install the offpatch agent on an endpoint. It talks only to this server and has no internet or Windows Update fallback."
+        sub="Install the DSS Patcher agent on an endpoint. It talks only to this server and has no internet or Windows Update fallback."
       >
         {canEnroll && <Link className="btn btn-primary" to={`${paths.endpoints}?enroll=1`}>Create enrollment token</Link>}
       </PageHeader>

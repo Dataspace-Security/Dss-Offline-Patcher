@@ -1,82 +1,114 @@
 import { useState } from "react";
 import { api, enc } from "../api";
-import { useMe } from "../auth";
-import { Empty, ErrorBanner, PageHeader, Pill, ReasonModal, RelTime, Time } from "../components/ui";
+import { samePerson, useCan, useMe } from "../auth";
+import { Empty, ErrorBanner, PageHeader, Pill, ReasonModal, RelTime, RoleBadge } from "../components/ui";
+import {
+  assignableRoles, ChangeRoleModal, CreateUserModal, isLocalUser, ResetPasswordModal, TempPasswordModal, userId,
+} from "../components/UserDialogs";
 import type { User } from "../types";
-import { useLoad } from "../util";
+import { parseTime, useLoad } from "../util";
 
+type Dialog =
+  | { kind: "create" }
+  | { kind: "role"; user: User }
+  | { kind: "reset"; user: User }
+  | { kind: "disable" | "enable"; user: User }
+  | { kind: "temp"; email: string; password: string };
+
+function Status({ u }: { u: User }) {
+  if (u.disabled) {
+    return <><Pill state="failed" label="Disabled" />{u.disabled_reason && <div className="cell-sub">{u.disabled_reason}</div>}</>;
+  }
+  const locked = parseTime(u.locked_until);
+  if (locked && locked.getTime() > Date.now()) return <Pill state="pending_reboot" label="Locked (too many wrong passwords)" />;
+  if (u.must_change_password) return <Pill state="pending" label="Must change password" />;
+  return <Pill state="compliant" label="Active" />;
+}
+
+/** Settings → Users (Admins and the super admin). */
 export default function Users() {
   const me = useMe();
+  const isSuper = useCan("super_admin");
   const { data, error, reload } = useLoad(() => api.get<User[]>("/api/users"), [], 30000);
-  const [action, setAction] = useState<{ user: User; op: "disable" | "enable" } | null>(null);
+  const [dialog, setDialog] = useState<Dialog | null>(null);
+  const roles = assignableRoles(isSuper);
 
-  const rows = [...(data ?? [])].sort((a, b) =>
-    Number(a.disabled) - Number(b.disabled) || a.username.localeCompare(b.username));
+  // Admins never see (or act on) the vendor's super admin accounts.
+  const rows = [...(data ?? [])]
+    .filter((u) => isSuper || u.role !== "super_admin")
+    .sort((a, b) => Number(a.disabled) - Number(b.disabled) || userId(a).localeCompare(userId(b)));
+  const isMe = (u: User) => samePerson(userId(u), me) || (!!u.username && samePerson(u.username, me));
+  const close = () => setDialog(null);
 
   return (
     <>
-      <PageHeader title="Users" sub="People who have signed in to this console">
+      <PageHeader title="Users" sub="People who can sign in to this console">
         <button className="btn" onClick={() => void reload()}>Refresh</button>
+        <button className="btn btn-primary" onClick={() => setDialog({ kind: "create" })}>Add user</button>
       </PageHeader>
-      <div className="banner banner-info">
-        Users and their roles come from the identity provider's groups and are refreshed at every sign-in — change
-        membership there. <b>Disabling</b> a user here blocks access to offpatch locally (and ends their active sessions)
-        regardless of what the identity provider says.
-      </div>
       <ErrorBanner error={error} />
-      {data && rows.length === 0 && <Empty>Nobody has signed in yet.</Empty>}
+      {data && rows.length === 0 && <Empty>No users yet. Use <b>Add user</b>.</Empty>}
       {rows.length > 0 && (
         <table className="table">
           <thead>
-            <tr>
-              <th>User</th><th>Role</th><th>Source</th><th>Email</th><th>MFA</th>
-              <th>First login</th><th>Last login</th><th className="num">Sessions</th><th>Status</th><th />
-            </tr>
+            <tr><th>Name</th><th>Role</th><th>Signs in with</th><th>Last sign-in</th><th>Status</th><th /></tr>
           </thead>
           <tbody>
-            {rows.map((u) => (
-              <tr key={u.username} className={u.disabled ? "row-disabled" : ""}>
-                <td className="cell-title">{u.username}{me?.user === u.username && <span className="muted small"> (you)</span>}</td>
-                <td><span className={`role role-${u.role}`}>{u.role}</span></td>
-                <td>{u.source || <span className="muted">—</span>}</td>
-                <td>{u.email || <span className="muted">—</span>}</td>
-                <td>{u.mfa ? <Pill state="verified" label="yes" /> : <span className="muted">no</span>}</td>
-                <td className="nowrap"><Time value={u.first_login} hideRel /></td>
-                <td className="nowrap"><RelTime value={u.last_login} /></td>
-                <td className="num">{u.active_sessions}</td>
-                <td>
-                  {u.disabled ? (
-                    <>
-                      <Pill state="failed" label="disabled" />
-                      {u.disabled_reason && <div className="cell-sub">{u.disabled_reason}</div>}
-                    </>
-                  ) : <Pill state="compliant" label="active" />}
-                </td>
-                <td className="right nowrap">
-                  {u.disabled ? (
-                    <button className="btn btn-sm" onClick={() => setAction({ user: u, op: "enable" })}>Enable…</button>
-                  ) : (
-                    <button className="btn btn-sm btn-danger-ghost" disabled={me?.user === u.username}
-                            title={me?.user === u.username ? "You cannot disable yourself" : undefined}
-                            onClick={() => setAction({ user: u, op: "disable" })}>Disable…</button>
-                  )}
-                </td>
-              </tr>
-            ))}
+            {rows.map((u) => {
+              const local = isLocalUser(u);
+              const mine = isMe(u);
+              return (
+                <tr key={userId(u)} className={u.disabled ? "row-disabled" : ""}>
+                  <td>
+                    <div className="cell-title">{u.display_name || userId(u)}{mine && <span className="muted small"> (you)</span>}</div>
+                    {u.display_name && <div className="cell-sub">{userId(u)}</div>}
+                  </td>
+                  <td><RoleBadge role={u.role} /></td>
+                  <td>{local ? "E-mail and password" : "Single sign-on"}</td>
+                  <td className="nowrap">{u.last_login ? <RelTime value={u.last_login} /> : <span className="muted">never</span>}</td>
+                  <td><Status u={u} /></td>
+                  <td className="right nowrap">
+                    {mine ? <span className="muted small">use Change password at the top</span> : (
+                      <>
+                        {local && !u.disabled && <button className="btn btn-sm" onClick={() => setDialog({ kind: "role", user: u })}>Change role…</button>}{" "}
+                        {local && !u.disabled && <button className="btn btn-sm" onClick={() => setDialog({ kind: "reset", user: u })}>Reset password…</button>}{" "}
+                        {u.disabled
+                          ? <button className="btn btn-sm" onClick={() => setDialog({ kind: "enable", user: u })}>Enable…</button>
+                          : <button className="btn btn-sm btn-danger-ghost" onClick={() => setDialog({ kind: "disable", user: u })}>Disable…</button>}
+                      </>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       )}
-      {action && (
+      {rows.some((u) => !isLocalUser(u)) && (
+        <p className="hint">Single sign-on users get their role from the identity provider each time they sign in; you can still disable them here.</p>
+      )}
+
+      {dialog?.kind === "create" && (
+        <CreateUserModal roles={roles} onClose={close}
+          onCreated={(email, password) => { void reload(); setDialog({ kind: "temp", email, password }); }} />
+      )}
+      {dialog?.kind === "role" && <ChangeRoleModal user={dialog.user} roles={roles} onClose={close} onDone={reload} />}
+      {dialog?.kind === "reset" && (
+        <ResetPasswordModal user={dialog.user} onClose={close}
+          onReset={(email, password) => { void reload(); setDialog({ kind: "temp", email, password }); }} />
+      )}
+      {dialog?.kind === "temp" && <TempPasswordModal email={dialog.email} password={dialog.password} onClose={close} />}
+      {(dialog?.kind === "disable" || dialog?.kind === "enable") && (
         <ReasonModal
-          title={action.op === "disable" ? `Disable ${action.user.username}` : `Enable ${action.user.username}`}
-          description={action.op === "disable"
-            ? <>Blocks <b>{action.user.username}</b> from signing in and revokes their {action.user.active_sessions} active session(s) immediately. Their identity-provider account is not changed.</>
-            : <>Allows <b>{action.user.username}</b> to sign in again. Their role still comes from identity-provider groups.</>}
-          confirmLabel={action.op === "disable" ? "Disable user" : "Enable user"}
-          danger={action.op === "disable"}
-          onClose={() => setAction(null)}
+          title={`${dialog.kind === "disable" ? "Disable" : "Enable"} ${dialog.user.display_name || userId(dialog.user)}`}
+          description={dialog.kind === "disable"
+            ? <>They can no longer sign in, and anyone signed in as them is signed out now.</>
+            : <>They can sign in again.</>}
+          confirmLabel={dialog.kind === "disable" ? "Disable user" : "Enable user"}
+          danger={dialog.kind === "disable"}
+          onClose={close}
           onSubmit={async (reason) => {
-            await api.post(`/api/users/${enc(action.user.username)}/${action.op}`, { reason });
+            await api.post(`/api/users/${enc(userId(dialog.user))}/${dialog.kind}`, { reason });
             await reload();
           }}
         />

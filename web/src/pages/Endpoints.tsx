@@ -15,7 +15,7 @@ const STATUSES: EndpointStatus[] = [
 ];
 
 export default function Endpoints() {
-  const canEdit = useCan("operator");
+  const canEdit = useCan("user");
   const [sp, setSp] = useSearchParams();
   const statusFilter = splitList(sp.get("status") ?? "");
   const outdatedOnly = sp.get("outdated") === "1";
@@ -76,7 +76,7 @@ export default function Endpoints() {
     <>
       <PageHeader title="Endpoints" sub={`${activeCount} enrolled${counts.retired ? ` · ${counts.retired} retired` : ""} · silent endpoints are shown as offline or stale, never as compliant`}>
         <input className="search" placeholder="Filter host, group, site, owner…" value={q} onChange={(e) => setQ(e.target.value)} />
-        <Link className="btn" to={paths.addEndpoints}>Agent setup guide</Link>
+        {canEdit && <Link className="btn" to={paths.addEndpoints}>Agent setup guide</Link>}
         {canEdit && <button className="btn btn-primary" onClick={() => setShowToken(true)}>Create enrollment token</button>}
       </PageHeader>
       <div className="chips">
@@ -112,8 +112,8 @@ export default function Endpoints() {
             Tip: put 2–5 test machines in group <span className="tag">pilot</span> — standard deployments patch these test machines first.</p>
           {canEdit
             ? <button className="btn btn-primary" onClick={() => setShowToken(true)}>Create enrollment token</button>
-            : <span className="muted">Ask an operator to create an enrollment token.</span>}{" "}
-          <Link className="btn" to={paths.addEndpoints}>Agent setup guide</Link>
+            : <span className="muted">A User or Admin creates enrollment tokens.</span>}{" "}
+          {canEdit && <Link className="btn" to={paths.addEndpoints}>Agent setup guide</Link>}
         </Empty>
       )}
       {rows.length > 0 && (
@@ -162,7 +162,7 @@ export default function Endpoints() {
           </tbody>
         </table>
       )}
-      {showToken && <EnrollmentModal onClose={() => { setShowToken(false); if (sp.get("enroll")) setSp({}); }} />}
+      {showToken && canEdit && <EnrollmentModal onClose={() => { setShowToken(false); if (sp.get("enroll")) setSp({}); }} />}
       {bulkOpen && (
         <BulkGroupsModal
           endpoints={visibleSelected}

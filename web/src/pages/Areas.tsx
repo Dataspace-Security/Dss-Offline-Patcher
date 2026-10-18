@@ -1,9 +1,10 @@
 import { api } from "../api";
+import { useCan } from "../auth";
 import { TabbedArea } from "../components/TabbedArea";
 import { paths } from "../paths";
 import type { Package, Reconciliation } from "../types";
 import { useLoad } from "../util";
-import { isAgentPackage } from "./Catalog";
+import { isAgentPackage } from "../components/patchPlan";
 
 // The six areas of the console. Each is a layout route (see App.tsx) whose
 // tabs are its child routes.
@@ -49,10 +50,11 @@ export function DeploymentsArea() {
 }
 
 export function EndpointsArea() {
+  const canEnroll = useCan("user");
   return (
     <TabbedArea title="Endpoints" tabs={[
       { to: paths.endpoints, label: "Endpoints", end: true },
-      { to: paths.addEndpoints, label: "Add endpoints" },
+      { to: paths.addEndpoints, label: "Add endpoints", hidden: !canEnroll },
     ]} />
   );
 }
@@ -67,11 +69,11 @@ export function ReportsArea() {
   );
 }
 
-export function SettingsArea({ isAdmin }: { isAdmin: boolean }) {
+export function SettingsArea({ isAdmin, isSuper }: { isAdmin: boolean; isSuper: boolean }) {
   return (
     <TabbedArea title="Settings" tabs={[
-      { to: paths.server, label: "Server" },
-      { to: paths.agentVersions(), label: "Agent versions" },
+      { to: paths.server, label: "Server", hidden: !isSuper },
+      { to: paths.agentVersions(), label: "Agent versions", hidden: !isSuper },
       { to: paths.users, label: "Users", hidden: !isAdmin },
     ]} />
   );

@@ -65,7 +65,8 @@ export type InventoryItem = { kind: "kb" | "product" | "pkg" | "app" | "agent"; 
 };
 export type EndpointDetail = Endpoint & { inventory: InventoryItem[]; targets: Target[] };
 
-export type DeploymentState = "active" | "paused" | "cancelled" | "completed";
+// Roles contract: every deployment / rollback starts in pending_approval; rejected is final.
+export type DeploymentState = "pending_approval" | "active" | "paused" | "cancelled" | "completed" | "rejected";
 export type TargetState = "pending" | "downloading" | "downloaded" | "installing" | "installed"
   | "pending_reboot" | "verified" | "failed" | "not_applicable" | "exception"
   | "deferred" | "lost_after_install" | "rolled_back"; // v1.2
@@ -92,7 +93,11 @@ export type Deployment = NewDeployment & {
   deployment_id: string; state: DeploymentState; current_ring: number; state_reason: string;
   created_by: string; created_at: string; updated_at: string;
   counts: Partial<Record<TargetState, number>>;
+  // Roles contract: 2-person approval of deployments and rollbacks (absent on older servers).
+  approvals?: DeploymentApproval[] | null; approvals_required?: number;
+  rejected_by?: string; rejected_at?: string;
 };
+export type DeploymentApproval = { by: string; at: string; reason: string };
 export type Target = {
   deployment_id: string; package_id: string; endpoint_id: string; hostname: string; ring: number;
   state: TargetState; attempts: number; detail: string; exit_code: number; updated_at: string;
@@ -148,15 +153,32 @@ export type AgentSetup = {
   server_cert_hosts?: string[]; // DNS names / IPs in the server certificate
 };
 
-// ---- v1.1: auth & users (B2, C8) ----
-export type Role = "viewer" | "operator" | "approver" | "admin";
-export type Me = { user: string; role: Role; source: "sso" | "token"; mfa: boolean };
-export type AuthConfig = { sso: boolean; static_tokens: boolean; require_mfa: boolean };
-export type LogoutResponse = { end_session_url?: string };
-export type User = {
-  username: string; role: Role; source: string; email: string; mfa: boolean; first_login: string;
-  last_login: string; disabled: boolean; disabled_reason: string; active_sessions: number;
+// ---- auth & users (v1.1 B2/C8, roles contract) ----
+/** Current roles, lowest to highest. Old names (operator, approver) are mapped to "user" when read. */
+export type Role = "viewer" | "user" | "admin" | "super_admin";
+export type AuthKind = "password" | "sso" | "token";
+/** GET /api/me. `auth` / `must_change_password` come with the roles contract; `source` / `mfa` from older servers. */
+export type Me = {
+  user: string; role: Role; auth: AuthKind; must_change_password: boolean;
+  /** Sign-in e-mail of password users (owner change 2026-10-18). */
+  email?: string;
+  display_name?: string; source?: string; mfa?: boolean;
+  /** Assumed: "" / absent while the built-in super admin still has the installer's password; `builtin` marks that account. */
+  password_changed_at?: string; builtin?: boolean;
 };
+export type AuthConfig = { sso: boolean; static_tokens: boolean; require_mfa: boolean; /** Server version, when the server reports it. */ version?: string };
+export type LogoutResponse = { end_session_url?: string };
+/** GET /api/users: local (e-mail + password) users and SSO users; never password hashes. */
+export type User = {
+  /** Local users are identified by `email`; SSO users by `username` (older servers: username only). */
+  username?: string; role: Role; display_name?: string;
+  /** "local" / "password" = username + password; anything else (e.g. "sso", an issuer) = single sign-on. */
+  source: string; email?: string; mfa?: boolean;
+  first_login?: string; last_login: string; disabled: boolean; disabled_reason?: string; active_sessions?: number;
+  must_change_password?: boolean; locked_until?: string; created_by?: string; created_at?: string;
+};
+/** POST /api/users and /reset_password may echo the temporary password; otherwise the one the console sent is shown. */
+export type UserWriteResponse = Partial<User> & { temp_password?: string; password?: string };
 
 // ---- v1.1: maintenance windows (C1) ----
 export type Weekday = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
@@ -249,6 +271,8 @@ export type Policy = {
   approvals_required: Record<string, number>; // by severity; missing = 1
   separation_of_duties: boolean;
   deadlines: Record<string, string>; // by severity: release date + this = install deadline
+  /** Roles contract: approvals every deployment / rollback needs before it starts (default 2). */
+  deployment_approvals?: number;
 };
 
 /** GET /api/packages-needs → Record<package_id, PackageFleet> (extended; old fields kept). */

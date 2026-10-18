@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, ApiError, enc, errMsg } from "../api";
-import { useCan, useMe } from "../auth";
+import { deploymentApprovalsRequired, needsApprovalsText, othersMustApprove, useCan, useMe } from "../auth";
 import { paths } from "../paths";
 import type { Deployment, Endpoint, NewDeployment, Package, PackageFleet } from "../types";
 import { fmtTime, useLoad } from "../util";
@@ -84,8 +84,8 @@ export function AlreadyRunning({ deploymentId, onOpen }: { deploymentId: string;
 export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThisProps) {
   const navigate = useNavigate();
   const me = useMe();
-  const canApprove = useCan("approver");
-  const canDeploy = useCan("operator");
+  const canApprove = useCan("user");
+  const canDeploy = useCan("user");
   const pkgL = useLoad(() => api.get<Package>(`/api/packages/${enc(packageId)}`), [packageId]);
   const policyL = useLoad(fetchPolicy, []);
   const fleetL = useLoad(fetchFleet, [packageId]);
@@ -170,6 +170,7 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
   const draft = buildPreset(preset, pkg, { policy, endpointId: endpoint?.id, hostname: endpoint?.hostname, justification, firstWave, rebootInWindow });
   const counts = ringCounts(draft.rings, eps);
   const dl = policyDeadline(pkg, policy);
+  const deployApprovals = deploymentApprovalsRequired(policy);
 
   const problems: string[] = [];
   if (!approved) problems.push("The package must be approved first.");
@@ -197,6 +198,9 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
       <button className="btn" onClick={onClose} disabled={busy}>Cancel</button>
       {approved && canDeploy && !sodBlocks && runningId && (
         <Link className="btn btn-primary" to={`/deployments/${enc(runningId)}`} onClick={onClose}>Open the running deployment</Link>
+      )}
+      {approved && canDeploy && !sodBlocks && !runningId && (
+        <span className="reason-hint" title={othersMustApprove(deployApprovals)}>{needsApprovalsText(deployApprovals)}</span>
       )}
       {approved && canDeploy && !sodBlocks && !runningId && (
         <button className={`btn ${preset === "emergency" ? "btn-danger" : "btn-primary"}`} disabled={!canCreate || busy}
@@ -239,7 +243,7 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
                   <textarea rows={2} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Recorded in the audit log" />
                 </label>
                 {policy?.separation_of_duties && (
-                  <div className="hint">Separation of duties is on: after approving, another operator must create the deployment.</div>
+                  <div className="hint">Separation of duties is on: after approving, another User must create the deployment.</div>
                 )}
                 <div className="form-actions">
                   <button className="btn btn-primary" disabled={busy || !reason.trim()} onClick={() => void approve()}>
@@ -249,10 +253,10 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
               </>
             )}
             {canApprove && iApproved && (
-              <div className="banner banner-info">You approved this package. Waiting for a second approver ({approvals.length} of {required}).</div>
+              <div className="banner banner-info">You approved this package. Waiting for another person ({approvals.length} of {required}).</div>
             )}
             {!canApprove && (
-              <div className="banner banner-info">Awaiting approval ({approvals.length} of {required}). An approver must approve it before it can be deployed.</div>
+              <div className="banner banner-info">Awaiting approval ({approvals.length} of {required}). A User or Admin must approve it before it can be deployed.</div>
             )}
           </li>
         )}
@@ -267,12 +271,12 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
             {notice && <div className="banner banner-ok">{notice}</div>}
             {sodBlocks ? (
               <div className="banner banner-warn">
-                <b>You approved this; an operator must deploy it.</b> Separation of duties is on, so the server refuses a deployment
-                created by an approver of the package. Send this link to an operator:
+                <b>You approved this; someone else must deploy it.</b> Separation of duties is on, so the server refuses a deployment
+                created by a person who approved the package. Send this link to another User:
                 <CopyBox value={handoffUrl} />
               </div>
             ) : !canDeploy ? (
-              <div className="banner banner-info">Deploying requires the operator role.</div>
+              <div className="banner banner-info">Only Users and Admins can deploy.</div>
             ) : runningId ? (
               <div className="hint">No new deployment is offered while one is running: open it to follow it.</div>
             ) : (
@@ -324,6 +328,9 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
                   <TargetPreview pkg={pkg} rings={ringsForPreview} endpoints={epsL.data} fleet={fleetL.data} onSummary={setSummary} />
                 </details>
 
+                <div className="banner banner-warn">
+                  <b>{needsApprovalsText(deployApprovals)}.</b> {othersMustApprove(deployApprovals)} It waits on the deployment page until then.
+                </div>
                 {problems.length > 0 && <ul className="problems">{problems.map((p) => <li key={p}>{p}</li>)}</ul>}
               </>
             )}
@@ -335,7 +342,7 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
         <div className="banner banner-error">
           {err}
           {conflict && (
-            <div className="small">The server refused it. With separation of duties on, someone who approved the package cannot also deploy it: hand it to another operator.</div>
+            <div className="small">The server refused it. With separation of duties on, someone who approved the package cannot also deploy it: hand it to another User.</div>
           )}
         </div>
       )}

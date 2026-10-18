@@ -1,8 +1,9 @@
 import { createContext, useContext, useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { fmtTime, relTime, useNow } from "../util";
+import { normalizeRole, ROLE_HELP, roleLabel } from "../auth";
 
 const GREEN = ["verified", "compliant", "approved", "validated", "completed", "success", "active-ok"];
-const AMBER = ["pending_reboot", "paused", "quarantined", "noncompliant", "pending", "received", "deferred", "updates_available"];
+const AMBER = ["pending_approval", "pending_reboot", "paused", "quarantined", "noncompliant", "pending", "received", "deferred", "updates_available"];
 const RED = ["failed", "rejected", "revoked", "offline", "cancelled", "failure", "expired", "lost_after_install", "out_of_support"];
 const MUTED = ["stale", "exception", "not_applicable", "rolled_back"];
 // Work in progress is blue: green only once confirmed, red only for real failures.
@@ -23,6 +24,7 @@ const STATE_LABELS: Record<string, string> = {
   updates_available: "Updates available",
   out_of_support: "Windows no longer updated",
   awaiting_checkin: "Waiting for first check-in",
+  pending_approval: "Waiting for approval",
 };
 
 /** Help text (tooltips) for endpoint statuses. */
@@ -46,6 +48,12 @@ export function Pill({ state, label }: { state: string; label?: string }) {
   );
 }
 
+/** Role as shown to people: Super admin (vendor), Admin, User, Viewer (old names map to User). */
+export function RoleBadge({ role }: { role: string }) {
+  const r = normalizeRole(role);
+  return <span className={`role role-${r}`} title={ROLE_HELP[r]}>{roleLabel(r)}</span>;
+}
+
 export function Time({ value, hideRel }: { value: string | undefined | null; hideRel?: boolean }) {
   const now = useNow();
   const abs = fmtTime(value);
@@ -65,7 +73,7 @@ export function RelTime({ value }: { value: string | undefined | null }) {
 
 export function ErrorBanner({ error }: { error: string | null | undefined }) {
   if (!error) return null;
-  return <div className="banner banner-error">{error}</div>;
+  return <div className="banner banner-error" role="alert">{error}</div>;
 }
 
 export function Empty({ children }: { children: ReactNode }) {

@@ -19,7 +19,7 @@ const DEBOUNCE_MS = 250;
 /** The chips: four views over applications, and Windows updates. */
 type Chip = LibraryView | "windows";
 const CHIPS: { value: Chip; label: string; help: string }[] = [
-  { value: "available", label: "Available", help: "Apps offpatch can import, and apps already on your machines" },
+  { value: "available", label: "Available", help: "Apps DSS Patcher can import, and apps already on your machines" },
   { value: "installed", label: "Installed in fleet", help: "Apps on at least one of your machines" },
   { value: "catalog", label: "In catalog", help: "Apps that already have a package in the Catalog" },
   { value: "all", label: "All", help: "Every app the update information knows about" },

@@ -2,12 +2,12 @@
 
 /* Live indicator */
 .live-badge { display: inline-flex; align-items: center; gap: 6px; color: var(--green); font-weight: 600; }
-.live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); margin-right: 6px;
-  box-shadow: 0 0 0 0 rgba(26, 127, 55, .5); animation: live-pulse 1.6s ease-out infinite; vertical-align: middle; }
+.live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green-solid); margin-right: 6px;
+  box-shadow: 0 0 0 0 var(--live-pulse); animation: live-pulse 1.6s ease-out infinite; vertical-align: middle; }
 @keyframes live-pulse {
-  0% { box-shadow: 0 0 0 0 rgba(26, 127, 55, .55); }
-  70% { box-shadow: 0 0 0 7px rgba(26, 127, 55, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(26, 127, 55, 0); }
+  0% { box-shadow: 0 0 0 0 var(--live-pulse); }
+  70% { box-shadow: 0 0 0 7px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
 }
 
 /* Per-target progress */
@@ -16,11 +16,11 @@
 .tprog-label { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .tprog-bar { position: relative; height: 6px; border-radius: 3px; background: var(--grey-bg); overflow: hidden; }
 .tprog-bar > span { display: block; height: 100%; border-radius: 3px; transition: width .8s ease; }
-.tprog-blue > span { background: var(--blue); }
-.tprog-green > span { background: #2da44e; }
-.tprog-amber > span { background: #d4a72c; }
-.tprog-red > span { background: var(--red); }
-.tprog-grey > span { background: #afb8c1; }
+.tprog-blue > span { background: var(--blue-solid); }
+.tprog-green > span { background: var(--green-solid); }
+.tprog-amber > span { background: var(--amber-solid); }
+.tprog-red > span { background: var(--red-solid); }
+.tprog-grey > span { background: var(--grey-solid); }
 .tprog-indet > span { position: absolute; width: 35%; animation: tprog-slide 1.4s ease-in-out infinite; }
 @keyframes tprog-slide {
   0% { left: -35%; }
@@ -34,12 +34,12 @@
 
 /* Ring summaries */
 .ring-summaries { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
-.ring-sum { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); }
+.ring-sum { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
 .ring-sum-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
 .ring-sum-head { display: flex; align-items: center; gap: 8px; }
 .ring-sum-text { font-size: 12px; color: var(--text-2); font-variant-numeric: tabular-nums; }
 .ring-bar { height: 7px; }
-.ring-sum.ring-current { border-color: var(--accent); background: #f4f8ff; }
+.ring-sum.ring-current { border-color: var(--accent-soft-bd); background: var(--accent-soft); }
 
 /* Next-step and paused help */
 .next-step { display: flex; align-items: center; gap: 12px; justify-content: space-between; flex-wrap: wrap; }
@@ -55,6 +55,7 @@
 .fs-cell { min-width: 34px; padding: 1px 8px; border-radius: 10px; border: 1px solid transparent; font-weight: 600;
   font-variant-numeric: tabular-nums; cursor: pointer; background: var(--grey-bg); color: var(--text); }
 .fs-cell:hover { filter: brightness(.96); }
+:root[data-theme="dark"] .fs-cell:hover { filter: brightness(1.18); }
 .fs-green { background: var(--green-bg); border-color: var(--green-bd); color: var(--green); }
 .fs-amber { background: var(--amber-bg); border-color: var(--amber-bd); color: var(--amber); }
 .fs-blue { background: var(--blue-bg); border-color: var(--blue-bd); color: var(--blue); }

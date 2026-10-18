@@ -15,6 +15,9 @@ export function clearToken(): void {
 }
 
 export const UNAUTHORIZED_EVENT = "offpatch:unauthorized";
+/** The server refuses everything but a password change until the temporary password is replaced. */
+export const PASSWORD_CHANGE_EVENT = "offpatch:password-change-required";
+export const PASSWORD_CHANGE_REQUIRED = "password_change_required";
 
 export class ApiError extends Error {
   status: number;
@@ -24,7 +27,8 @@ export class ApiError extends Error {
   }
 }
 
-type Opts = { method?: string; body?: unknown; token?: string };
+/** `signIn`: a sign-in attempt; a 401 is a wrong password, not an expired session. */
+type Opts = { method?: string; body?: unknown; token?: string; signIn?: boolean };
 
 async function raw(path: string, opts: Opts = {}): Promise<Response> {
   const token = opts.token ?? getToken();
@@ -54,9 +58,13 @@ async function raw(path: string, opts: Opts = {}): Promise<Response> {
     } catch {
       /* non-JSON error body */
     }
-    if (res.status === 401 && opts.token === undefined) {
+    if (res.status === 401 && opts.token === undefined && !opts.signIn) {
       clearToken();
       window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+    }
+    if (res.status === 403 && msg === PASSWORD_CHANGE_REQUIRED) {
+      window.dispatchEvent(new Event(PASSWORD_CHANGE_EVENT));
+      msg = "Change your password first.";
     }
     throw new ApiError(res.status, msg);
   }
@@ -72,6 +80,8 @@ async function json<T>(path: string, opts: Opts = {}): Promise<T> {
 export const api = {
   get: <T>(path: string, token?: string) => json<T>(path, { token }),
   post: <T>(path: string, body: unknown) => json<T>(path, { method: "POST", body }),
+  /** Sign-in calls: never send a stored token, and a 401 does not mean "signed out". */
+  signIn: <T>(path: string, body: unknown) => json<T>(path, { method: "POST", body, token: "", signIn: true }),
   patch: <T>(path: string, body: unknown) => json<T>(path, { method: "PATCH", body }),
   blob: async (path: string) => (await raw(path)).blob(),
 };

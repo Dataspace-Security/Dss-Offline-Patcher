@@ -13,7 +13,7 @@ function excStatus(x: Exception): "active" | "expired" | "revoked" {
 }
 
 export default function Exceptions() {
-  const canManage = useCan("approver");
+  const canManage = useCan("admin");
   const { data, error, reload } = useLoad(() => api.get<Exception[]>("/api/exceptions"), [], 30000);
   const eps = useLoad(() => api.get<Endpoint[]>("/api/endpoints"), []);
   const pkgs = useLoad(() => api.get<Package[]>("/api/packages"), []);

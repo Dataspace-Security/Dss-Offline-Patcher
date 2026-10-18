@@ -13,7 +13,7 @@ export const STATUS_COLUMNS: { key: FleetEndpointStatus; label: string; tone: st
   { key: "outdated", label: "Outdated", tone: "amber", pill: "noncompliant", help: "Missing and not being patched yet" },
   { key: "failed", label: "Failed", tone: "red", pill: "failed", help: "Install failed or the endpoint was lost after installing" },
   { key: "being_patched", label: "Being patched", tone: "blue", pill: "active", help: "Target in an active or paused deployment" },
-  { key: "verified", label: "Verified", tone: "green", pill: "verified", help: "Installed by an offpatch deployment and confirmed by inventory" },
+  { key: "verified", label: "Verified", tone: "green", pill: "verified", help: "Installed by a DSS Patcher deployment and confirmed by inventory" },
   { key: "up_to_date", label: "Up to date", tone: "green", pill: "verified", help: "Inventory shows it (or something newer), however it got there" },
   { key: "exception", label: "Exception", tone: "purple", pill: "exception", help: "Risk accepted by an active exception" },
 ];

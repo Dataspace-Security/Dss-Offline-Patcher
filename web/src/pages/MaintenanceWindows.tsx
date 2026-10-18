@@ -65,7 +65,7 @@ export function windowOpen(w: Pick<MaintenanceWindow, "days" | "start" | "end" |
 }
 
 export default function MaintenanceWindows() {
-  const canEdit = useCan("operator");
+  const canEdit = useCan("user");
   const now = useNow(30000);
   const { data, error, reload } = useLoad(() => api.get<MaintenanceWindow[]>("/api/maintenance-windows"), [], 30000);
   const [showForm, setShowForm] = useState(false);

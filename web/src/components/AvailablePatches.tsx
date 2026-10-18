@@ -3,10 +3,11 @@ import { Link } from "react-router-dom";
 import { api, enc } from "../api";
 import { paths } from "../paths";
 import { useCan } from "../auth";
-import type { AcquisitionRequestRecord, AcquisitionRequestRef, CatalogLink, EndpointUpdates } from "../types";
+import type { AcquisitionRequestRecord, AcquisitionRequestRef, CatalogLink, EndpointUpdates, PackageKind } from "../types";
 import { useLoad } from "../util";
 import { acqStatusPill } from "./AcqRequestStatus";
 import { PatchThis } from "./PatchThis";
+import { isAgentPackage } from "./patchPlan";
 import { PipelineAction, isRequestable } from "./PipelineAction";
 import { RequestResultBanner } from "./RequestResultBanner";
 import { latestRequests, useImportRequest, type ImportItems } from "./useImportRequest";
@@ -36,6 +37,8 @@ type Row = {
   importItems: ImportItems | null;
   /** Key into the tracked acquisition requests ("app:<winget id>" / "kb:<KB>"). */
   requestKey: string;
+  /** An offpatch agent version (approved and deployed by the super admin only). */
+  agent?: boolean;
 };
 
 /** Where an update stands: to import → importing → awaiting approval → ready → deploying (target state). */
@@ -92,6 +95,7 @@ function mergeRows(intel: EndpointUpdates | null, avail: Available[] | null): Ro
       available: a.kb ? <Mono>{a.kb}</Mono> : <b><Mono>{a.version}</Mono></b>,
       severity: a.severity, link: { package_id: a.package_id, state: a.package_state },
       deploymentId: a.deployment_id, targetState: a.target_state, importItems: null, requestKey: "",
+      agent: isAgentPackage({ kind: a.kind as PackageKind, package_id: a.package_id }),
     });
   }
   return rows;
@@ -106,7 +110,7 @@ export function EndpointUpdatesTable({ endpointId, hostname, os }: { endpointId:
   const windows = os === "windows";
   const intel = useLoad(() => (windows ? api.get<EndpointUpdates>(`/api/endpoints/${enc(endpointId)}/updates`) : Promise.resolve(null)), [endpointId, windows], 30000);
   const avail = useLoad(() => api.get<Available[]>(`/api/endpoints/${enc(endpointId)}/available`), [endpointId], 15000);
-  const canImport = useCan("operator");
+  const canImport = useCan("user");
   // Tracked acquisition requests: "Importing… requested 5m ago" on the rows already asked for.
   const reqs = useLoad(() => api.get<AcquisitionRequestRecord[]>("/api/acquisition-requests"), [endpointId], 30000);
   const [patching, setPatching] = useState<string | null>(null);
@@ -163,7 +167,7 @@ export function EndpointUpdatesTable({ endpointId, hostname, os }: { endpointId:
                 <td className="right">
                   {r.deploymentId
                     ? <Link className="btn btn-sm" to={paths.deployment(r.deploymentId)}>Deployment →</Link>
-                    : <PipelineAction link={r.link} requested={r.requestKey ? requestedBy.get(r.requestKey) : undefined} onPatch={setPatching}
+                    : <PipelineAction link={r.link} agent={r.agent} requested={r.requestKey ? requestedBy.get(r.requestKey) : undefined} onPatch={setPatching}
                                       onRequest={importable(r) ? () => void imp.send(r.importItems!, r.key) : undefined}
                                       requesting={imp.busy === r.key} disabled={imp.busy !== null} />}
                 </td>
@@ -176,7 +180,7 @@ export function EndpointUpdatesTable({ endpointId, hostname, os }: { endpointId:
         <div className="hint">
           {canImport
             ? <>Import downloads the update in the acquisition zone (it is verified, signed and comes back here for approval); then <b>Patch this</b> installs it.</>
-            : <>Updates not in the catalog yet must be imported by an operator (here or on <Link to={paths.needed()}>Patches → Needed</Link>); then they can be approved and installed.</>}
+            : <>Updates not in the catalog yet must be imported by a User (here or on <Link to={paths.needed()}>Patches → Needed</Link>); then they can be approved and installed.</>}
         </div>
       )}
       {patching && (

@@ -3,6 +3,7 @@
 // that carries a prefilled plan to /deployments/new.
 
 import { api } from "../api";
+import { samePerson } from "../auth";
 import type { Endpoint, MaintenanceWindow, Me, NewDeployment, Package, PackageFleet, Policy, RebootPolicy, Ring } from "../types";
 
 export type PresetKind = "standard" | "one_ring" | "emergency" | "endpoint";
@@ -16,6 +17,17 @@ export const fetchPolicy = (): Promise<Policy> => api.get<Policy>("/api/policy")
 export const fetchFleet = (): Promise<Record<string, PackageFleet>> => api.get<Record<string, PackageFleet>>("/api/packages-needs");
 export const fetchEndpoints = (): Promise<Endpoint[]> => api.get<Endpoint[]>("/api/endpoints");
 export const fetchWindows = (): Promise<MaintenanceWindow[]> => api.get<MaintenanceWindow[]>("/api/maintenance-windows");
+
+/**
+ * The offpatch agent's own packages (plumbing, not patching). Approving,
+ * deploying, rolling back and revoking them is a vendor (super admin) task:
+ * the console shows those controls only to the super admin (Settings → Agent
+ * versions). Note: the server's route table lets any User approve/deploy any
+ * package, so this is a console convention, not an API boundary.
+ */
+export function isAgentPackage(p: Pick<Package, "kind" | "package_id"> & { package_name?: string }): boolean {
+  return p.kind === "agent" || p.package_id.startsWith("offpatch-agent") || (p.package_name ?? "").startsWith("offpatch-agent");
+}
 
 /** True when at least one maintenance window lets machines restart by themselves. */
 export function windowsAllowReboot(windows: MaintenanceWindow[] | null | undefined): boolean {
@@ -97,10 +109,10 @@ export function approvalsRequired(pkg: Package, policy: Policy | null | undefine
   return policy?.approvals_required?.[pkg.severity] ?? (pkg.approvals_required || 1);
 }
 
-/** The server records approvers as "user:<name>". */
+/** The server records approvers as "<name>" or "user:<name>". */
 export function approvedBy(pkg: Package | undefined, me: Me | null): boolean {
   if (!pkg || !me) return false;
-  return (pkg.approvals ?? []).some((a) => a.by === me.user || a.by === `user:${me.user}`);
+  return (pkg.approvals ?? []).some((a) => samePerson(a.by, me));
 }
 
 /** RFC 3339 (UTC, no millis). */

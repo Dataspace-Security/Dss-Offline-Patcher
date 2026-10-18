@@ -1,12 +1,13 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { api, enc } from "../api";
-import { hasRole, useMe } from "../auth";
+import { deploymentApprovalStatus, hasRole, isBankApprover, roleLabel, useMe } from "../auth";
 import { paths } from "../paths";
 import type { ComplianceReport, Deployment, DeploymentDetail, Endpoint, Package, PackageFleet, Summary } from "../types";
 import { useLoad } from "../util";
 import { exhaustedInCurrentRing, isLiveDeployment, readyToAdvance } from "./rollout";
-import { approvedBy } from "./patchPlan";
+import { approvedBy, fetchPolicy, isAgentPackage } from "./patchPlan";
+import { waitingText } from "./DeploymentApproval";
 import { usePageVisible } from "./usePageVisible";
 import "../ops.css";
 
@@ -18,8 +19,13 @@ type Item = { key: string; count: number; label: ReactNode; to: string; tone: "r
 /** P2.5: what is waiting on the signed-in user, by role, from existing APIs. */
 export function YourWork({ summary, endpoints }: { summary: Summary; endpoints: Endpoint[] | null }) {
   const me = useMe();
-  const isApprover = hasRole(me, "approver");
-  const isOperator = hasRole(me, "operator");
+  // Users and Admins approve packages and deployments; the vendor's super admin sees the operational items only.
+  const isApprover = hasRole(me, "user");
+  const isOperator = hasRole(me, "user");
+  const approvesDeployments = isBankApprover(me);
+  // Agent versions are the vendor's (super admin) to approve and deploy; Users and Admins never see them as their work.
+  const handlesAgents = hasRole(me, "super_admin");
+  const mineToHandle = (p: Package) => handlesAgents || !isAgentPackage(p);
   // No polling while the tab is hidden; becoming visible again reloads at once.
   const visible = usePageVisible();
   const poll = visible ? POLL_MS : undefined;
@@ -27,13 +33,14 @@ export function YourWork({ summary, endpoints }: { summary: Summary; endpoints: 
   const quarantined = useLoad(() => (isApprover ? api.get<Package[]>("/api/packages?state=quarantined") : Promise.resolve(null)), [isApprover, visible], poll);
   const approved = useLoad(() => (isOperator ? api.get<Package[]>("/api/packages?state=approved") : Promise.resolve(null)), [isOperator, visible], poll);
   const needs = useLoad(() => (isOperator ? api.get<Record<string, PackageFleet>>("/api/packages-needs") : Promise.resolve(null)), [isOperator, visible], poll);
+  const policy = useLoad(fetchPolicy, []);
   const live = useLoad(async () => {
     if (!isOperator) return null;
     const list = await api.get<Deployment[]>("/api/deployments");
     const liveList = list.filter(isLiveDeployment);
     const ids = liveList.slice(0, MAX_DETAILS).map((d) => d.deployment_id);
     const details = await Promise.all(ids.map((id) => api.get<DeploymentDetail>(`/api/deployments/${enc(id)}`)));
-    return { details, unchecked: liveList.length - ids.length };
+    return { details, unchecked: liveList.length - ids.length, pending: list.filter((d) => d.state === "pending_approval") };
   }, [isOperator, visible], poll);
   const report = useLoad(() => api.get<ComplianceReport>("/api/reports/compliance"), [visible], visible ? 60000 : undefined);
   const loadErrors = ([
@@ -45,15 +52,42 @@ export function YourWork({ summary, endpoints }: { summary: Summary; endpoints: 
   const firstRun: ReactNode[] = [];
 
   if (summary.endpoints.total === 0) {
-    firstRun.push(<>No endpoints enrolled yet — <Link to={`${paths.endpoints}?enroll=1`}>create an enrollment token</Link> and install the agent on the Windows PCs.</>);
+    firstRun.push(isOperator
+      ? <>No endpoints enrolled yet — <Link to={`${paths.endpoints}?enroll=1`}>create an enrollment token</Link> and install the agent on the Windows PCs.</>
+      : <>No endpoints enrolled yet. A User or Admin enrolls them.</>);
   }
   const pkgTotal = Object.values(summary.packages ?? {}).reduce((a, v) => a + (v ?? 0), 0);
   if (pkgTotal === 0) {
-    firstRun.push(<>The catalog is empty — use Import on <Link to={paths.needed()}>Needed</Link> or in the <Link to={paths.library()}>Library</Link>, then follow them on <Link to={paths.imports}>Imports</Link>.</>);
+    firstRun.push(isOperator
+      ? <>The catalog is empty — use Import on <Link to={paths.needed()}>Needed</Link> or in the <Link to={paths.library()}>Library</Link>, then follow them on <Link to={paths.imports}>Imports</Link>.</>
+      : <>The catalog is empty. A User or Admin imports patches; you can follow them on <Link to={paths.imports}>Imports</Link>.</>);
   }
 
+  if (approvesDeployments && me) {
+    const toApprove = (live.data?.pending ?? []).filter((d) => deploymentApprovalStatus(d, me, policy.data).canApprove);
+    items.push({
+      key: "approve-deployments", count: toApprove.length, tone: "amber",
+      to: toApprove.length === 1 ? `/deployments/${enc(toApprove[0].deployment_id)}` : "/deployments",
+      label: "deployments waiting for your approval",
+      detail: toApprove.slice(0, 3).map((d) => (
+        <Link key={d.deployment_id} className="tag" to={`/deployments/${enc(d.deployment_id)}`}
+              title={waitingText(d, policy.data)}>{d.name || d.deployment_id}{d.operation === "rollback" ? " (rollback)" : ""}</Link>
+      )),
+    });
+  }
+  if (isOperator && me) {
+    const waitingMine = (live.data?.pending ?? []).filter((d) => deploymentApprovalStatus(d, me, policy.data).mine);
+    items.push({
+      key: "my-pending", count: waitingMine.length, tone: "grey",
+      to: waitingMine.length === 1 ? `/deployments/${enc(waitingMine[0].deployment_id)}` : "/deployments",
+      label: "of your deployments are waiting for other people to approve",
+      detail: waitingMine.slice(0, 3).map((d) => (
+        <Link key={d.deployment_id} className="tag" to={`/deployments/${enc(d.deployment_id)}`}>{d.name || d.deployment_id} · {waitingText(d, policy.data)}</Link>
+      )),
+    });
+  }
   if (isApprover && me) {
-    const mine = (quarantined.data ?? []).filter((p) => !approvedBy(p, me));
+    const mine = (quarantined.data ?? []).filter((p) => mineToHandle(p) && !approvedBy(p, me));
     items.push({
       key: "approve", count: mine.length, tone: "amber", to: `${paths.catalog()}?state=quarantined`,
       label: "packages awaiting your approval",
@@ -62,7 +96,7 @@ export function YourWork({ summary, endpoints }: { summary: Summary; endpoints: 
   }
   if (isOperator) {
     const n = needs.data ?? {};
-    const ready = (approved.data ?? []).filter((p) => (n[p.package_id]?.needed ?? 0) > 0 && !n[p.package_id]?.active_deployment_id);
+    const ready = (approved.data ?? []).filter((p) => mineToHandle(p) && (n[p.package_id]?.needed ?? 0) > 0 && !n[p.package_id]?.active_deployment_id);
     const endpointsNeeding = ready.reduce((a, p) => a + (n[p.package_id]?.needed ?? 0), 0);
     items.push({
       key: "deploy", count: ready.length, tone: "blue", to: `${paths.catalog()}?state=approved`,
@@ -90,7 +124,7 @@ export function YourWork({ summary, endpoints }: { summary: Summary; endpoints: 
   if (endpoints) items.push({ key: "outdated", count: outdated, tone: "amber", to: `${paths.endpoints}?outdated=1`, label: "endpoints not fully up to date" });
 
   const open = items.filter((i) => i.count > 0);
-  const role = me?.role ?? "viewer";
+  const role = roleLabel(me?.role);
 
   return (
     <section className="card your-work">

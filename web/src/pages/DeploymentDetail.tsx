@@ -3,6 +3,8 @@ import { Link, useParams } from "react-router-dom";
 import { api, enc } from "../api";
 import { paths } from "../paths";
 import { useCan } from "../auth";
+import { ApprovalPanel, DeploymentStatePill } from "../components/DeploymentApproval";
+import { fetchPolicy, isAgentPackage } from "../components/patchPlan";
 import { CountsBar, Empty, ErrorBanner, KV, Mono, PageHeader, Pill, ReasonModal, Time, targetLabel } from "../components/ui";
 import { TargetProgress } from "../components/TargetProgress";
 import { AskApproverModal, RaiseExceptionModal } from "../components/TargetException";
@@ -32,8 +34,11 @@ function targetRank(t: Target): number {
 
 export default function DeploymentDetailPage() {
   const { id = "" } = useParams();
-  const canOperate = useCan("operator");
-  const canApprove = useCan("approver");
+  const canOperate = useCan("user");
+  const isSuper = useCan("super_admin");
+  // Exceptions are an Admin decision; Users can ask an Admin; viewers see no actions.
+  const canException = useCan("admin");
+  const policy = useLoad(fetchPolicy, []);
   const visible = usePageVisible();
   const [live, setLive] = useState(true); // until the first load says otherwise
   const pollMs = visible && live ? FAST_POLL_MS : SLOW_POLL_MS;
@@ -90,9 +95,11 @@ export default function DeploymentDetailPage() {
   // auto_advance: the server starts the next stage by itself once the current one finished without too many failures.
   const autoNext = !!d.auto_advance && total > 1;
   const isLive = isLiveDeployment(d);
+  const pending = d.state === "pending_approval";
   const liveCount = (d.targets ?? []).filter((t) => t.live).length;
   const p = pkg.data;
-  const canRollBack = !rollback && p && (p.state === "approved" || p.state === "revoked");
+  // Rolling back an agent version is the vendor's (super admin) call, like deploying it.
+  const canRollBack = !rollback && p && (p.state === "approved" || p.state === "revoked") && (isSuper || !isAgentPackage(p));
   const lastContact = (t: Target): string | undefined => {
     const a = parseTime(t.live?.at);
     const b = parseTime(lastSeen.get(t.endpoint_id));
@@ -112,23 +119,24 @@ export default function DeploymentDetailPage() {
           {" "}· updated {loadedAt ? <ClockRel value={new Date(loadedAt).toISOString()} /> : "—"}
         </>}
       >
-        <Pill state={d.state} />
+        <DeploymentStatePill d={d} policy={policy.data} />
         {canOperate && d.state === "active" && <button className="btn" onClick={() => setAction("pause")}>Pause…</button>}
         {canOperate && d.state === "paused" && <button className="btn btn-primary" onClick={() => setAction("resume")}>Resume…</button>}
         {canOperate && canAdvance && <button className="btn btn-primary" onClick={() => setAction("advance")}>Start next stage…</button>}
         {canOperate && isLive && exhausted.length > 0 &&
           <button className="btn" onClick={() => setAction("retry_failed")} title="Reset the attempts of failed targets in the current stage">Retry failed ({exhausted.length})…</button>}
-        {canOperate && isLive &&
+        {canOperate && (isLive || pending) &&
           <button className="btn btn-danger" onClick={() => setAction("cancel")}>Cancel…</button>}
         {canOperate && canRollBack && (p.rollback_unsupported
           ? <button className="btn" disabled title={p.rollback_unsupported}>Rollback not supported</button>
-          : isLive
+          : isLive || pending
           ? <button className="btn" disabled title="Cancel this deployment first: an install and a rollback of the same package cannot run at the same time">Roll back…</button>
           : <Link className="btn btn-danger-ghost" to={`/deployments/new?operation=rollback&package_id=${enc(d.package_id)}`}
               title="Create a rollback deployment: agents uninstall this package, stage by stage">Roll back…</Link>)}
       </PageHeader>
       <ErrorBanner error={error} />
-      {d.state_reason && (
+      <ApprovalPanel d={d} policy={policy.data} onChanged={reload} />
+      {d.state_reason && d.state !== "rejected" && d.state !== "pending_approval" && (
         <div className={`banner ${d.state === "paused" || d.state === "cancelled" ? "banner-warn" : "banner-info"}`}>
           <b>{d.state}:</b> {d.state_reason}
         </div>
@@ -154,7 +162,7 @@ export default function DeploymentDetailPage() {
           </div>
           {canOperate
             ? <button className="btn btn-primary" onClick={() => setAction("advance")}>Start {ringName(ready.index + 1)}…</button>
-            : <span className="muted">An operator starts the next stage.</span>}
+            : <span className="muted">A User or Admin starts the next stage.</span>}
         </div>
       )}
       {d.state === "paused" && (
@@ -185,7 +193,7 @@ export default function DeploymentDetailPage() {
           <ol className="recovery">
             <li>Open the failing endpoints and read the exit code and detail (disk full, installer busy, missing prerequisite…).</li>
             <li>Fix the cause, then <b>Retry failed</b> to reset their attempts{canOperate && exhausted.length > 0 && <> — <button className="btn btn-sm" onClick={() => setAction("retry_failed")}>Retry failed ({exhausted.length})…</button></>}.</li>
-            <li>If an endpoint cannot be patched, raise an exception for it (approver) so it no longer counts as a failure.</li>
+            <li>If an endpoint cannot be patched, raise an exception for it (Admin) so it no longer counts as a failure.</li>
             <li><b>Resume</b> the deployment{canOperate && <> — <button className="btn btn-sm btn-primary" onClick={() => setAction("resume")}>Resume…</button></>}.</li>
           </ol>
         </section>
@@ -227,7 +235,7 @@ export default function DeploymentDetailPage() {
             ["Package", <Link to={paths.catalog(d.package_id)}><Mono>{d.package_id}</Mono></Link>],
             ["Operation", rollback ? <Pill state="failed" label="rollback (uninstall)" /> : "install"],
             ["Current stage", total ? `${ringName(Math.min(Math.max(d.current_ring, 0), total - 1))} (of ${total})` : "—"],
-            ...(total > 1 && d.current_ring < total - 1 ? [["Next stage", autoNext ? "starts automatically once the current stage succeeds" : "started by an operator"] as [string, string]] : []),
+            ...(total > 1 && d.current_ring < total - 1 ? [["Next stage", autoNext ? "starts automatically once the current stage succeeds" : "started by a User or Admin"] as [string, string]] : []),
             ["Max failure", `${d.max_failure_pct}%`],
             ["Max retries", String(d.max_retries)],
             ["Window (UTC)", d.window_start || d.window_end ? `${d.window_start || "?"} – ${d.window_end || "?"}` : "always"],
@@ -282,9 +290,9 @@ export default function DeploymentDetailPage() {
                     <td className="detail-cell">{t.detail || <span className="muted">—</span>}</td>
                     <td className="nowrap"><ClockRel value={t.updated_at} /></td>
                     <td className="nowrap">
-                      {bad && !rollback && (canApprove
+                      {bad && !rollback && canOperate && (canException
                         ? <button className="btn btn-sm" onClick={() => setExcFor(t)}>Raise exception…</button>
-                        : <button className="btn btn-sm" onClick={() => setExcFor(t)} title="Only approvers can create exceptions">Ask an approver…</button>)}
+                        : <button className="btn btn-sm" onClick={() => setExcFor(t)} title="Only Admins can create exceptions">Ask an Admin…</button>)}
                     </td>
                   </tr>
                 );
@@ -299,7 +307,7 @@ export default function DeploymentDetailPage() {
           title={{ pause: "Pause deployment", resume: "Resume deployment", cancel: "Cancel deployment", advance: "Start next stage", retry_failed: "Retry failed targets" }[action]}
           description={
             action === "advance" ? <>Finish <b>{ringName(d.current_ring)}</b> and start <b>{ringName(d.current_ring + 1)}</b>. The server refuses if the current stage still has targets in progress.</>
-              : action === "cancel" ? "Cancelling is final. No further assignments will be issued."
+              : action === "cancel" ? (pending ? "Cancelling is final. The deployment never starts." : "Cancelling is final. No further assignments will be issued.")
               : action === "pause" ? "Stops new assignments until resumed."
               : action === "retry_failed" ? <>
                   Reset the attempts of <b>{exhausted.length}</b> failed target{exhausted.length === 1 ? "" : "s"} in <b>{ringName(d.current_ring)}</b>
@@ -315,7 +323,7 @@ export default function DeploymentDetailPage() {
           onSubmit={(r) => run(action, r)}
         />
       )}
-      {excFor && (canApprove
+      {excFor && (canException
         ? <RaiseExceptionModal target={excFor} deployment={d} onClose={() => setExcFor(null)} onDone={() => void reload()} />
         : <AskApproverModal target={excFor} deployment={d} onClose={() => setExcFor(null)} />)}
     </ClockProvider>

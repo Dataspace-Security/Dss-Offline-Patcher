@@ -22,7 +22,7 @@ function RestartNeeded({ e }: { e: EndpointDetail }) {
 
 export default function EndpointDetailPage() {
   const { id = "" } = useParams();
-  const canEdit = useCan("operator");
+  const canEdit = useCan("user");
   const { data: e, error, reload } = useLoad(() => api.get<EndpointDetail>(`/api/endpoints/${enc(id)}`), [id], 15000);
   const [invFilter, setInvFilter] = useState("");
   const [retiring, setRetiring] = useState(false);
@@ -263,7 +263,7 @@ function EditForm({ e, canEdit, onSaved }: { e: Endpoint; canEdit: boolean; onSa
           {dirty && <button type="button" className="btn" onClick={() => setDirty(false)}>Discard</button>}
           <button className="btn btn-primary" disabled={!dirty || busy}>{busy ? "Saving…" : "Save changes"}</button>
         </div>
-      ) : <div className="hint">Editing requires the operator role.</div>}
+      ) : null}
     </form>
   );
 }

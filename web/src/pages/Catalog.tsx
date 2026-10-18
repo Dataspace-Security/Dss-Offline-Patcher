@@ -5,7 +5,7 @@ import { paths } from "../paths";
 import { useCan, useMe } from "../auth";
 import { LifecycleTimeline } from "../components/LifecycleTimeline";
 import { FleetLine, PatchThis } from "../components/PatchThis";
-import { approvedBy, fetchFleet, fetchPolicy } from "../components/patchPlan";
+import { approvedBy, fetchFleet, fetchPolicy, isAgentPackage } from "../components/patchPlan";
 import { CopyBox, Empty, ErrorBanner, KV, Mono, PageHeader, Pill, ReasonModal, Time, expandRowProps } from "../components/ui";
 import type { Package, PackageFleet, PackageKind, PackageState } from "../types";
 import { fmtBytes, shortHash, useLoad } from "../util";
@@ -22,11 +22,6 @@ function kindGroup(k: PackageKind): Exclude<KindFilter, ""> {
   return k === "msu" ? "windows" : "apps";
 }
 
-/** The offpatch agent's own packages (plumbing, not patching). */
-export function isAgentPackage(p: Pick<Package, "kind" | "package_id" | "package_name">): boolean {
-  return p.kind === "agent" || p.package_id.startsWith("offpatch-agent") || (p.package_name ?? "").startsWith("offpatch-agent");
-}
-
 function FleetNum({ n, tone }: { n: number | undefined; tone?: string }) {
   if (n === undefined) return <span className="muted">…</span>;
   return n ? <b className={tone ? `text-${tone}` : undefined}>{n}</b> : <span className="muted">0</span>;
@@ -38,6 +33,7 @@ function FleetNum({ n, tone }: { n: number | undefined; tone?: string }) {
  */
 export default function Catalog({ agents = false }: { agents?: boolean }) {
   const [sp, setSp] = useSearchParams();
+  const isSuper = useCan("super_admin");
   const state = sp.get("state") ?? "";
   const kind = (agents ? "" : sp.get("kind") ?? "") as KindFilter;
   const pathOf = agents ? paths.agentVersions : paths.catalog;
@@ -64,8 +60,8 @@ export default function Catalog({ agents = false }: { agents?: boolean }) {
     <>
       <PageHeader title={agents ? "Agent versions" : "Catalog"}
                   sub={agents
-                    ? "New versions of the offpatch agent, from validated bundles. Approve one, then deploy it to upgrade the agents."
-                    : "Packages extracted from validated bundles. Nothing is deployable until approved. Agent packages are under Settings → Agent versions."}>
+                    ? "New versions of the DSS Patcher agent, from validated bundles. Approve one, then deploy it to upgrade the agents."
+                    : `Packages extracted from validated bundles. Nothing is deployable until approved.${isSuper ? " Agent packages are under Settings → Agent versions." : ""}`}>
         <div className="cat-filters">
           <label className="inline-field">
             State
@@ -110,7 +106,7 @@ export default function Catalog({ agents = false }: { agents?: boolean }) {
                   <th className="num" title="Endpoints whose inventory shows they still need this patch">Needed</th>
                   <th className="num" title="Inventory already shows it (or a newer version / superseding KB)">Up to date</th>
                   <th className="num" title="Targets in an active or paused deployment that are not finished">Deploying</th>
-                  <th className="num" title="Installed by offpatch and confirmed by inventory">Verified</th>
+                  <th className="num" title="Installed by DSS Patcher and confirmed by inventory">Verified</th>
                   <th className="num" title="Failed or lost after install">Failed</th>
                   {!packageId && <th>Created</th>}
                 </tr>
@@ -173,9 +169,15 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
   const needs = useLoad(fetchFleet, [id], 60000);
   const policy = useLoad(fetchPolicy, []);
   const need = needs.data?.[id];
-  const canApprove = useCan("approver");
-  const canDeploy = useCan("operator");
+  const isUser = useCan("user");
+  const isAdmin = useCan("admin");
+  const isSuper = useCan("super_admin");
   const me = useMe();
+  // Agent versions are a vendor (super admin) matter; revoking is an Admin decision.
+  const agentPkg = !!p && isAgentPackage(p);
+  const canApprove = agentPkg ? isSuper : isUser;
+  const canDeploy = agentPkg ? isSuper : isUser;
+  const canRevoke = agentPkg ? isSuper : isAdmin;
   const [action, setAction] = useState<Action | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [justApproved, setJustApproved] = useState(false);
@@ -186,7 +188,7 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
     const updated = await api.post<Package>(`/api/packages/${enc(id)}/${a}`, { reason });
     setData(updated);
     setNotice(a === "approve" && updated.state === "quarantined"
-      ? `Recorded; needs another approver (${(updated.approvals ?? []).length} of ${updated.approvals_required || "?"} approvals).`
+      ? `Recorded; needs another person (${(updated.approvals ?? []).length} of ${updated.approvals_required || "?"} approvals).`
       : null);
     setJustApproved(a === "approve" && updated.state === "approved");
     void needs.reload();
@@ -216,7 +218,7 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
             {p.state === "quarantined" && canApprove && (
               <>
                 <button className="btn btn-primary" onClick={() => setAction("approve")} disabled={alreadyApproved}
-                        title={alreadyApproved ? "You have already approved this package; another approver is needed" : undefined}>
+                        title={alreadyApproved ? "You have already approved this package; someone else must approve it" : undefined}>
                   Approve…
                 </button>
                 <button className="btn btn-danger" onClick={() => setAction("reject")}>Reject…</button>
@@ -232,7 +234,7 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
               ? <button className="btn" disabled title={p.rollback_unsupported}>Rollback not supported</button>
               : <button className="btn btn-danger-ghost" title="Agents uninstall this package, stage by stage"
                   onClick={() => navigate(`/deployments/new?operation=rollback&package_id=${enc(p.package_id)}`)}>Roll back…</button>)}
-            {p.state === "approved" && canApprove && (
+            {p.state === "approved" && canRevoke && (
               <button className="btn btn-danger" onClick={() => setAction("revoke")}>Revoke…</button>
             )}
           </div>
@@ -240,21 +242,21 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
             <div className="banner banner-warn">Superseded by <Link to={paths.catalog(p.superseded_by)}><Mono>{p.superseded_by}</Mono></Link>; prefer deploying the newer package.</div>
           )}
           {p.state === "quarantined" && !canApprove && (
-            <div className="hint">Approval requires the approver role.</div>
+            <div className="hint">{agentPkg ? "Waiting for the super admin (vendor) to approve this agent version." : "Waiting for a User or Admin to approve it."}</div>
           )}
           {p.state === "quarantined" && canApprove && sod && !alreadyApproved && (
-            <div className="hint">Separation of duties is on: if you approve this package, another operator must deploy it.</div>
+            <div className="hint">Separation of duties is on: if you approve this package, another User must deploy it.</div>
           )}
           {notice && <div className="banner banner-info">{notice}</div>}
           {justApproved && p.state === "approved" && (
             <div className="banner banner-ok next-step">
               <span><b>Approved.</b> {need && <><b>{need.needed}</b> endpoint{need.needed === 1 ? "" : "s"} need it.</>}</span>
               {sod ? (
-                <span>Separation of duties is on: hand it to an operator. <CopyBox value={`${window.location.origin}${paths.catalog(p.package_id)}`} /></span>
+                <span>Separation of duties is on: hand it to another User. <CopyBox value={`${window.location.origin}${paths.catalog(p.package_id)}`} /></span>
               ) : canDeploy ? (
                 <button className="btn btn-sm btn-primary" onClick={() => setPatching(true)}>Patch this…</button>
               ) : (
-                <span>Hand off to an operator to deploy it.</span>
+                <span>{agentPkg ? "The super admin (vendor) can deploy it now." : "A User or Admin can deploy it now."}</span>
               )}
             </div>
           )}

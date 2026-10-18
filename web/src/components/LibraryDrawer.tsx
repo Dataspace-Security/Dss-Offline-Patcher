@@ -44,7 +44,7 @@ function archesOf(it: LibraryItem): string[] {
 export function LibraryDrawer({ kind, id, onClose, onImport, busy }: Props) {
   const { data: it, error } = useLoad(
     () => api.get<LibraryItemDetail>(`/api/library/${enc(kind)}/${enc(id)}`), [kind, id], 60000);
-  const canImport = useCan("operator");
+  const canImport = useCan("user");
   const [arch, setArch] = useState<string>("");
   const busyKey = `lib:${kind}:${id}`;
 
@@ -104,7 +104,7 @@ function DrawerBody({ it, canImport, arch, setArch, onImport, busy, busyKey }: {
         {canImport && blocked && <button className="btn" disabled title={blocked}>Import</button>}
       </div>
       {canImport && blocked && <div className="hint">{blocked}</div>}
-      {!canImport && <div className="hint">Importing needs the operator role.</div>}
+      {!canImport && <div className="hint">Viewers can look but not import.</div>}
       {it.importable === "unknown" && !blocked && (
         <div className="hint">The installer has not been checked yet. If it turns out not to be an MSI, the import will show “Can't import” with the reason.</div>
       )}
@@ -128,7 +128,7 @@ function DrawerBody({ it, canImport, arch, setArch, onImport, busy, busyKey }: {
       {(links.homepage || links.publisher_url || links.manifest) && (
         <>
           <h3>Links</h3>
-          <div className="hint">For reading only. offpatch never downloads from these; it installs only signed packages from the Catalog.</div>
+          <div className="hint">For reading only. DSS Patcher never downloads from these; it installs only signed packages from the Catalog.</div>
           <UnverifiedLink label={it.kind === "os" ? "Microsoft Update Catalog" : "Homepage"} url={links.homepage} />
           <UnverifiedLink label="Publisher" url={links.publisher_url} />
           <UnverifiedLink label="winget manifest" url={links.manifest} />

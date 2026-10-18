@@ -53,7 +53,7 @@ export function UnverifiedLink({ label, url }: { label: string; url: string | un
 /** "can import" / "Can't import: reason" / "Not checked yet". */
 export function ImportableBadge({ item }: { item: Pick<LibraryItem, "importable" | "importable_reason"> }) {
   if (item.importable === "yes") {
-    return <span title="offpatch can download and install this (MSI installer)"><Pill state="verified" label="can import" /></span>;
+    return <span title="DSS Patcher can download and install this (MSI installer)"><Pill state="verified" label="can import" /></span>;
   }
   if (item.importable === "no") {
     return <span className="text-red small">Can't import{item.importable_reason ? `: ${item.importable_reason}` : ""}</span>;
