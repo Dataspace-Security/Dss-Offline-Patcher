@@ -26,6 +26,7 @@ import Catalog from "./pages/Catalog";
 import Imports from "./pages/Imports";
 import Library from "./pages/Library";
 import ServerPage from "./pages/Server";
+import AutoDownloadPage from "./pages/AutoDownload";
 import AgentSetupPage from "./pages/AgentSetup";
 import Users from "./pages/Users";
 import MaintenanceWindows from "./pages/MaintenanceWindows";
@@ -215,14 +216,16 @@ function Shell({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
               </Route>
               <Route element={<PatchesArea />}>
                 <Route path="/patches/needed" element={<PatchUpdates />} />
-                <Route path="/patches/library" element={<Library />} />
+                {/* Library: the vendor's tool; Imports: User and up. Hidden tabs open Needed. */}
+                <Route path="/patches/library" element={isSuper ? <Library /> : <Navigate to={paths.needed()} replace />} />
                 <Route path="/patches/catalog" element={<Catalog />} />
                 <Route path="/patches/catalog/:packageId" element={<Catalog />} />
-                <Route path="/patches/imports" element={<Imports />} />
+                <Route path="/patches/imports" element={hasRole(me, "user") ? <Imports /> : <Navigate to={paths.needed()} replace />} />
               </Route>
               <Route element={<DeploymentsArea />}>
                 <Route path="/deployments" element={<DeploymentList />} />
                 <Route path="/deployments/windows" element={<MaintenanceWindows />} />
+                <Route path="/deployments/exceptions" element={<Exceptions />} />
               </Route>
               <Route path="/deployments/new" element={<NewDeploymentPage />} />
               <Route path="/deployments/:id" element={<DeploymentDetailPage />} />
@@ -231,16 +234,18 @@ function Shell({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
                 <Route path="/endpoints/add" element={hasRole(me, "user") ? <AgentSetupPage /> : <Navigate to={paths.endpoints} replace />} />
               </Route>
               <Route path="/endpoints/:id" element={<EndpointDetailPage />} />
+              {/* Exceptions moved to Deployments; the old address keeps working for everyone. */}
+              <Route path="/reports/exceptions" element={<Moved to={paths.exceptions} />} />
               <Route element={<ReportsArea />}>
                 <Route path="/reports" element={<Reports />} />
                 <Route path="/reports/compliance" element={<ComplianceReport />} />
                 <Route path="/reports/profile" element={<ReportProfilePage />} />
-                <Route path="/reports/exceptions" element={<Exceptions />} />
                 <Route path="/reports/audit" element={<Audit />} />
               </Route>
               {isAdmin && (
                 <Route element={<SettingsArea isAdmin={isAdmin} isSuper={isSuper} />}>
                   <Route path="/settings/server" element={isSuper ? <ServerPage /> : <Navigate to={settingsHome} replace />} />
+                  <Route path="/settings/auto-download" element={isSuper ? <AutoDownloadPage /> : <Navigate to={settingsHome} replace />} />
                   <Route path="/settings/agents" element={isSuper ? <Catalog agents key="agents" /> : <Navigate to={settingsHome} replace />} />
                   <Route path="/settings/agents/:packageId" element={isSuper ? <Catalog agents key="agents" /> : <Navigate to={settingsHome} replace />} />
                   <Route path="/settings/users" element={<Users />} />
@@ -254,7 +259,6 @@ function Shell({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
               <Route path="/patches/status" element={<Moved to={paths.needed()} add={{ view: "all" }} />} />
               <Route path="/patches/downloads" element={<Moved to={paths.imports} />} />
               <Route path="/patches/received" element={<Moved to={paths.imports} />} />
-              <Route path="/deployments/exceptions" element={<Moved to={paths.exceptions} />} />
               <Route path="/patches/*" element={<Moved to={paths.needed()} />} />
               <Route path="/updates" element={<Moved to={paths.needed()} />} />
               <Route path="/catalog" element={<Moved to={paths.catalog()} />} />

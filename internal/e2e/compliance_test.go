@@ -14,6 +14,7 @@ import (
 	"offpatch/internal/agent"
 	"offpatch/internal/compliance"
 	"offpatch/internal/manifest"
+	"offpatch/internal/pdf"
 	"offpatch/internal/store"
 )
 
@@ -127,6 +128,13 @@ func TestCompliancePackAfterDeployment(t *testing.T) {
 	}
 	if !bytes.Contains(files["report.md"], []byte("## 7. Findings and corrective action plan")) || !bytes.Contains(files["report.md"], []byte("pc-c-bad")) {
 		t.Fatal("report.md")
+	}
+	// report.pdf: a real PDF of the same report, covered by the manifest.
+	if _, err := pdf.Check(files["report.pdf"]); err != nil {
+		t.Fatalf("report.pdf: %v", err)
+	}
+	if pages, err := pdf.PageTexts(files["report.pdf"]); err != nil || !strings.Contains(strings.Join(pages[0], " "), m.ReportID) {
+		t.Fatalf("report.pdf text: %v", err)
 	}
 	csv := string(files["evidence/E-007-endpoint-results.csv"])
 	if strings.Count(csv, "\n") != 7 || !strings.Contains(csv, "pc-c-exc") || !strings.Contains(csv, ",exception,") {

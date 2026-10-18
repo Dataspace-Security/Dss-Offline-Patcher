@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The shipped example must stay loadable as the config schema evolves.
@@ -79,6 +80,56 @@ func TestAcquisitionRequestsDirConfig(t *testing.T) {
 	}
 	if CheckAcquisitionRequestsDir(filepath.Join(c.AcquisitionRequestsDir, "missing")) == nil {
 		t.Error("missing dir reported writable")
+	}
+}
+
+func TestDeploymentModeConfig(t *testing.T) {
+	for mode, ok := range map[string]bool{"": true, `"deployment_mode": "single-server",`: true, `"deployment_mode": "two-machine",`: true, `"deployment_mode": "lab",`: false} {
+		p := filepath.Join(t.TempDir(), "pmserver.json")
+		cfg := `{"insecure_http": true, ` + mode + `"trusted_keys":[{"public_key":"x","sources":["a"]}]}`
+		if err := os.WriteFile(p, []byte(cfg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := LoadConfig(p)
+		if (err == nil) != ok {
+			t.Fatalf("%s: err = %v, want ok = %v", mode, err, ok)
+		}
+		if ok && mode != "" && !strings.Contains(mode, c.DeploymentMode) {
+			t.Errorf("%s: DeploymentMode = %q", mode, c.DeploymentMode)
+		}
+		if !ok && !strings.Contains(err.Error(), "deployment_mode") {
+			t.Errorf("error does not name the key: %v", err)
+		}
+	}
+}
+
+// acquisition_stale_after: 3h by default on a single server (hourly runs on
+// this host), 26h otherwise; explicit values win; under 1h is refused.
+func TestAcquisitionStaleAfterConfig(t *testing.T) {
+	load := func(extra string) (*Config, error) {
+		p := filepath.Join(t.TempDir(), "pmserver.json")
+		cfg := `{"insecure_http": true, ` + extra + `"trusted_keys":[{"public_key":"x","sources":["a"]}]}`
+		if err := os.WriteFile(p, []byte(cfg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return LoadConfig(p)
+	}
+	for extra, want := range map[string]time.Duration{
+		``:                                    26 * time.Hour,
+		`"deployment_mode": "two-machine",`:   26 * time.Hour,
+		`"deployment_mode": "single-server",`: 3 * time.Hour,
+		`"deployment_mode": "single-server", "acquisition_stale_after": "5h",`: 5 * time.Hour,
+	} {
+		c, err := load(extra)
+		if err != nil {
+			t.Fatalf("%s: %v", extra, err)
+		}
+		if c.AcquisitionStaleAfter.Duration != want {
+			t.Errorf("%s: acquisition_stale_after = %v, want %v", extra, c.AcquisitionStaleAfter.Duration, want)
+		}
+	}
+	if _, err := load(`"acquisition_stale_after": "30m",`); err == nil {
+		t.Error("acquisition_stale_after under 1h accepted")
 	}
 }
 

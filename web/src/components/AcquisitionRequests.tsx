@@ -18,6 +18,8 @@ export function AcquisitionRequests({ data, error, onChanged }: {
 }) {
   const [open, setOpen] = useState<string | null>(null);
   const canRequest = useCan("user");
+  // The Library is the vendor's (super admin) tool.
+  const isSuper = useCan("super_admin");
   const imp = useImportRequest(onChanged);
   // "Ask again" for one item that was not picked up / failed: a new request for just that item.
   const askAgain = (i: AcquisitionRequestItem, busyKey: string) =>
@@ -28,7 +30,7 @@ export function AcquisitionRequests({ data, error, onChanged }: {
         <h3>Acquisition requests {data && <span className="muted">· {data.length}</span>}</h3>
         <span>
           <Link className="btn btn-sm" to={paths.needed()}>What the fleet needs →</Link>{" "}
-          <Link className="btn btn-sm" to={paths.library()}>Find software in the Library →</Link>
+          {isSuper && <Link className="btn btn-sm" to={paths.library()}>Find software in the Library →</Link>}
         </span>
       </div>
       <div className="hint">
@@ -39,7 +41,7 @@ export function AcquisitionRequests({ data, error, onChanged }: {
       {error && <div className="banner banner-warn">Request tracking is unavailable: {error}</div>}
       {imp.error && <div className="banner banner-error">Import failed: {imp.error}</div>}
       {imp.result && <RequestResultBanner req={imp.result} onDismiss={imp.dismiss} />}
-      {data && data.length === 0 && <Empty>Nothing imported yet. Use Import on <Link to={paths.needed()}>Needed</Link> or in the <Link to={paths.library()}>Library</Link>.</Empty>}
+      {data && data.length === 0 && <Empty>Nothing imported yet. Use Import on <Link to={paths.needed()}>Needed</Link>{isSuper && <> or in the <Link to={paths.library()}>Library</Link></>}.</Empty>}
       {data && data.length > 0 && (
         <table className="table">
           <thead><tr><th>Request</th><th>By</th><th>Exported</th><th>Seen by downloader</th><th>Items</th><th>Progress</th></tr></thead>

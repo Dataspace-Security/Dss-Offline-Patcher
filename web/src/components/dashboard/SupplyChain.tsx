@@ -17,20 +17,22 @@ type Props = {
   acquisition: AcquisitionOverview | null;
   acquisitionError: string | null;
   requests: AcquisitionRequestRecord[] | null;
+  /** Imports (download runs, requests) are User and up; viewers see the update information and bundles only. */
+  showImports?: boolean;
 };
 
 const OPEN_ITEM = new Set(["requested", "seen", "stale", "failed"]);
 
 /** Supply chain: last download run, age of the update information, imports waiting, bundles received. */
-export function SupplyChain({ summary, acquisition, acquisitionError, requests }: Props) {
+export function SupplyChain({ summary, acquisition, acquisitionError, requests, showImports = true }: Props) {
   return (
     <DashCard title="Supply chain" className="dash-span-1" sub="How updates reach this offline network"
-              action={<Link to={paths.imports} className="dash-link">Imports →</Link>}>
+              action={showImports ? <Link to={paths.imports} className="dash-link">Imports →</Link> : undefined}>
       {!summary ? <Skeleton lines={5} /> : (
         <ul className="dash-facts">
-          <LastRun acquisition={acquisition} error={acquisitionError} />
+          {showImports && <LastRun acquisition={acquisition} error={acquisitionError} />}
           <IntelAge summary={summary} />
-          <ImportsWaiting requests={requests} />
+          {showImports && <ImportsWaiting requests={requests} />}
           <Bundles summary={summary} />
         </ul>
       )}

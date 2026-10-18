@@ -35,6 +35,12 @@ type KeyConfig struct {
 	Sources       []string `json:"sources"`
 }
 
+// Values of Config.DeploymentMode.
+const (
+	DeploymentSingleServer = "single-server"
+	DeploymentTwoMachine   = "two-machine"
+)
+
 type Config struct {
 	Listen                 string         `json:"listen"`
 	DataDir                string         `json:"data_dir"`
@@ -84,6 +90,15 @@ type Config struct {
 	// users' authenticator secrets (AES-256-GCM). Default
 	// <data_dir>/mfa.key; created (0600) on first start when missing.
 	MFAKeyFile string `json:"mfa_key_file"`
+	// DeploymentMode: how the product is laid out, disclosed in the
+	// compliance report. "single-server" = the internet-facing downloader
+	// runs on this server (egress limited to its account by host firewall
+	// rules); "two-machine" = separate acquisition host. Empty = not stated.
+	DeploymentMode string `json:"deployment_mode"`
+	// AcquisitionStaleAfter: warn when an acquisition source has sent no
+	// status report for this long. Default 3h with deployment_mode
+	// single-server (hourly runs on this host), else 26h.
+	AcquisitionStaleAfter Duration `json:"acquisition_stale_after"`
 
 	dir string // directory of the config file; relative paths resolve from here
 	// fromFile: loaded by LoadConfig (LogAuthMode logs only then).
@@ -202,6 +217,20 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, fmt.Errorf("config: acquisition_requests_dir must be an absolute path (got %q)", c.AcquisitionRequestsDir)
 		}
 		c.AcquisitionRequestsDir = filepath.Clean(c.AcquisitionRequestsDir)
+	}
+	switch c.DeploymentMode {
+	case "", DeploymentSingleServer, DeploymentTwoMachine:
+	default:
+		return nil, fmt.Errorf("config: deployment_mode must be %q or %q (got %q)", DeploymentSingleServer, DeploymentTwoMachine, c.DeploymentMode)
+	}
+	if c.AcquisitionStaleAfter.Duration == 0 {
+		c.AcquisitionStaleAfter.Duration = store.DefaultAcqStaleAfter
+		if c.DeploymentMode == DeploymentSingleServer {
+			c.AcquisitionStaleAfter.Duration = store.SingleServerAcqStaleAfter
+		}
+	}
+	if c.AcquisitionStaleAfter.Duration < time.Hour {
+		return nil, fmt.Errorf("config: acquisition_stale_after must be at least 1h (the acquisition run is hourly)")
 	}
 	if c.AlertSweepEvery.Duration == 0 {
 		c.AlertSweepEvery.Duration = 5 * time.Minute

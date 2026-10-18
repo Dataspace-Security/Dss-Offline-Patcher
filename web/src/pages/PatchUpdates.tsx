@@ -44,6 +44,8 @@ export default function PatchUpdates() {
     setSp(n, { replace: true });
   };
   const canRequest = useCan("user");
+  // The Library is the vendor's (super admin) tool.
+  const isSuper = useCan("super_admin");
   const status = useLoad(() => api.get<FleetStatus>("/api/fleet/status"), [], POLL_MS);
   const needed = useLoad(() => api.get<FleetUpdates>("/api/updates"), [], POLL_MS);
   const fleet = useLoad(fetchFleet, [], POLL_MS);
@@ -118,8 +120,9 @@ export default function PatchUpdates() {
     <>
       <PageHeader
         title="Needed"
-        sub={<>Updates for the Windows versions and applications on your machines, imported or not. To add software no machine has yet, use
-          the <Link to={paths.library()}>Library</Link>. <b>Up to date</b> = inventory shows it; <b>verified</b> = installed by a DSS Patcher deployment and confirmed.
+        sub={<>Updates for the Windows versions and applications on your machines, imported or not.{" "}
+          {isSuper ? <>To add software no machine has yet, use the <Link to={paths.library()}>Library</Link>.</> : "Software no machine has yet is added by the vendor."}{" "}
+          <b>Up to date</b> = inventory shows it; <b>verified</b> = installed by a DSS Patcher deployment and confirmed.
           {status.loadedAt ? <> · updated <RelTime value={new Date(status.loadedAt).toISOString()} /></> : null}</>}
       >
         <input className="search" placeholder="Filter by update, app, version or host…" value={q} onChange={(e) => setQ(e.target.value)} />

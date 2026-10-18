@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"offpatch/internal/acqpolicy"
 	"offpatch/internal/manifest"
 )
 
@@ -52,6 +53,36 @@ type Report struct {
 	// request this run, so the console can say "Can't import: <reason>"
 	// on the exact row the operator clicked instead of a run-wide summary.
 	Items []ItemResult `json:"items,omitempty"`
+
+	// Auto-download policy (see internal/acqpolicy): the version this run
+	// merged over acquire.json (0 = none), its hash and editor, when this
+	// downloader first applied it, and why a delivered policy file was
+	// refused (the previous version then stays in force).
+	PolicyVersion   int    `json:"policy_version,omitempty"`
+	PolicySHA256    string `json:"policy_sha256,omitempty"`
+	PolicyEditedBy  string `json:"policy_edited_by,omitempty"`
+	PolicyAppliedAt string `json:"policy_applied_at,omitempty"`
+	PolicyError     string `json:"policy_error,omitempty"`
+	// Sources: per policy source / app / Windows entry results this run.
+	Sources []SourceResult `json:"sources,omitempty"`
+	// Defaults: what acquire.json configures, as policy entries (the console
+	// offers it as the starting policy), plus its custom feeds by name.
+	Defaults *acqpolicy.Base `json:"defaults,omitempty"`
+	// RunRequest: the console "Run now" request this run served.
+	RunRequest string `json:"run_request,omitempty"`
+}
+
+// SourceResult is what one policy entry did in one run.
+//
+// Result is one of new | up_to_date | failed | unsupported | waiting |
+// disabled | applied (a source that only changes where things come from).
+type SourceResult struct {
+	Kind     string   `json:"kind"` // source | app | windows
+	ID       string   `json:"id"`   // source id, winget id, or "<product> <build> <arch>"
+	Type     string   `json:"type,omitempty"`
+	Result   string   `json:"result"`
+	Detail   string   `json:"detail,omitempty"`
+	Packages []string `json:"packages,omitempty"`
 }
 
 // ItemResult is what happened to one requested item in one run.

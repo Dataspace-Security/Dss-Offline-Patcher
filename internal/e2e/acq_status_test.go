@@ -43,7 +43,7 @@ func TestAcquisitionStatusAndSystem(t *testing.T) {
 		Sources []store.AcqSource `json:"sources"`
 		History []store.AcqRecord `json:"history"`
 	}
-	if c := e.api("GET", "/api/acquisition", tokViewer, nil, &resp); c != 200 || len(resp.Sources) != 1 || resp.Sources[0].Last.Outcome != "ok" || resp.Sources[0].Stale {
+	if c := e.api("GET", "/api/acquisition", tokOperator, nil, &resp); c != 200 || len(resp.Sources) != 1 || resp.Sources[0].Last.Outcome != "ok" || resp.Sources[0].Stale {
 		t.Fatalf("acquisition: %d %+v", c, resp)
 	}
 	var rep acqstatus.Report
@@ -60,7 +60,7 @@ func TestAcquisitionStatusAndSystem(t *testing.T) {
 	forged := ok
 	forged.FinishedAt = now.Add(2 * time.Second).Format(time.RFC3339)
 	e.dropStatus(forged, []byte("x"))
-	e.api("GET", "/api/acquisition", tokViewer, nil, &resp)
+	e.api("GET", "/api/acquisition", tokOperator, nil, &resp)
 	if len(resp.History) != 2 || resp.Sources[0].Last.Outcome != "partial" {
 		t.Fatalf("history: %d, last %s", len(resp.History), resp.Sources[0].Last.Outcome)
 	}
@@ -78,7 +78,7 @@ func TestAcquisitionStatusAndSystem(t *testing.T) {
 	real := e.st.Now
 	e.st.Now = func() time.Time { return real().Add(30 * time.Hour) }
 	e.st.SweepAlerts(context.Background(), store.DefaultThresholds)
-	e.api("GET", "/api/acquisition", tokViewer, nil, &resp)
+	e.api("GET", "/api/acquisition", tokOperator, nil, &resp)
 	e.st.Now = real
 	if !resp.Sources[0].Stale {
 		t.Fatal("acquisition should be stale after 30 h of silence")

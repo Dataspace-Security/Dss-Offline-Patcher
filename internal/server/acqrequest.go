@@ -61,6 +61,14 @@ func (s *Server) exportAcqRequest(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	// The Library is the vendor's: bank roles import only what the fleet
+	// view lists (Patches → Needed), never something no endpoint has.
+	if !isVendor(r) {
+		if lib := libraryOnlyKeys(updates, li, body); len(lib) > 0 || len(body.AppArchs) > 0 {
+			s.denyLibraryImport(w, r, lib)
+			return
+		}
+	}
 	req, missing, err := buildAcqRequest(updates, li, body)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -127,6 +135,44 @@ func (s *Server) exportAcqRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Disposition", `attachment; filename="`+req.RequestID+`.json"`)
 	writeJSON(w, 200, queuedRequest{Request: req, QueuedTo: queuedTo})
+}
+
+// libraryVendorOnly is the refusal for a bank role importing from the
+// Library (a key no endpoint has, or app_archs).
+const libraryVendorOnly = "the Library is the vendor's (super admin): import what your machines need from Patches → Needed"
+
+// libraryOnlyKeys lists the requested keys the fleet view does not have
+// but the Library index does (keys in neither are reported as missing by
+// buildAcqRequest).
+func libraryOnlyKeys(updates []*fleetUpdate, li *libIndex, body acqRequestBody) []string {
+	have := map[string]bool{}
+	for _, u := range updates {
+		have[u.Kind+"\x00"+strings.ToLower(u.Key)] = true
+	}
+	var lib []string
+	for _, id := range body.Apps {
+		if !have["app\x00"+strings.ToLower(strings.TrimSpace(id))] && li.entry("app", strings.TrimSpace(id)) != nil {
+			lib = append(lib, id)
+		}
+	}
+	for _, kb := range body.KBs {
+		if !have["os\x00"+strings.ToLower(strings.TrimSpace(kb))] && li.entry("os", strings.TrimSpace(kb)) != nil {
+			lib = append(lib, kb)
+		}
+	}
+	return lib
+}
+
+// denyLibraryImport refuses (403) and audits a bank-role Library import.
+func (s *Server) denyLibraryImport(w http.ResponseWriter, r *http.Request, keys []string) {
+	p, _ := r.Context().Value(keyPrincipal).(*principal)
+	role := ""
+	if p != nil {
+		role = p.Role
+	}
+	s.store.Audit(r.Context(), store.Ev{Actor: actor(r), Action: "access.denied", ObjectType: "api", ObjectID: r.Method + " " + r.URL.Path, Failure: true,
+		Details: map[string]any{"role": role, "required": store.RoleSuperAdmin, "reason": "library import", "items": keys}})
+	writeErr(w, http.StatusForbidden, libraryVendorOnly)
 }
 
 // buildAcqRequest fills a request from the fleet view for the selected keys

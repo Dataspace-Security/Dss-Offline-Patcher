@@ -121,6 +121,16 @@ func (pk *Pack) WriteZip(w io.Writer, key ed25519.PrivateKey, beforeSeal func(ma
 	}); err != nil {
 		return m, err
 	}
+	if _, err := put("report.pdf", func(w io.Writer) error {
+		b, err := pk.PDF()
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(b)
+		return err
+	}); err != nil {
+		return m, err
+	}
 	if _, err := put("summary.json", func(w io.Writer) error {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")

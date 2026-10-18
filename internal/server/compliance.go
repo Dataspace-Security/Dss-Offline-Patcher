@@ -234,7 +234,7 @@ func (s *Server) reportInput(ctx context.Context, p *principal, from, to time.Ti
 		ApprovalPolicy: c.ApprovalPolicy, RequireMFA: c.RequireMFA, SSO: c.OIDC != nil, TLS: c.TLSCert != "", MTLSAgents: c.PKIDir != "",
 		InsecureHTTP: c.InsecureHTTP, ScannerConfigured: len(c.ScanCommand) > 0, AuditExportDir: c.AuditExportDir != "", AuditExportedSeq: expSeq,
 		AuditRetention: c.AuditRetention.Duration, AuditCheckpointEvery: c.AuditCheckpointEvery.Duration, OfflineAfter: c.OfflineAfter.Duration,
-		StaleAfter: c.StaleInventoryAfter.Duration}
+		StaleAfter: c.StaleInventoryAfter.Duration, DeploymentMode: c.DeploymentMode}
 	return in, nil
 }
 

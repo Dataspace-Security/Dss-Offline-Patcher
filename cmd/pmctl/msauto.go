@@ -138,7 +138,11 @@ func (r *msRun) candidates() (cands []msCand, superseded map[string]string, msrc
 		for _, p := range m.Products {
 			for _, u := range updates {
 				fu, ok := u.ForProduct(p.MSRCProduct, p.Arch)
-				if !ok || sevRank[fu.Severity] < sevRank[m.MinSeverity] {
+				minSev := m.MinSeverity
+				if p.MinSeverity != "" {
+					minSev = p.MinSeverity
+				}
+				if !ok || sevRank[fu.Severity] < sevRank[minSev] {
 					continue
 				}
 				for _, s := range fu.Supersedes {

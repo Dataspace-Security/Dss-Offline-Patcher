@@ -368,7 +368,7 @@ func TestZipManifestAndSignature(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sealed) != 64 || m.PublicKeyFingerprint != KeyFingerprint(pub) || m.ReportID != pk.Meta.ReportID || len(m.Files) != 12 {
+	if len(sealed) != 64 || m.PublicKeyFingerprint != KeyFingerprint(pub) || m.ReportID != pk.Meta.ReportID || len(m.Files) != 13 {
 		t.Fatalf("manifest: %+v", m)
 	}
 	got, err := VerifyZip(buf.Bytes(), pub)
@@ -449,5 +449,27 @@ func TestLargeFleet(t *testing.T) {
 	}
 	if pk.Timeliness.PairsTotal != 200000 || len(pk.Timeliness.Pairs) != PairsLimit || !pk.Timeliness.PairsTruncated || pk.ExecutiveSummary.CompliantWithPolicy.Count != 10000 {
 		t.Fatalf("large fleet: total %d listed %d compliant %d", pk.Timeliness.PairsTotal, len(pk.Timeliness.Pairs), pk.ExecutiveSummary.CompliantWithPolicy.Count)
+	}
+}
+
+// A single-server deployment (downloader on the management server) is
+// disclosed in the scope limitations and the PM-04 rationale; other modes
+// say nothing about it.
+func TestSingleServerDeploymentDisclosed(t *testing.T) {
+	for _, mode := range []string{"", "two-machine", "single-server"} {
+		in := fixture()
+		in.Settings.DeploymentMode = mode
+		pk := build(t, in)
+		want := mode == "single-server"
+		lim := strings.Join(pk.ScopeLimitations.Auto, "\n")
+		if got := strings.Contains(lim, SingleServerLimitation); got != want {
+			t.Errorf("mode %q: limitation disclosed = %v, want %v", mode, got, want)
+		}
+		if got := strings.Contains(control(pk, "PM-04").Rationale, "Single-server deployment"); got != want {
+			t.Errorf("mode %q: PM-04 rationale mentions single-server = %v, want %v: %s", mode, got, want, control(pk, "PM-04").Rationale)
+		}
+		if got := strings.Contains(pk.Markdown(), "Single-server deployment"); got != want {
+			t.Errorf("mode %q: markdown mentions single-server = %v, want %v", mode, got, want)
+		}
 	}
 }

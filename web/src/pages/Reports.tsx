@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { api, downloadFile, errMsg } from "../api";
+import { api, downloadFile, downloadFileNamed, errMsg } from "../api";
 import { paths } from "../paths";
 import { Empty, ErrorBanner, PageHeader, Pill, RelTime, Time } from "../components/ui";
 import type { ComplianceReport, SeverityStats } from "../types";
@@ -46,11 +46,13 @@ export default function Reports() {
   const [dl, setDl] = useState<string | null>(null);
   const [dlError, setDlError] = useState<string | null>(null);
 
-  const download = async (path: string, name: string) => {
+  // named: keep the server's file name (DSS-Patcher-…-<id>.pdf); name is the fallback.
+  const download = async (path: string, name: string, named = false) => {
     setDl(name);
     setDlError(null);
     try {
-      await downloadFile(path, name);
+      if (named) await downloadFileNamed(path, name);
+      else await downloadFile(path, name);
     } catch (e) {
       setDlError(`Download failed: ${errMsg(e)}`);
     } finally {
@@ -78,7 +80,10 @@ export default function Reports() {
                   onClick={() => void download("/api/reports/targets.csv", `offpatch-evidence-${today()}.csv`)}>
             {dl?.includes("evidence") ? "Downloading…" : "Download evidence (CSV)"}
           </button>
-          <button className="btn btn-primary" onClick={() => window.print()} disabled={!r}>Print / save as PDF</button>
+          <button className="btn btn-primary" disabled={!!dl} title="This report as a PDF file made by the server"
+                  onClick={() => void download("/api/reports/compliance.pdf", `DSS-Patcher-patch-compliance-${today()}.pdf`, true)}>
+            {dl?.endsWith(".pdf") ? "Preparing…" : "Download PDF"}
+          </button>
         </div>
       </PageHeader>
       <ErrorBanner error={error} />

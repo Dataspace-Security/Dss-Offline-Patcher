@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"offpatch/internal/compliance"
 	"offpatch/internal/manifest"
+	"offpatch/internal/pdf"
 	"offpatch/internal/store"
 )
 
@@ -97,5 +99,41 @@ func TestComplianceReportAPI(t *testing.T) {
 	if len(evs) != 2 || !strings.Contains(string(evs[0].Details), `"format":"zip"`) || !strings.Contains(string(evs[0].Details), "manifest_sha256") ||
 		!strings.Contains(string(evs[1].Details), `"format":"json"`) {
 		t.Fatalf("generation audit: %+v", evs)
+	}
+}
+
+// Server PDFs (every signed-in role; here a viewer): the auditor report, the patch compliance
+// report and the audit log, each a valid PDF with its headings, a
+// DSS-Patcher-… file name, and audited.
+func TestReportPDFs(t *testing.T) {
+	s := newRolesServer(t, "", false)
+	h := s.Handler()
+	for _, c := range []struct{ path, name, heading, action string }{
+		{"/api/reports/compliance-pack.pdf?from=2026-01-01&to=2026-12-31", "DSS-Patcher-compliance-report-2026-01-01_2026-12-31-CR-", "1. Executive summary", "report.compliance_generated"},
+		{"/api/reports/compliance.pdf", "DSS-Patcher-patch-compliance-", "Compliance by severity", "report.exported"},
+		{"/api/audit.pdf?from=2026-01-01&to=2026-12-31", "DSS-Patcher-audit-log-2026-01-01_2026-12-31-AL-", "Events", "report.exported"},
+	} {
+		w := do(h, req{method: "GET", path: c.path, token: roleTokens["viewer"]})
+		if w.Code != 200 || w.Header().Get("Content-Type") != "application/pdf" || !strings.Contains(w.Header().Get("Content-Disposition"), `filename="`+c.name) {
+			t.Fatalf("%s: %d %v %.200s", c.path, w.Code, w.Header(), w.Body)
+		}
+		if _, err := pdf.Check(w.Body.Bytes()); err != nil {
+			t.Fatalf("%s: %v", c.path, err)
+		}
+		pages, err := pdf.PageTexts(w.Body.Bytes())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var all []string
+		for _, p := range pages {
+			all = append(all, p...)
+		}
+		if !slices.Contains(all, c.heading) {
+			t.Errorf("%s: no %q heading", c.path, c.heading)
+		}
+		evs, _ := s.store.ListAudit(context.Background(), store.AuditQuery{Action: c.action, Limit: 1})
+		if len(evs) == 0 || !strings.Contains(string(evs[0].Details), `"format":"pdf"`) {
+			t.Errorf("%s: not audited: %+v", c.path, evs)
+		}
 	}
 }

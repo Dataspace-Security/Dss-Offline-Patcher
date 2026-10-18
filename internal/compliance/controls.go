@@ -342,6 +342,9 @@ func (pk *Pack) controls(f *facts, res pairsResult) []Control {
 	default:
 		c = auto(c, store.StatusCompliant, "Every bundle in the period has a matching signed transfer receipt; egress evidence is referenced.")
 	}
+	if in.Settings.DeploymentMode == "single-server" {
+		c.Rationale += " " + SingleServerLimitation + " The transfer boundary is between the downloader and server accounts on one host, not between separate machines."
+	}
 	out = append(out, c)
 
 	// PM-05 quarantine and verification.

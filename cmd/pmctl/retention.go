@@ -27,6 +27,7 @@ func applyRetention(c *autoConfig, st autoState, runDir string, inUse map[string
 		cutoff := now.Add(-time.Duration(c.KeepDownloadsDays) * 24 * time.Hour)
 		pruneDownloads(filepath.Join(c.WorkDir, "downloads"), st, inUse, cutoff, warn)
 	}
+	pruneOldVersions(filepath.Join(c.WorkDir, "downloads"), st, inUse, c.keepLastN, warn)
 }
 
 // pruneRuns deletes run directories older than cutoff (by the time in their

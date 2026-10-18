@@ -1,25 +1,38 @@
 #!/usr/bin/env bash
-# offpatch setup for Ubuntu (22.04 / 24.04 / 26.04, amd64 or arm64). --role is required.
+# DSS Patcher (offpatch) setup for Ubuntu (22.04 / 24.04 / 26.04, amd64 or arm64).
 #
-# Production: one role per machine (see README "Install").
+# Production, one server (default):
+#   sudo ./install-ubuntu.sh
+#   = --role all: management server + console + downloader + backups on this machine, hardened:
+#     egress lock (only the downloader account reaches the internet, TCP 80/443 + DNS), console
+#     port limited to the local subnet when ufw is active, deployment disclosed in the compliance
+#     report. Then move the offline root key off the server:
+#   sudo ./install-ubuntu.sh --export-root-key /media/usb
+#   Agents: console → Endpoints → Create enrollment token → run the PowerShell line on each PC.
+#
+# Two-machine layout (stricter: the internet-facing downloader holds no server data):
 #   isolated zone   sudo ./install-ubuntu.sh --role server --hosts pm.corp.local,10.0.0.5 \
 #                        --pubkey bundle.pub --root-pubkey root.pub --allow-from 10.0.0.0/16
 #   connected zone  sudo ./install-ubuntu.sh --role acquisition
 #   endpoint        sudo ./install-ubuntu.sh --role agent --server https://pm.example:8443 \
 #                        --token enr_... --ca ca.pem --pubkey bundle.pub [--root-pubkey root.pub]
-# Single-box LAB only (internet downloader + signing keys + root key + server on one machine):
-#                   sudo ./install-ubuntu.sh --role all [--hosts ...] [--with-agent]
 #
 #   sudo ./install-ubuntu.sh --status
+#   sudo ./install-ubuntu.sh --export-root-key DIR [--yes]   copy root.key to offline media, then shred it
 #   sudo ./install-ubuntu.sh --uninstall [--purge [--yes]]
 #
 # Options:
+#   --role all|server|acquisition|agent  default: the role of an earlier install, else all
 #   --hosts "pm.corp.local,10.0.0.5"  extra names/IPs for the server certificate (first install)
 #   --port 8443                       server port (first install; re-runs use pmserver.json)
 #   --pubkey FILE / --root-pubkey FILE  role server: public keys from the acquisition host and the
-#                                     offline root key (first install; never overwritten later)
+#                                     offline root key (first install; never overwritten later).
+#                                     role all: --root-pubkey uses an offline root key; none is created
 #   --audit-dir PATH                  audit export dir (first install). Use separate / WORM storage
-#   --allow-from CIDR                 ufw: allow the server port only from CIDR (repeatable)
+#   --allow-from CIDR                 ufw: allow the server port only from CIDR (repeatable; default:
+#                                     the local subnet of this machine's address)
+#   --no-egress-lock                  role all: do not install the nftables egress lock (remembered;
+#                                     --egress-lock turns it back on)
 #   --backup-dir PATH                 daily backups (default /var/lib/offpatch-backup)
 #   --backup-keep N                   scheduled backups to keep (default 14)
 #   --skip-backup                     upgrade without the automatic pre-upgrade backup
@@ -31,7 +44,7 @@
 #   --with-agent                      role all: also enroll this machine as a managed endpoint
 #   --go-version 1.27.2               Go toolchain to install when building from source
 #
-# Re-running with the same --role upgrades: keys, certificates, tokens, config and data are kept;
+# Re-running (same role) upgrades: keys, certificates, tokens, config and data are kept;
 # a verified backup is taken first and the previous binaries are kept in /opt/offpatch/bin.prev.
 set -euo pipefail
 
@@ -47,6 +60,8 @@ AUDIT_DIR_IN="" BACKUP_DIR_IN="" BACKUP_KEEP_IN="" SKIP_BACKUP=0
 ALLOW_FROM=()
 ADMIN_EMAIL="superadmin@dataspacesecurity.com"
 UNINSTALL=0 PURGE=0 STATUS=0 YES=0
+EGRESS_LOCK_IN=""                    # 1 / 0 from --egress-lock / --no-egress-lock; empty = remembered or 1
+EXPORT_ROOT_KEY=""                   # --export-root-key DIR
 
 PREFIX=/opt/offpatch                 # binaries
 ETC=/etc/offpatch                    # config, PKI, keys
@@ -58,6 +73,9 @@ ACQ_USER=offpatch-acq                # runs pmctl auto (internet + bundle signin
 XFER_GROUP=offpatch-inbox            # may drop files into the server inbox
 ACQ_REQ_DIR=$ACQ_DATA/requests       # acquisition requests (role all: the server queues them here directly)
 STATE_FILE=$ETC/install.state        # choices remembered for re-runs
+EGRESS_TABLE=offpatch_egress         # nftables table (inet family) of the egress lock
+EGRESS_NFT=/etc/nftables.d/offpatch.nft
+EGRESS_UNIT=/etc/systemd/system/offpatch-egress.service
 DEFAULT_BACKUP_DIR=/var/lib/offpatch-backup
 DEFAULT_BACKUP_KEEP=14
 
@@ -79,7 +97,7 @@ usage() { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; ex
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --role|--port|--hosts|--go-version|--server|--token|--ca|--pubkey|--root-pubkey|--audit-dir|--allow-from|--backup-dir|--backup-keep|--admin-email)
+    --role|--port|--hosts|--go-version|--server|--token|--ca|--pubkey|--root-pubkey|--audit-dir|--allow-from|--backup-dir|--backup-keep|--admin-email|--export-root-key)
       [ $# -ge 2 ] || die "$1 needs a value" ;;
   esac
   case "$1" in
@@ -101,6 +119,9 @@ while [ $# -gt 0 ]; do
     --backup-keep) BACKUP_KEEP_IN="$2"; shift ;;
     --skip-backup) SKIP_BACKUP=1 ;;
     --admin-email) ADMIN_EMAIL="$2"; shift ;;
+    --no-egress-lock) EGRESS_LOCK_IN=0 ;;
+    --egress-lock) EGRESS_LOCK_IN=1 ;;
+    --export-root-key) EXPORT_ROOT_KEY="$2"; shift ;;
     --uninstall) UNINSTALL=1 ;;
     --purge) PURGE=1 ;;
     --yes) YES=1 ;;
@@ -111,12 +132,15 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-if [ $STATUS = 0 ] && [ $UNINSTALL = 0 ]; then
-  [ -n "$ROLE" ] || die "--role is required: server | acquisition | agent (production, one per machine) or all (single-box lab). See --help"
-  case "$ROLE" in all|server|acquisition|agent) ;; *) die "--role must be server, acquisition, agent or all" ;; esac
+state_get() { [ -f "$STATE_FILE" ] && sed -n "s/^$1=//p" "$STATE_FILE" | tail -n 1; return 0; }
+if [ $STATUS = 0 ] && [ $UNINSTALL = 0 ] && [ -z "$EXPORT_ROOT_KEY" ]; then
+  # No --role: keep the role of an earlier install (an upgrade), else single-server production (all).
+  if [ -z "$ROLE" ]; then ROLE=$(state_get ROLE); ROLE=${ROLE:-all}; fi
+  case "$ROLE" in all|server|acquisition|agent) ;; *) die "--role must be all (single server, default), server, acquisition or agent" ;; esac
   [ $WITH_AGENT = 0 ] || [ "$ROLE" = all ] || die "--with-agent is only for --role all; on other machines use --role agent"
 fi
 [ "$(id -u)" -eq 0 ] || die "run as root: sudo $0 $*"
+EGRESS_LOCK=${EGRESS_LOCK_IN:-$(state_get EGRESS_LOCK)}; EGRESS_LOCK=${EGRESS_LOCK:-1}
 
 # Values end up in JSON, systemd units and ufw rules: accept plain paths / numbers / CIDRs only.
 safe_path() { [[ "$1" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "$2 must be an absolute path of letters, digits, . _ - / (got: $1)"; }
@@ -124,7 +148,6 @@ safe_path() { [[ "$1" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "$2 must be an absolute p
 [ -z "$AUDIT_DIR_IN" ] || safe_path "$AUDIT_DIR_IN" --audit-dir
 [ -z "$BACKUP_DIR_IN" ] || safe_path "$BACKUP_DIR_IN" --backup-dir
 [ -z "$BACKUP_KEEP_IN" ] || { [[ "$BACKUP_KEEP_IN" =~ ^[0-9]+$ ]] && [ "$BACKUP_KEEP_IN" -ge 1 ]; } || die "--backup-keep must be a number >= 1"
-state_get() { [ -f "$STATE_FILE" ] && sed -n "s/^$1=//p" "$STATE_FILE" | tail -n 1; return 0; }
 # ufw sources given on an earlier run stay in force unless new --allow-from values are given.
 if [ ${#ALLOW_FROM[@]} -eq 0 ]; then read -r -a ALLOW_FROM <<< "$(state_get ALLOW_FROM)"; fi
 for c in ${ALLOW_FROM[@]+"${ALLOW_FROM[@]}"}; do
@@ -160,12 +183,57 @@ if [ $STATUS = 1 ]; then
   echo "agent:             $(svc_state offpatch-agent 'offpatch/bin/pmagent run')"
   echo "acquisition timer: $( [ $HAVE_SYSTEMD = 1 ] && systemctl is-active offpatch-acquire.timer 2>/dev/null || echo 'cron/manual')"
   if [ $HAVE_SYSTEMD = 1 ] && [ -f /etc/systemd/system/offpatch-acquire-requests.path ]; then
-    echo "request watcher:   $(systemctl is-active offpatch-acquire-requests.path 2>/dev/null || true) (offpatch-acquire-requests.path, lab)"
+    echo "request watcher:   $(systemctl is-active offpatch-acquire-requests.path 2>/dev/null || true) (offpatch-acquire-requests.path)"
   fi
   echo "backup timer:      $( [ $HAVE_SYSTEMD = 1 ] && systemctl is-active offpatch-backup.timer 2>/dev/null || echo 'cron/manual')"
   [ -f "$BACKUP_DIR/last-success" ] && echo "last good backup:  $(head -n 1 "$BACKUP_DIR/last-success")"
   [ -f "$BACKUP_DIR/last-failure" ] && echo "last FAILED backup: $(cat "$BACKUP_DIR/last-failure")"
+  if command -v nft >/dev/null && nft list table inet "$EGRESS_TABLE" >/dev/null 2>&1; then
+    echo "egress lock:       active (nftables table $EGRESS_TABLE; only $ACQ_USER reaches the internet)"
+  elif [ -f "$EGRESS_NFT" ]; then
+    echo "egress lock:       NOT loaded ($EGRESS_NFT exists): sudo systemctl restart offpatch-egress"
+  elif [ "$(state_get ROLE)" = all ]; then
+    echo "egress lock:       off (--no-egress-lock)"
+  fi
+  [ -f "$ETC/keys/root.key" ] && echo "root key:          $ETC/keys/root.key is on this server: sudo $0 --export-root-key <offline media>"
   [ -f "$ETC/console-url.txt" ] && echo "console:           $(cat "$ETC/console-url.txt")"
+  exit 0
+fi
+
+# ---------------------------------------------------------------- export the root key
+# Copy root.key (+ root.pub, sha256 list) to offline media, verify the copy, then shred the
+# server's copy. root.pub stays: the server and agents verify signed trust documents with it.
+if [ -n "$EXPORT_ROOT_KEY" ]; then
+  key="$ETC/keys/root.key" dst="$EXPORT_ROOT_KEY"
+  [ -f "$key" ] || die "$key not found: nothing to export (already moved to offline media?)"
+  case "$dst" in /*) ;; *) die "--export-root-key needs the absolute mount point of the offline media (e.g. /media/usb)" ;; esac
+  [ -d "$dst" ] || die "$dst is not a directory: mount the offline media first"
+  [ "$(stat -c %d "$dst")" != "$(stat -c %d "$ETC/keys")" ] \
+    || die "$dst is on the same filesystem as $ETC: that is not offline media. Mount a USB drive / encrypted volume and give its mount point"
+  if [ -e "$dst/root.key" ] && ! cmp -s "$key" "$dst/root.key"; then
+    die "$dst/root.key exists and differs from $key: use an empty folder (nothing was changed)"
+  fi
+  step "Exporting the root key to $dst"
+  sum=$(sha256sum "$key" | awk '{print $1}')
+  install -m 0600 "$key" "$dst/root.key"
+  [ -f "$ETC/keys/root.pub" ] && install -m 0644 "$ETC/keys/root.pub" "$dst/root.pub"
+  files=(root.key); [ -f "$dst/root.pub" ] && files+=(root.pub)
+  ( cd "$dst" && sha256sum "${files[@]}" > root.sha256 )
+  sync
+  [ "$(sha256sum "$dst/root.key" | awk '{print $1}')" = "$sum" ] || die "the copy on $dst does not match (SHA-256); $key was NOT deleted"
+  ok "copied root.key$( [ -f "$dst/root.pub" ] && echo ', root.pub') and root.sha256 to $dst"
+  ok "root.key SHA-256: $sum"
+  if [ $YES = 0 ]; then
+    [ -t 0 ] || die "confirm deleting $key from this server: re-run interactively, or add --yes"
+    printf 'Store the media offline (safe / key custodian). Type DELETE to shred %s from this server: ' "$key"
+    read -r answer
+    [ "$answer" = DELETE ] || die "not deleted: $key is still on this server (the copy on $dst is kept)"
+  fi
+  if command -v shred >/dev/null; then shred -u "$key"; else rm -f "$key"; fi
+  [ -e "$key" ] && die "could not delete $key"
+  ok "deleted $key from this server; $ETC/keys/root.pub stays (public)"
+  echo "  Keep the media offline. It is needed only for signed key rotation / revocation (runbook 03)."
+  echo "  Unmount it now: sudo umount $dst"
   exit 0
 fi
 
@@ -193,7 +261,8 @@ if [ $UNINSTALL = 1 ]; then
     systemctl disable --now offpatch-server offpatch-acquire.timer offpatch-acquire-requests.path offpatch-backup.timer 2>/dev/null || true
     systemctl stop offpatch-acquire.service offpatch-acquire-requests.service offpatch-backup.service 2>/dev/null || true
     [ -x $PREFIX/bin/pmagent ] && $PREFIX/bin/pmagent service uninstall 2>/dev/null || true
-    for u in offpatch-server.service offpatch-acquire.service offpatch-acquire.timer offpatch-acquire-requests.path offpatch-acquire-requests.service offpatch-backup.service offpatch-backup.timer offpatch-backup-failed.service; do
+    systemctl disable --now offpatch-egress.service 2>/dev/null || true
+    for u in offpatch-server.service offpatch-acquire.service offpatch-acquire.timer offpatch-acquire-requests.path offpatch-acquire-requests.service offpatch-backup.service offpatch-backup.timer offpatch-backup-failed.service offpatch-egress.service; do
       rm -f "/etc/systemd/system/$u"
     done
     systemctl daemon-reload
@@ -201,6 +270,11 @@ if [ $UNINSTALL = 1 ]; then
     pkill -f 'offpatch/bin/pmserver' 2>/dev/null || true
     pkill -f 'offpatch/bin/pmagent run' 2>/dev/null || true
   fi
+  # Egress lock (role all): drop the nftables table and its file.
+  if command -v nft >/dev/null && nft list table inet "$EGRESS_TABLE" >/dev/null 2>&1; then
+    nft delete table inet "$EGRESS_TABLE" && ok "removed the egress lock (nftables table $EGRESS_TABLE)"
+  fi
+  rm -f "$EGRESS_NFT"
   for b in pmserver pmctl pmagent; do
     [ "$(readlink "/usr/local/bin/$b" 2>/dev/null)" = "$PREFIX/bin/$b" ] && rm -f "/usr/local/bin/$b"
   done
@@ -301,10 +375,10 @@ else
 fi
 
 if [ "$ROLE" = all ]; then
-  banner "--role all = SINGLE-BOX LAB. The internet-facing downloader, the bundle signing key," \
-         "the root key and the management server share one machine. A compromise of the" \
-         "downloader exposes the signing keys. NOT for production: use --role server and" \
-         "--role acquisition on separate machines (README, Install)."
+  [ -z "$ROOTPUB_IN" ] || check_pub "$ROOTPUB_IN" --root-pubkey
+  [ -z "$PUBKEY_IN" ] || die "--pubkey is for --role server/agent; role all creates its own bundle signing key"
+  echo "  Single-server install: server, console and downloader on this machine (hardened)."
+  echo "  A two-machine layout (--role server + --role acquisition) is stricter; see README, Install."
 fi
 
 # ---------------------------------------------------------------- users
@@ -333,6 +407,107 @@ lab_requests_dir() {
   find "$ACQ_REQ_DIR" -mindepth 1 -type d -exec chmod g+s {} +
 }
 lab_requests_dir
+
+# ---------------------------------------------------------------- egress lock (role all)
+# nftables table inet offpatch_egress, output hook. Only the two offpatch accounts are matched
+# (by uid); other users, root, SSH and every reply on an established connection (agents and
+# browsers talking to the console) pass untouched. New outbound connections:
+#   offpatch-acq (downloader)  loopback, TCP 80/443, DNS 53 (UDP/TCP); everything else refused
+#   offpatch     (server)      loopback only
+# Loaded at boot by offpatch-egress.service (no change to /etc/nftables.conf or ufw).
+write_egress_rules() { # file svc-uid acq-uid
+  cat > "$1" <<EOF
+#!/usr/sbin/nft -f
+# DSS Patcher single-server egress lock. Written by install-ubuntu.sh; re-runs rewrite it.
+# Accounts: $SVC_USER (uid $2) may open new connections to loopback only;
+#           $ACQ_USER (uid $3) to loopback, TCP 80/443 and DNS (53). Nothing else is matched.
+table inet $EGRESS_TABLE
+delete table inet $EGRESS_TABLE
+table inet $EGRESS_TABLE {
+  chain output {
+    type filter hook output priority filter; policy accept;
+    ct state established,related accept
+    oifname "lo" accept
+    meta skuid $3 ct state new tcp dport { 80, 443 } accept
+    meta skuid $3 ct state new meta l4proto { tcp, udp } th dport 53 accept
+    meta skuid { $2, $3 } limit rate 6/minute log prefix "offpatch-egress denied: "
+    meta skuid { $2, $3 } counter reject with icmpx type admin-prohibited
+  }
+}
+EOF
+}
+
+remove_egress_lock() {
+  local had=0
+  if [ -f "$EGRESS_UNIT" ] || [ -f "$EGRESS_NFT" ]; then had=1; fi
+  if [ $HAVE_SYSTEMD = 1 ] && [ -f "$EGRESS_UNIT" ]; then
+    systemctl disable --now offpatch-egress.service >/dev/null 2>&1 || true
+    rm -f "$EGRESS_UNIT"; systemctl daemon-reload
+  fi
+  command -v nft >/dev/null && nft delete table inet "$EGRESS_TABLE" 2>/dev/null || true
+  rm -f "$EGRESS_NFT"
+  [ $had = 0 ] || ok "egress lock removed (nftables table $EGRESS_TABLE, offpatch-egress.service)"
+  return 0
+}
+
+install_egress_lock() {
+  step "Egress lock (nftables): only $ACQ_USER reaches the internet"
+  if ! command -v nft >/dev/null; then
+    command -v apt-get >/dev/null || die "nft not found and no apt-get: install nftables, or re-run with --no-egress-lock (not recommended)"
+    export DEBIAN_FRONTEND=noninteractive
+    { apt-get install -y -qq nftables >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq nftables >/dev/null; }; } \
+      || die "nftables could not be installed (apt-get install nftables). Install it, or re-run with --no-egress-lock (not recommended)"
+  fi
+  local nft svc_uid acq_uid tmp
+  nft=$(command -v nft)
+  svc_uid=$(id -u "$SVC_USER"); acq_uid=$(id -u "$ACQ_USER")
+  install -d -m 0755 "$(dirname "$EGRESS_NFT")"
+  tmp=$(mktemp "$EGRESS_NFT.XXXXXX")
+  write_egress_rules "$tmp" "$svc_uid" "$acq_uid"
+  "$nft" -c -f "$tmp" || { rm -f "$tmp"; die "the egress ruleset failed nft's syntax check (nft $("$nft" --version 2>/dev/null)); nothing was changed. Re-run with --no-egress-lock to skip it"; }
+  chmod 0644 "$tmp"; mv -f "$tmp" "$EGRESS_NFT"
+  if [ $HAVE_SYSTEMD = 1 ]; then
+    cat > "$EGRESS_UNIT" <<EOF
+[Unit]
+Description=DSS Patcher egress lock (nftables table $EGRESS_TABLE: only $ACQ_USER reaches the internet)
+Documentation=file://$EGRESS_NFT
+DefaultDependencies=no
+Before=network-pre.target shutdown.target
+Wants=network-pre.target
+After=nftables.service
+# Restarting nftables.service flushes the whole ruleset: load this table again after it.
+PartOf=nftables.service
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$nft -f $EGRESS_NFT
+ExecReload=$nft -f $EGRESS_NFT
+ExecStop=-$nft delete table inet $EGRESS_TABLE
+
+[Install]
+WantedBy=multi-user.target nftables.service
+EOF
+    systemctl daemon-reload
+    systemctl enable offpatch-egress.service >/dev/null 2>&1
+    systemctl restart offpatch-egress.service || die "offpatch-egress.service failed: journalctl -u offpatch-egress"
+  else
+    "$nft" -f "$EGRESS_NFT"
+    warn "no systemd: the egress lock is loaded now but not at boot. Load it from your init: $nft -f $EGRESS_NFT"
+  fi
+  "$nft" list table inet "$EGRESS_TABLE" >/dev/null 2>&1 || die "the egress lock did not load (nft list table inet $EGRESS_TABLE)"
+  ok "$SVC_USER: no new outbound connections except loopback (replies to agents and browsers are unaffected)"
+  ok "$ACQ_USER: outbound TCP 80/443 and DNS only; other users, root and SSH are not affected"
+  ok "rules: $EGRESS_NFT, loaded at boot by offpatch-egress.service; refusals are logged as \"offpatch-egress denied:\" (journalctl -k)"
+}
+
+if [ "$ROLE" = all ] && [ "$EGRESS_LOCK" = 1 ]; then
+  install_egress_lock
+else
+  if [ "$ROLE" = all ]; then warn "--no-egress-lock: the server and downloader accounts may open any outbound connection. Not recommended for production"; fi
+  remove_egress_lock
+fi
 
 # ---------------------------------------------------------------- before upgrading
 if [ -d "$PREFIX/bin" ]; then
@@ -430,7 +605,7 @@ done
 ok "pmserver, pmctl, pmagent → $PREFIX/bin (version $VERSION, agent $AGENT_VER)"
 
 # ---------------------------------------------------------------- configuration directory
-# server: group offpatch; acquisition: group offpatch-acq; lab (all): the shared group, so
+# server: group offpatch; acquisition: group offpatch-acq; single server (all): the shared group, so
 # both service users can reach their own files (each file below is restricted further).
 case "$ROLE" in
   server) ETC_GROUP=$SVC_USER ;;
@@ -445,7 +620,29 @@ else
 fi
 
 SCHEME=https; [ $INSECURE = 1 ] && SCHEME=http
-IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+# The address people and agents use: an IPv4 given in --hosts that this machine owns, else
+# the source address of the default route, else the first address that is not loopback or
+# a container/virtual bridge (docker0 172.17.x, libvirt 192.168.122.x, lxd/podman 10.x on bridges).
+local_ips() {
+  ip -4 -o addr show scope global 2>/dev/null | awk '$2 !~ /^(docker|br-|virbr|veth|lxdbr|cni|flannel|cali|podman)/ {sub(/\/.*/, "", $4); print $4}'
+}
+pick_ip() {
+  local mine h src
+  mine=$(local_ips)
+  for h in $(printf '%s' "$EXTRA_HOSTS" | tr ',' ' '); do
+    if printf '%s\n' "$mine" | grep -qxF "$h"; then echo "$h"; return; fi
+  done
+  src=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit }}')
+  if [ -n "$src" ] && printf '%s\n' "$mine" | grep -qxF "$src"; then echo "$src"; return; fi
+  [ -n "$mine" ] && { printf '%s\n' "$mine" | head -n 1; return; }
+  hostname -I 2>/dev/null | awk '{print $1}'
+}
+# Directly connected IPv4 subnet(s) of an address (kernel routes with that source), e.g. 10.0.5.0/24.
+local_subnets() {
+  ip -4 route show proto kernel scope link 2>/dev/null | awk -v ip="$1" '{for (i = 1; i < NF; i++) if ($i == "src" && $(i + 1) == ip) print $1}' | awk '!seen[$0]++'
+}
+IP=$(pick_ip)
+OTHER_IPS=$(local_ips | grep -vxF "${IP:-}" | paste -sd' ' - || true)
 HOSTS=$(printf '%s\n' "$(hostname)" localhost 127.0.0.1 "$IP" "$EXTRA_HOSTS" | tr ',' '\n' | awk 'NF && !seen[$0]++' | paste -sd, -)
 case "$LISTEN_HOST" in ""|0.0.0.0|"::"|"[::]") LOCAL_HOST=127.0.0.1 ;; *) LOCAL_HOST=$LISTEN_HOST ;; esac
 URL_LOCAL="$SCHEME://$LOCAL_HOST:$PORT"
@@ -486,9 +683,12 @@ if [ "$ROLE" != agent ]; then
       ;;
     all)
       if [ ! -f "$ETC/keys/bundle.key" ]; then keygen bundle; ok "created the bundle signing key"; fi
-      if [ ! -f "$ETC/keys/root.key" ] && [ ! -f "$ETC/keys/root.pub" ]; then keygen root; ok "created the root key (lab only)"; fi
+      if [ -n "$ROOTPUB_IN" ] || [ -f "$ETC/keys/root.pub" ]; then
+        install_pub "$ROOTPUB_IN" root.pub
+      else
+        keygen root; ok "created the root key (move it to offline media: --export-root-key, see the summary)"
+      fi
       ok "keys in $ETC/keys"
-      warn "lab: the root key lives on this box. In production generate it offline and never put root.key on a server or acquisition host"
       ;;
   esac
   # Public keys: world-readable. Signing keys: only the acquisition user. Root key: root only
@@ -708,9 +908,11 @@ PY
   if [ $SERVER_CONFIGURED = 0 ]; then
     if [ $INSECURE = 1 ]; then tlsline='"insecure_http": true,'; else tlsline="\"pki_dir\": \"$ETC/pki\","; fi
     rootline=""; [ -f "$ETC/keys/root.pub" ] && rootline=$'\n'"  \"root_public_key_file\": \"$ETC/keys/root.pub\","
+    mode=two-machine; [ "$ROLE" = all ] && mode=single-server
     cat > "$ETC/pmserver.json" <<EOF
 {
   "listen": "0.0.0.0:$PORT",
+  "deployment_mode": "$mode",
   $tlsline
   "data_dir": "$SRV_DATA",
   "trusted_keys": [{"public_key_file": "$ETC/keys/bundle.pub", "sources": ["acq-zone-1"]}],${rootline}
@@ -724,26 +926,33 @@ EOF
   else
     ok "keeping existing $ETC/pmserver.json (listen port $PORT, $SCHEME)"
   fi
-  # Lab (role all), fresh install and upgrades: direct hand-off of acquisition requests.
-  # Production roles keep it unset: strict one-way transfer, the operator carries the file.
+  # Single server (role all), fresh install and upgrades: direct hand-off of acquisition
+  # requests, and the deployment mode the compliance report discloses (set when absent).
+  # Two-machine roles keep the hand-off unset: strict one-way transfer, the operator carries the file.
   if [ "$ROLE" = all ]; then
     if command -v python3 >/dev/null; then
       if msg=$(python3 - "$ETC/pmserver.json" "$ACQ_REQ_DIR" <<'PY'
 import json, sys
 p, d = sys.argv[1], sys.argv[2]
 c = json.load(open(p))
+changed = []
 if c.get("acquisition_requests_dir") != d:
     c["acquisition_requests_dir"] = d
+    changed.append("acquisition requests are queued directly to " + d)
+if not c.get("deployment_mode"):
+    c["deployment_mode"] = "single-server"
+    changed.append("deployment_mode single-server (disclosed in the compliance report)")
+if changed:
     json.dump(c, open(p, "w"), indent=2)
-    print("acquisition requests are queued directly to " + d)
+    print("; ".join(changed))
 PY
 ); then
         if [ -n "$msg" ]; then ok "$ETC/pmserver.json: $msg"; fi
       else
-        warn "could not set acquisition_requests_dir in $ETC/pmserver.json; set it to $ACQ_REQ_DIR by hand"
+        warn "could not update $ETC/pmserver.json; set \"acquisition_requests_dir\": \"$ACQ_REQ_DIR\" and \"deployment_mode\": \"single-server\" by hand"
       fi
     else
-      warn "python3 not found: set \"acquisition_requests_dir\": \"$ACQ_REQ_DIR\" in $ETC/pmserver.json by hand"
+      warn "python3 not found: set \"acquisition_requests_dir\": \"$ACQ_REQ_DIR\" and \"deployment_mode\": \"single-server\" in $ETC/pmserver.json by hand"
     fi
   fi
   chown root:"$SVC_USER" "$ETC/pmserver.json"; chmod 0640 "$ETC/pmserver.json"
@@ -760,7 +969,7 @@ PY
       done ) && ok "agent binaries ($AGENT_VER) for Windows, Linux and macOS staged for the console's Agent setup page"
   fi
   chown -R "$SVC_USER":"$SVC_USER" "$SRV_DATA"
-  # Inbox: whoever delivers bundles (the transfer receiver, or the lab's acquisition user) must be
+  # Inbox: whoever delivers bundles (the transfer receiver, or the single server's acquisition user) must be
   # in group offpatch-inbox. setgid keeps dropped files readable by the server via that group.
   chgrp "$XFER_GROUP" "$SRV_DATA" "$SRV_DATA/inbox"
   chmod 0710 "$SRV_DATA"; chmod 2770 "$SRV_DATA/inbox"
@@ -793,17 +1002,35 @@ PY
   echo "$URL_PUBLIC" > "$ETC/console-url.txt"
   ok "server running at $URL_PUBLIC"
   install_backup
+  # Console/agent port: only from --allow-from CIDRs, else from the local subnet(s) of $IP.
+  # The installer never enables ufw (that could cut off SSH); it prints the commands instead.
+  FW_SOURCES=()
+  if [ ${#ALLOW_FROM[@]} -gt 0 ]; then
+    FW_SOURCES=("${ALLOW_FROM[@]}")
+  elif [ -n "${IP:-}" ]; then
+    read -r -a FW_SOURCES <<< "$(local_subnets "$IP" | paste -sd' ' -)"
+  fi
   if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
-    if [ ${#ALLOW_FROM[@]} -gt 0 ]; then
-      for c in "${ALLOW_FROM[@]}"; do ufw allow proto tcp from "$c" to any port "$PORT" >/dev/null && ok "ufw: port $PORT open from $c"; done
+    if [ ${#FW_SOURCES[@]} -gt 0 ]; then
+      for c in "${FW_SOURCES[@]}"; do ufw allow proto tcp from "$c" to any port "$PORT" >/dev/null && ok "ufw: port $PORT open from $c"; done
       if ufw status | grep -Eq "^$PORT/tcp( \(v6\))? +ALLOW +Anywhere"; then
-        ufw delete allow "$PORT/tcp" >/dev/null && ok "ufw: removed the earlier open-to-anywhere rule for $PORT/tcp"
+        if [ ${#ALLOW_FROM[@]} -gt 0 ]; then
+          ufw delete allow "$PORT/tcp" >/dev/null && ok "ufw: removed the earlier open-to-anywhere rule for $PORT/tcp"
+        else
+          warn "ufw: an earlier rule still opens $PORT/tcp to ANY source. If all PCs are in ${FW_SOURCES[*]}: sudo ufw delete allow $PORT/tcp"
+        fi
       fi
+      [ ${#ALLOW_FROM[@]} -gt 0 ] || warn "ufw: PCs on other subnets cannot connect yet: re-run with --allow-from <CIDR> (repeatable) for each PC/admin network"
     else
-      ufw allow "$PORT"/tcp >/dev/null && warn "ufw: port $PORT open to ANY source. Restrict it: re-run with --allow-from <endpoint/admin CIDR> (repeatable)"
+      warn "ufw: could not determine the local subnet of ${IP:-this machine}; port $PORT NOT opened. Re-run with --allow-from <CIDR>"
     fi
   else
-    warn "ufw is not active: restrict port $PORT to endpoint and admin networks in your firewall"
+    warn "ufw is not active (the installer does not enable it). To enable it without losing SSH:"
+    printf '      sudo ufw allow OpenSSH\n'
+    for c in ${FW_SOURCES[@]+"${FW_SOURCES[@]}"}; do printf '      sudo ufw allow proto tcp from %s to any port %s\n' "$c" "$PORT"; done
+    [ ${#FW_SOURCES[@]} -gt 0 ] || printf '      sudo ufw allow proto tcp from <PC network CIDR> to any port %s\n' "$PORT"
+    printf '      sudo ufw enable\n'
+    warn "or restrict port $PORT to the PC and admin networks in your network firewall"
   fi
 fi
 
@@ -812,11 +1039,11 @@ fi
 # A request that keeps failing stays there: after a failed or partial run the service waits
 # 10 min in ExecStopPost (still deactivating, so the path unit cannot retrigger it), and the
 # path unit is trigger-limited as a backstop, so failures never spin. Anything the watcher
-# misses is still handled by the daily run.
+# misses is still handled by the hourly run.
 write_request_units() {
   cat > /etc/systemd/system/offpatch-acquire-requests.path <<EOF
 [Unit]
-Description=Watch for queued offpatch acquisition requests (lab)
+Description=Watch for queued offpatch acquisition requests
 
 [Path]
 PathExistsGlob=$ACQ_REQ_DIR/*.json
@@ -829,7 +1056,7 @@ WantedBy=paths.target
 EOF
   cat > /etc/systemd/system/offpatch-acquire-requests.service <<EOF
 [Unit]
-Description=offpatch acquisition of queued requests (lab)
+Description=offpatch acquisition of queued requests
 Wants=network-online.target
 After=network-online.target
 
@@ -839,10 +1066,12 @@ User=$ACQ_USER
 Group=$ACQ_USER
 SupplementaryGroups=$XFER_GROUP
 ExecStart=$PREFIX/bin/pmctl auto -config $ETC/acquire.json -only-requests
-# Back off after a failed or partial run (exit 2 = an item failed; the request stays).
+# Back off after a failed, partial or skipped run (exit 2 = an item failed, the request stays;
+# exit 3 = the hourly run holds the lock, the request is handled when it is free).
 ExecStopPost=/bin/sh -c 'test "\$\$EXIT_STATUS" = 0 || sleep 600'
-SuccessExitStatus=2
-TimeoutStartSec=4h
+SuccessExitStatus=2 3
+# "Run now" from the console makes this a full run: allow as long as offpatch-acquire.service.
+TimeoutStartSec=6h
 TimeoutStopSec=15min
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -884,7 +1113,7 @@ if [ $IS_ACQ = 1 ]; then
   "sequence_state": "$ACQ_DATA/sequence.json",
   "source": "acq-zone-1",
   "key": "$ETC/keys/bundle.key",
-  "schedule": "daily at 07:00 (systemd timer)",
+  "schedule": "every hour (systemd timer)",
   "send": { "via": "dropdir", "to": "$DROP", "log": "$ACQ_DATA/sent.jsonl" },
   "microsoft": {
     "months": 1,
@@ -914,6 +1143,8 @@ if "intel" not in c:
     c["intel"] = {}; changed.append("enabled update intelligence")
 if "requests" not in c:
     c["requests"] = sys.argv[2]; changed.append("enabled acquisition requests")
+if c.get("schedule") == "daily at 07:00 (systemd timer)":
+    c["schedule"] = "every hour (systemd timer)"; changed.append("schedule: every hour")
 nil = lambda g: isinstance(g, str) and g.strip("{}0-") == "" and "0" in g
 apps = c.get("apps") or []
 keep = [a for a in apps if not (a.get("kind") == "msi" and not a.get("product_code_from_msi") and nil(a.get("product_code", "")))]
@@ -931,7 +1162,8 @@ PY
       fi
     fi
   fi
-  chown root:"$ACQ_USER" "$ETC/acquire.json"; chmod 0640 "$ETC/acquire.json"
+  # role all: pmserver (group $XFER_GROUP) reads it too, as the starting point of the console's Auto-download policy. No secrets in it.
+  if [ "$ROLE" = all ]; then chown root:"$XFER_GROUP" "$ETC/acquire.json"; else chown root:"$ACQ_USER" "$ETC/acquire.json"; fi; chmod 0640 "$ETC/acquire.json"
   # Acquisition requests exported from the console's Updates page go here (role all: the
   # server queues them here itself; re-apply the shared group after the chown above).
   if [ "$ROLE" = all ]; then
@@ -953,7 +1185,8 @@ User=$ACQ_USER
 Group=$ACQ_USER
 $groups_line
 ExecStart=$PREFIX/bin/pmctl auto -config $ETC/acquire.json
-SuccessExitStatus=2
+# 2 = some item failed (retried next hour); 3 = skipped: the previous run still holds the lock.
+SuccessExitStatus=2 3
 TimeoutStartSec=4h
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -971,11 +1204,13 @@ UMask=0027
 EOF
     cat > /etc/systemd/system/offpatch-acquire.timer <<EOF
 [Unit]
-Description=Daily offpatch acquisition run
+Description=Hourly offpatch acquisition run
 
 [Timer]
-OnCalendar=*-*-* 07:00
-RandomizedDelaySec=15m
+# Every hour. A run still downloading when the next one starts holds the run lock: the new
+# run exits 3 (skipped, success) and the timer simply tries again the next hour.
+OnCalendar=hourly
+RandomizedDelaySec=5min
 Persistent=true
 
 [Install]
@@ -984,12 +1219,13 @@ EOF
     if [ "$ROLE" = all ]; then write_request_units; fi
     systemctl daemon-reload
     systemctl enable --now offpatch-acquire.timer >/dev/null 2>&1
-    ok "daily acquisition at 07:00 as $ACQ_USER (systemd timer offpatch-acquire.timer)"
+    systemctl restart offpatch-acquire.timer
+    ok "acquisition every hour as $ACQ_USER (systemd timer offpatch-acquire.timer; an overlapping run is skipped)"
     if [ "$ROLE" = all ]; then
       systemctl enable offpatch-acquire-requests.path >/dev/null 2>&1
       systemctl reset-failed offpatch-acquire-requests.path offpatch-acquire-requests.service 2>/dev/null || true
       systemctl restart offpatch-acquire-requests.path
-      ok "lab: queued acquisition requests are fetched right away (offpatch-acquire-requests.path watches $ACQ_REQ_DIR)"
+      ok "queued acquisition requests are fetched right away (offpatch-acquire-requests.path watches $ACQ_REQ_DIR)"
     fi
     # First update-intelligence run now, so the console's Updates page fills
     # immediately (needs internet; harmless if it fails — the timer retries).
@@ -997,12 +1233,12 @@ EOF
       if out=$(cd "$ACQ_DATA" && runuser -u "$ACQ_USER" -- "$PREFIX/bin/pmctl" intel -key "$ETC/keys/bundle.key" -out "$ACQ_DATA/intel" -to "$DROP" 2>&1); then
         ok "update intelligence sent (newest Windows updates and app versions)"
       else
-        warn "update intelligence not collected now; the daily run will retry. Reason:"
+        warn "update intelligence not collected now; the hourly run will retry. Reason:"
         printf '%s\n' "$out" | tail -n 3 | sed 's/^/      /'
       fi
     fi
   else
-    warn "no systemd: run acquisition from cron as $ACQ_USER: $PREFIX/bin/pmctl auto -config $ETC/acquire.json >> /var/log/offpatch-acquire.log 2>&1"
+    warn "no systemd: run acquisition hourly from cron as $ACQ_USER: $PREFIX/bin/pmctl auto -config $ETC/acquire.json >> /var/log/offpatch-acquire.log 2>&1"
   fi
   [ "$ROLE" = acquisition ] && warn "role=acquisition: bundles are written to $DROP — point send.to / send.command at your transfer gateway"
 fi
@@ -1091,45 +1327,73 @@ AGENT_VERSION=$AGENT_VER
 BACKUP_DIR=$BACKUP_DIR
 BACKUP_KEEP=$BACKUP_KEEP
 ALLOW_FROM=${ALLOW_FROM[*]+"${ALLOW_FROM[*]}"}
+EGRESS_LOCK=$EGRESS_LOCK
 EOF
 chmod 0644 "$STATE_FILE"
 
 # ---------------------------------------------------------------- summary
 step "Done"
+echo "  This machine:   $(hostname) — IP ${IP:-unknown}${OTHER_IPS:+   (other addresses: $OTHER_IPS)}"
 if [ $IS_SERVER = 1 ]; then
   echo "  Console:        $URL_PUBLIC   (sign in with email + password)"
+  echo "  PCs need:       TCP $PORT from every PC to ${IP:-this server} (agents connect to $URL_PUBLIC; nothing connects to the PCs)"
+  [ ${#FW_SOURCES[@]} -gt 0 ] && echo "  Firewall:       port $PORT allowed from ${FW_SOURCES[*]}$( ufw status 2>/dev/null | grep -q 'Status: active' || echo ' (ufw inactive: commands above)')"
+  # The certificate is made on the first install; warn if this machine's address is not in it.
+  if [ $INSECURE = 0 ] && [ -n "${IP:-}" ] && [ -f "$ETC/pki/server.pem" ] && command -v openssl >/dev/null \
+     && ! openssl x509 -in "$ETC/pki/server.pem" -noout -ext subjectAltName 2>/dev/null | grep -qF "IP Address:$IP"; then
+    warn "the server certificate does not include $IP (the address changed since the first install?). Browsers and agents"
+    warn "will refuse https://$IP:$PORT. Fix: sudo -u $SVC_USER $PREFIX/bin/pmserver reissue-server-cert -dir $ETC/pki -hosts $HOSTS"
+  fi
   if [ $ADMIN_DEFAULT_PW = 1 ]; then
-    banner "super admin: $ADMIN_CREATED_EMAIL — default password (see vendor handbook); change it after first sign-in" "" \
-           "Sign in, change the password, then create the bank's first Admin under Settings > Users."
+    echo "  Super admin:    $ADMIN_CREATED_EMAIL — default password (see the vendor handbook)"
   elif [ -n "$ADMIN_CREATED_PW" ]; then
     banner "Built-in super admin (vendor): password shown ONCE, stored only as a hash:" "" \
-           "  email:    $ADMIN_CREATED_EMAIL" "  password: $ADMIN_CREATED_PW" "" \
-           "Sign in, then create the bank's first Admin under Settings > Users." \
-           "Changing this password after the first sign-in is recommended."
+           "  email:    $ADMIN_CREATED_EMAIL" "  password: $ADMIN_CREATED_PW"
+  else
+    echo "  Super admin:    existing account kept (default $ADMIN_EMAIL)"
   fi
-  echo "  Super admin:    lost the password? sudo runuser -u $SVC_USER -- $PREFIX/bin/pmserver reset-admin -config $ETC/pmserver.json -email <email>"
-  echo "  Backups:        daily → $BACKUP_DIR (keeps $BACKUP_KEEP); copy them off the machine"
-  [ $INSECURE = 0 ] && cat <<EOF
-  TLS:            the console uses the internal CA $ETC/pki/ca.pem — import it into your browser /
-                  OS trust store, or accept the certificate warning once for this lab.
-  Windows:        console → Endpoints → Create enrollment token → paste the one-line command into
-                  an elevated Windows PowerShell on the endpoint.
-  Other Ubuntu:   from the same release folder:
-                    sudo ./install-ubuntu.sh --role agent --server $URL_PUBLIC --token <enr_…> \\
-                         --ca ca.pem --pubkey bundle.pub --root-pubkey root.pub
-                  (copy ca.pem, bundle.pub, root.pub from $ETC/pki and $ETC/keys)
-EOF
+  echo "  Lost password:  sudo runuser -u $SVC_USER -- $PREFIX/bin/pmserver reset-admin -config $ETC/pmserver.json -email <email>"
+  echo "  Backups:        daily → $BACKUP_DIR (keeps $BACKUP_KEEP); copy them off the machine (they hold the CA key)"
+  [ $INSECURE = 0 ] && echo "  TLS:            internal CA $ETC/pki/ca.pem — import it into the admins' browsers (or accept the warning once)"
   [ "$ROLE" = server ] && echo "  Inbox:          the transfer receiver delivers into $SRV_DATA/inbox; add its account to group $XFER_GROUP"
+  cat <<EOF
+
+  Next steps (in the console, $URL_PUBLIC):
+    1. Sign in and change the password.
+    2. Settings → Users: create the bank's Admin.
+    3. Endpoints → Create enrollment token → run the PowerShell line on each PC
+       (Windows PowerShell as Administrator; the PC needs TCP $PORT to ${IP:-this server}).
+    4. Patches → Needed → Import, Catalog → Approve, Patch this (2 approvals).
+
+  Ubuntu endpoints: sudo ./install-ubuntu.sh --role agent --server $URL_PUBLIC --token <enr_…> \\
+                         --ca ca.pem --pubkey bundle.pub --root-pubkey root.pub
+                    (copy ca.pem, bundle.pub, root.pub from $ETC/pki and $ETC/keys)
+EOF
   [ $INSECURE = 1 ] && warn "lab mode: plain HTTP and bearer device secrets — never use outside an isolated lab"
 fi
 if [ $IS_ACQ = 1 ]; then
-  echo "  Acquisition:    edit $ETC/acquire.json, test with: sudo -u $ACQ_USER $PREFIX/bin/pmctl auto -config $ETC/acquire.json -dry-run"
+  echo "  Acquisition:    every hour (offpatch-acquire.timer). Edit $ETC/acquire.json; test: sudo -u $ACQ_USER $PREFIX/bin/pmctl auto -config $ETC/acquire.json -dry-run"
 fi
 if [ "$ROLE" = all ]; then
-  echo "  Requests:       console requests are queued to $ACQ_REQ_DIR and fetched right away (lab; production carries the file)"
+  echo "  Requests:       console requests are queued to $ACQ_REQ_DIR and fetched right away"
+  if [ "$EGRESS_LOCK" = 1 ]; then
+    echo "  Egress lock:    only $ACQ_USER reaches the internet (TCP 80/443, DNS); $SVC_USER: loopback only ($EGRESS_NFT)"
+  else
+    warn "egress lock OFF (--no-egress-lock): re-run with --egress-lock to restore it"
+  fi
+  if [ -f "$ETC/keys/root.key" ]; then
+    banner "The OFFLINE ROOT KEY is on this server: $ETC/keys/root.key" \
+           "It signs key rotation / revocation and must not stay on an internet-connected host." \
+           "Insert offline media (USB / encrypted volume), mount it, then run:" \
+           "  sudo $0 --export-root-key /media/usb" \
+           "(copies root.key with its SHA-256, verifies the copy, then shreds the server copy)."
+  fi
+  echo "  Layout:         single server. A two-machine layout (--role server + --role acquisition) is stricter (README, Install)."
 fi
 if [ "$ROLE" = acquisition ]; then
   cat <<EOF
+  Acquisition:    this downloader is at ${IP:-$(hostname)} ($(hostname)); it needs outbound HTTPS only — no inbound ports
+  Bundles go to:  $DROP (carry them through the one-way transfer to the server's inbox)
   Public key:     carry $ETC/keys/bundle.pub (public only) to the server: --role server --pubkey bundle.pub
   Root key:       NOT created here. On an offline machine: pmctl keygen -out root; keep root.key offline,
                   carry root.pub to the server (--root-pubkey) and agents (runbook 02 A2)
@@ -1137,9 +1401,6 @@ EOF
 fi
 cat <<EOF
   Status:         sudo $0 --status
-  Upgrade:        re-run with the same --role (backup first, previous binaries in $PREFIX/bin.prev)
+  Upgrade:        re-run the same command (role $ROLE is remembered; backup first, previous binaries in $PREFIX/bin.prev)
   Uninstall:      sudo $0 --uninstall   (add --purge to delete keys and data)
 EOF
-if [ "$ROLE" = all ]; then
-  banner "Reminder: --role all is a single-box LAB. Production = separate server and acquisition hosts."
-fi

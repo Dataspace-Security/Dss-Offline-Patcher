@@ -35,8 +35,11 @@ export default function Overview() {
   const packages = useLoad(() => api.get<Package[]>("/api/packages"), [visible], every(60000));
   const deployments = useLoad(() => api.get<Deployment[]>("/api/deployments"), [visible], every(SUMMARY_MS));
   const policy = useLoad(fetchPolicy, []);
-  const acquisition = useLoad(() => api.get<AcquisitionOverview>("/api/acquisition?limit=1"), [visible], every(5 * 60000));
-  const requests = useLoad(() => api.get<AcquisitionRequestRecord[]>("/api/acquisition-requests"), [visible], every(5 * 60000));
+  // Imports (download runs, requests) are User and up.
+  const acquisition = useLoad(() => (canPatch ? api.get<AcquisitionOverview>("/api/acquisition?limit=1") : Promise.resolve(null)),
+    [visible, canPatch], canPatch ? every(5 * 60000) : undefined);
+  const requests = useLoad(() => (canPatch ? api.get<AcquisitionRequestRecord[]>("/api/acquisition-requests") : Promise.resolve(null)),
+    [visible, canPatch], canPatch ? every(5 * 60000) : undefined);
   const audit = useLoad(() => api.get<AuditEvent[]>(`/api/audit?limit=${AUDIT_LIMIT}`).then((l) => (l ?? []).slice(0, AUDIT_LIMIT)), [visible], every(30000));
 
   const s = summary.data;
@@ -73,7 +76,7 @@ export default function Overview() {
       <div className="dash-grid">
         <FleetHealth summary={s} isOperator={canPatch} />
         <PatchExposure packages={packages.data} needs={needs.data} endpoints={eps.data} canPatch={canPatch} onChanged={reloadPatches} />
-        <SupplyChain summary={s} acquisition={acquisition.data} acquisitionError={acquisition.error} requests={requests.data} />
+        <SupplyChain summary={s} acquisition={acquisition.data} acquisitionError={acquisition.error} requests={requests.data} showImports={canPatch} />
         {s
           ? <YourWork summary={s} endpoints={eps.data} className="dash-span-2 dash-wide-3" />
           : <DashCard title="Your work" className="dash-span-2 dash-wide-3"><Skeleton lines={4} /></DashCard>}

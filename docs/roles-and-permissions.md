@@ -9,10 +9,10 @@ accepts it from. Hiding a button is a convenience, not the protection.
 
 | Role | Who | In one line |
 |---|---|---|
-| **Viewer** | Bank staff who only need to look | Sees everything (no secrets). Has no action buttons at all. |
+| **Viewer** | Bank staff who only need to look | Sees everything except the Library and Imports (no secrets). Has no action buttons at all. |
 | **User** | Bank operators | Imports patches, approves packages, plans deployments and rollbacks, approves other people's deployments. |
 | **Admin** | Bank administrators | Everything a User can do, plus the bank's users, exceptions and revoking packages. |
-| **Super admin** | The vendor (setup and support) | Everything, including server settings, agent versions and all users. **Does not approve deployments**, agent-version deployments included (that is the bank's two-person rule). |
+| **Super admin** | The vendor (setup and support) | Everything, including server settings, agent versions, the Library and all users. **Does not approve deployments**, agent-version deployments included (that is the bank's two-person rule). |
 
 These four are the only roles (the old names `operator` and `approver` were removed; the server refuses to start if the config or SSO `role_groups` still use them, and stored users are moved to User). Sign-in is e-mail + password with an authenticator-app code (required for Viewer, User and Admin; optional for the Super admin unless the server sets `require_mfa`) or single sign-on. There is no token sign-in: static admin tokens were removed.
 
@@ -33,22 +33,42 @@ These four are the only roles (the old names `operator` and `approver` were remo
    or demote themselves. Delete works only for e-mail + password users (SSO
    users: disable), never on yourself and never on the last Super admin; the
    audit history of a deleted user is kept.
+3. **Reports are for everyone.** Every signed-in role (Viewer and up) sees
+   and downloads the whole Reports area: patch compliance and its CSVs and
+   PDF, the auditor compliance report (PDF and signed evidence ZIP), the
+   report profile (read; Admins and the Super admin edit it), the audit
+   trail (browse, verify, lifecycle export, PDF of a period). Exceptions live
+   under Deployments → Exceptions for every role.
+4. **The Library is the vendor's.** The Library (everything that could be
+   imported, including software no machine has yet) is a **Super admin**
+   tool: tab, drawer and Import-from-Library. Bank Users and Admins import
+   only what their machines need (Patches → Needed, endpoint Updates);
+   the server refuses a bank import of a Library-only item or with
+   `app_archs` (403, audited). Imports (what was asked for, downloaded and
+   received) is for User and up.
 
 ## Pages and navigation
 
 | Page / tab | Viewer | User | Admin | Super admin |
 |---|:-:|:-:|:-:|:-:|
 | Overview → Summary, Your work, Alerts | ✓ | ✓ | ✓ | ✓ |
-| Patches → Needed, Library, Catalog, Imports | ✓ | ✓ | ✓ | ✓ |
-| Deployments → list, detail, Maintenance windows | ✓ | ✓ | ✓ | ✓ |
+| Patches → "How patches flow" guide (what this role can do at each step; Hide / "How patches flow" to show again) | ✓ | ✓ | ✓ | ✓ |
+| Patches → Needed, Catalog | ✓ (read only) | ✓ | ✓ | ✓ |
+| Patches → Imports | — (opens Needed) | ✓ | ✓ | ✓ |
+| Patches → Library (and Library links on Needed, Imports, Overview) | — (opens Needed) | — (opens Needed) | — (opens Needed) | ✓ |
+| Overview → Supply chain: last download run, imports waiting, "Imports →" | — (update information and bundles only) | ✓ | ✓ | ✓ |
+| Deployments → list, detail, Maintenance windows, Exceptions | ✓ | ✓ | ✓ | ✓ |
 | Deployments → New deployment form | — | ✓ | ✓ | ✓ |
 | Endpoints → list, endpoint detail | ✓ | ✓ | ✓ | ✓ |
 | Endpoints → Add endpoints (agent setup guide) | — | ✓ | ✓ | ✓ |
-| Reports → Patch compliance, Compliance report, Report profile (read), Exceptions, Audit | ✓ | ✓ | ✓ | ✓ |
+| Reports → Patch compliance, Compliance report, Report profile (read), Audit | ✓ | ✓ | ✓ | ✓ |
+| Overview → Recent activity (audit feed), "overdue endpoint-patches" in Your work; compliance gauge opens Reports | ✓ | ✓ | ✓ | ✓ |
+| Catalog → package Lifecycle, "Audit trail for this package →"; deployment "Audit trail →" | ✓ | ✓ | ✓ | ✓ |
 | Settings (sidebar item) | — | — | ✓ (opens Users) | ✓ (opens Server) |
 | Settings → Users | — | — | ✓ (bank roles only) | ✓ (all users) |
 | Settings → Server | — | — | — | ✓ |
 | Settings → Agent versions | — | — | — | ✓ |
+| Settings → Auto-download (what the downloader fetches every run; server: 403 for bank roles) | — | — | — | ✓ |
 
 ## Actions
 
@@ -67,7 +87,8 @@ These four are the only roles (the old names `operator` and `approver` were remo
 
 | Action | Viewer | User | Admin | Super admin |
 |---|:-:|:-:|:-:|:-:|
-| Import an update / app (Needed, Library drawer, endpoint Updates, Imports "Ask again"), incl. bulk Import on Needed | — | ✓ | ✓ | ✓ |
+| Import an update / app your machines have or need (Needed, endpoint Updates, Imports "Ask again"), incl. bulk Import on Needed | — | ✓ | ✓ | ✓ |
+| Import from the Library (software no machine has, architecture picker) | — | — (server: 403) | — (server: 403) | ✓ |
 | Approve / reject a package (Catalog, "Review & approve", Patch this) | — | ✓ | ✓ | ✓ |
 | Revoke an approved package | — | — | ✓ | ✓ |
 | Patch this… (guided deployment) | — | ✓ | ✓ | ✓ |
@@ -84,6 +105,7 @@ These four are the only roles (the old names `operator` and `approver` were remo
 | Approve / reject a waiting **agent-version** deployment or rollback | — | — (403 "agent version deployments are approved by bank admins") | ✓ not the creator, not already approved; `deployment_approvals` bank admins needed | — |
 | Pause, resume, start next stage, retry failed, cancel (incl. a waiting one) | — | ✓ | ✓ | ✓ |
 | Raise an exception for a failed target | — | "Ask an Admin…" (copyable text, no change) | ✓ | ✓ |
+| Deployments → Exceptions: create / revoke an exception | — (read only) | — (read only) | ✓ | ✓ |
 | Create / delete a maintenance window | — | ✓ | ✓ | ✓ |
 
 ### Endpoints
@@ -98,8 +120,8 @@ These four are the only roles (the old names `operator` and `approver` were remo
 
 | Action | Viewer | User | Admin | Super admin |
 |---|:-:|:-:|:-:|:-:|
-| Download CSVs, print / PDF, verify audit chain, export lifecycle JSON | ✓ | ✓ | ✓ | ✓ |
-| Create / revoke an exception | — | — | ✓ | ✓ |
+| Patch compliance, download CSVs (compliance, endpoints, evidence), Download PDF (server-made file) | ✓ | ✓ | ✓ | ✓ |
+| Audit trail: browse, verify chain, export lifecycle JSON, Download PDF of a period | ✓ | ✓ | ✓ | ✓ |
 
 ### Settings → Users
 
@@ -111,6 +133,14 @@ These four are the only roles (the old names `operator` and `approver` were remo
 | Disable / enable a user (incl. SSO users) | — | — | ✓ bank roles, not self | ✓ any, not self |
 | Delete an e-mail + password user (confirm, reason optional; Disable is the gentler option; SSO users: disable) | — | — | ✓ bank roles, not self | ✓ any, not self |
 | See MFA status (On / Not set up); Reset MFA (e-mail + password users) | — | — | ✓ bank roles, not self | ✓ any, not self |
+
+### Settings → Auto-download
+
+| Action | Viewer | User | Admin | Super admin |
+|---|:-:|:-:|:-:|:-:|
+| See the auto-download policy, its history and whether the downloader applied it | — | — | — | ✓ |
+| Change and save it (Windows releases, apps, download sources, limits) | — | — | — | ✓ |
+| Download the policy file (two machines), hand it over again, Run now | — | — | — | ✓ |
 
 ### Everyone
 
@@ -132,8 +162,10 @@ These four are the only roles (the old names `operator` and `approver` were remo
 
 | Route | Lowest role |
 |---|---|
-| All `GET /api/...` reads, `POST /api/auth/password` | Viewer |
-| `POST /api/alerts/{id}/ack`, `POST /api/acquisition-requests` | User |
+| All other `GET /api/...` reads, `POST /api/auth/password` | Viewer |
+| `POST /api/alerts/{id}/ack`, `POST /api/acquisition-requests` | User (a Library-only item or `app_archs`: Super admin only, 403 "the Library is the vendor's …", audited) |
+| `GET /api/acquisition`, `GET /api/acquisition-requests`, `GET /api/bundles`, `GET /api/bundles/{id}`, `GET /api/transfer/reconcile` (Imports) | User |
+| `GET /api/library`, `GET /api/library/{kind}/{id}` | Super admin only |
 | `POST /api/packages/{id}/approve`, `/reject` | User |
 | `POST /api/packages/{id}/revoke` | Admin |
 | `POST /api/deployments`, `/{id}/pause\|resume\|cancel\|advance`, `/{id}/retry_failed` | User |
@@ -146,7 +178,10 @@ These four are the only roles (the old names `operator` and `approver` were remo
 | `POST /api/auth/login`, `POST /api/auth/mfa` | none (sign-in) |
 | `POST /api/auth/mfa/enroll/start`, `/enroll/confirm` | any signed-in e-mail + password user (also the limited first sign-in session) |
 | `POST /api/auth/mfa/disable` | Super admin (own authenticator only) |
-| `GET /api/reports/compliance-pack`, `GET /api/reports/compliance-pack.zip`, `GET /api/reports/profile` | Viewer |
+| `GET /api/exceptions` | Viewer |
+| `GET /api/reports/compliance`, `/compliance.csv`, `/endpoints.csv`, `/targets.csv`, `/compliance-pack`, `/compliance-pack.zip`, `GET /api/reports/profile`, `GET /api/reports/profile/history` | Viewer |
+| `GET /api/reports/compliance-pack.pdf`, `GET /api/reports/compliance.pdf`, `GET /api/audit.pdf` (server-made PDF files) | Viewer |
+| `GET /api/audit`, `/api/audit/verify`, `/api/audit/export` (lifecycle JSON) | Viewer |
 | `PUT /api/reports/profile` | Admin |
 
 ### Known gaps between console and server

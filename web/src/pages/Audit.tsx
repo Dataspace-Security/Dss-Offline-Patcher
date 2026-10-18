@@ -1,10 +1,15 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
-import { api, errMsg, qs } from "../api";
+import { api, downloadFileNamed, errMsg, qs } from "../api";
 import { Empty, ErrorBanner, Mono, PageHeader, Pill, Time } from "../components/ui";
 import type { AuditEvent, AuditVerify } from "../types";
 
 const PAGE = 200;
+
+/** Local calendar date as YYYY-MM-DD. */
+function ymd(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
 type Filters = { actor: string; action: string; object_id: string; package_id: string };
 const KEYS: (keyof Filters)[] = ["actor", "action", "object_id", "package_id"];
 
@@ -25,6 +30,11 @@ export default function Audit() {
   const [exportId, setExportId] = useState(applied.package_id);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+  // Audit log PDF for a period (default: this month so far).
+  const [pdfFrom, setPdfFrom] = useState(() => { const n = new Date(); return ymd(new Date(n.getFullYear(), n.getMonth(), 1)); });
+  const [pdfTo, setPdfTo] = useState(() => ymd(new Date()));
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const [pdfMsg, setPdfMsg] = useState<string | null>(null);
 
   const load = async (before?: number) => {
     setLoading(true);
@@ -88,6 +98,22 @@ export default function Audit() {
     }
   };
 
+  const downloadPdf = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!pdfFrom || !pdfTo || pdfFrom > pdfTo) return;
+    setPdfBusy(true);
+    setPdfMsg(null);
+    try {
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const name = await downloadFileNamed(`/api/audit.pdf${qs({ from: pdfFrom, to: pdfTo, tz })}`, `DSS-Patcher-audit-log-${pdfFrom}_${pdfTo}.pdf`);
+      setPdfMsg(`Downloaded ${name}`);
+    } catch (err) {
+      setPdfMsg(`PDF failed: ${errMsg(err)}`);
+    } finally {
+      setPdfBusy(false);
+    }
+  };
+
   const lastSeq = events.length ? events[events.length - 1].seq : undefined;
   const anyFilter = KEYS.some((k) => applied[k]);
 
@@ -131,6 +157,17 @@ export default function Audit() {
           </label>
           <div className="hint">Package, bundle, deployments, exceptions and every audit event for one package, with chain status.</div>
           {exportMsg && <div className={exportMsg.startsWith("Export failed") ? "text-red small" : "text-green small"}>{exportMsg}</div>}
+        </form>
+        <form className="card" onSubmit={downloadPdf}>
+          <div className="form-grid">
+            <label className="field"><span>Audit log from</span><input type="date" value={pdfFrom} max={pdfTo || undefined} onChange={(e) => setPdfFrom(e.target.value)} /></label>
+            <label className="field"><span>To</span><input type="date" value={pdfTo} min={pdfFrom || undefined} onChange={(e) => setPdfTo(e.target.value)} /></label>
+          </div>
+          <div className="form-actions">
+            <button className="btn" disabled={pdfBusy || !pdfFrom || !pdfTo || pdfFrom > pdfTo}>{pdfBusy ? "Preparing…" : "Download PDF"}</button>
+          </div>
+          <div className="hint">Every audit event of the period with the chain status, as a PDF made by the server (audited).</div>
+          {pdfMsg && <div className={pdfMsg.startsWith("PDF failed") ? "text-red small" : "text-green small"}>{pdfMsg}</div>}
         </form>
       </div>
 

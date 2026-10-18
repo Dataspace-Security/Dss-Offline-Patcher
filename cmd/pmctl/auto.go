@@ -33,6 +33,7 @@ import (
 	"syscall"
 	"time"
 
+	"offpatch/internal/acqpolicy"
 	"offpatch/internal/acqrequest"
 	"offpatch/internal/acqstatus"
 	"offpatch/internal/acquire"
@@ -87,6 +88,9 @@ type autoConfig struct {
 	CatalogURL         string `json:"catalog_url"`
 	MSRCURL            string `json:"msrc_url"`
 	WingetManifestsURL string `json:"winget_manifests_url"` // default: the winget-pkgs repository
+
+	// keepLastN: from the auto-download policy (limits.keep_last_n_versions).
+	keepLastN int
 }
 
 type autoMSProd struct {
@@ -97,6 +101,9 @@ type autoMSProd struct {
 	MaxBuild       int    `json:"max_build"`
 	Match          string `json:"match"`          // optional extra title filter
 	PackageSuffix  string `json:"package_suffix"` // disambiguates IDs if two products share a KB
+	// MinSeverity overrides microsoft.min_severity for this product (the
+	// auto-download policy's "all" classification sets low).
+	MinSeverity string `json:"min_severity"`
 }
 
 type autoSource struct {
@@ -175,6 +182,9 @@ type autoState struct {
 	// WindowsUBR: "<KB>/<build>" → build revision, from update intelligence,
 	// for expected_ubr when the catalog title of a KB does not state it.
 	WindowsUBR map[string]int `json:"windows_ubr,omitempty"`
+	// Families: package id → policy app ("winget:<id>/<arch>") or vendor
+	// source ("vendor:<id>"), for limits.keep_last_n_versions.
+	Families map[string]string `json:"families,omitempty"`
 }
 
 type autoDone struct {
@@ -201,6 +211,16 @@ type autoReport struct {
 	Items      []acqstatus.ItemResult `json:"items,omitempty"` // per requested item
 	Error      string                 `json:"error,omitempty"`
 	StatusSent bool                   `json:"status_report_sent"`
+
+	// Auto-download policy (policy.go).
+	PolicyVersion   int                      `json:"policy_version,omitempty"`
+	PolicySHA256    string                   `json:"policy_sha256,omitempty"`
+	PolicyEditedBy  string                   `json:"policy_edited_by,omitempty"`
+	PolicyAppliedAt string                   `json:"policy_applied_at,omitempty"`
+	PolicyError     string                   `json:"policy_error,omitempty"`
+	Sources         []acqstatus.SourceResult `json:"sources,omitempty"`
+	RunRequest      string                   `json:"run_request,omitempty"`
+	Defaults        *acqpolicy.Base          `json:"-"` // acquire.json as policy entries (status report only)
 }
 
 // Hooks overridable in tests.
@@ -211,6 +231,10 @@ var (
 
 const (
 	exitPartial = 2
+	// exitSkipped: another run holds the lock; nothing was done. The systemd
+	// units list it in SuccessExitStatus (an hourly run that finds the
+	// previous one still downloading is not a failure).
+	exitSkipped = 3
 
 	defaultMaxBundleBytes    = 28 << 30
 	defaultMaxBundlePackages = 450
@@ -230,6 +254,11 @@ func autoCmd(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	rep, err := runAutoRequests(ctx, *cfgPath, *dry, *reqDir, *onlyReq)
+	if errors.Is(err, errRunInProgress) {
+		fmt.Fprintf(os.Stderr, "skipped: %v; this run did nothing (exit %d)\n", err, exitSkipped)
+		stop()
+		os.Exit(exitSkipped)
+	}
 	b, _ := json.MarshalIndent(rep, "", "  ")
 	fmt.Println(string(b))
 	if err != nil {
@@ -390,6 +419,9 @@ func loadState(path string) (autoState, error) {
 	if st.WindowsUBR == nil {
 		st.WindowsUBR = map[string]int{}
 	}
+	if st.Families == nil {
+		st.Families = map[string]string{}
+	}
 	return st, nil
 }
 
@@ -464,7 +496,16 @@ func runAutoRequests(ctx context.Context, cfgPath string, dry bool, requestsDir 
 		return rep, err
 	}
 	spec := filepath.Join(runDir, "spec.json")
-	hc := autoHTTP()
+
+	// ---- auto-download policy from the console, merged over acquire.json ----
+	pol := loadPolicy(c, dry, &rep)
+	applyPolicy(c, pol)
+	c.keepLastN = pol.keepLastN
+	if pol.runID != "" && onlyRequests {
+		onlyRequests = false
+		rep.Warnings = append(rep.Warnings, "full run requested from the console ("+pol.runID+" by "+pol.runBy+")")
+	}
+	hc := withBudget(autoHTTP(), pol.maxBytes)
 	fail := func(id string, err error) {
 		rep.Failures[id] = err.Error()
 		st.Failed[id] = err.Error()
@@ -484,6 +525,7 @@ func runAutoRequests(ctx context.Context, cfgPath string, dry bool, requestsDir 
 	if m := c.Microsoft; !onlyRequests && m != nil && len(m.Products) > 0 {
 		fetchMicrosoft(&msRun{ctx: ctx, c: c, hc: hc, downloads: downloads, spec: spec, st: st, dry: dry, rep: &rep, fail: fail, added: added})
 	}
+	windowsResults(pol, rep.Feeds)
 
 	// ---- third-party applications ----
 	for _, a := range c.Apps {
@@ -508,11 +550,18 @@ func runAutoRequests(ctx context.Context, cfgPath string, dry bool, requestsDir 
 		rep.Feeds = append(rep.Feeds, f)
 	}
 
+	// ---- policy winget apps and vendor downloads ----
+	rr := &requestRun{ctx: ctx, c: c, hc: hc, downloads: downloads, spec: spec, st: st, dry: dry, rep: &rep,
+		fail: fail, added: added, outcomes: map[string]itemOutcome{}}
+	if !onlyRequests {
+		fetchPolicyApps(rr, pol)
+		fetchVendorSources(rr, pol)
+	}
+
 	// ---- acquisition requests carried over from the console ----
 	var reqs []*loadedRequest
 	if c.Requests != "" {
-		reqs = processRequests(&requestRun{ctx: ctx, c: c, hc: hc, downloads: downloads, spec: spec, st: st, dry: dry, rep: &rep,
-			fail: fail, added: added, outcomes: map[string]itemOutcome{}}, c.Requests)
+		reqs = processRequests(rr, c.Requests)
 	}
 
 	defer func() {
@@ -531,6 +580,10 @@ func runAutoRequests(ctx context.Context, cfgPath string, dry bool, requestsDir 
 		if requestsDone {
 			archiveRequests(c.Requests, reqs, &rep)
 		}
+		if !dry {
+			archiveRuns(c.Requests, pol)
+		}
+		policyReport(&rep, pol, cfgPath)
 		if !dry && !onlyRequests && c.Intel != nil && !c.Intel.Disabled {
 			rep.Feeds = append(rep.Feeds, intelFeed(ctx, c, &rep, &st))
 			// The Library cache and Windows build revisions it updated.
@@ -950,7 +1003,9 @@ func sendStatus(c *autoConfig, rep *autoReport) error {
 	}
 	r := acqstatus.Report{Source: src, Host: host, Schedule: c.Schedule, StartedAt: rep.StartedAt, FinishedAt: fin, Outcome: outcome,
 		Error: rep.Error, New: rep.New, Skipped: rep.Skipped, Superseded: rep.Superseded, Failures: rep.Failures, Warnings: rep.Warnings,
-		BundleID: rep.BundleID, Sent: rep.Sent, Feeds: rep.Feeds, Items: rep.Items}
+		BundleID: rep.BundleID, Sent: rep.Sent, Feeds: rep.Feeds, Items: rep.Items,
+		PolicyVersion: rep.PolicyVersion, PolicySHA256: rep.PolicySHA256, PolicyEditedBy: rep.PolicyEditedBy, PolicyAppliedAt: rep.PolicyAppliedAt,
+		PolicyError: rep.PolicyError, Sources: rep.Sources, Defaults: rep.Defaults, RunRequest: rep.RunRequest}
 	if r.Feeds == nil {
 		r.Feeds = []acqstatus.Feed{}
 	}

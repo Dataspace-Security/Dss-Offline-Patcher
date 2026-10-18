@@ -205,7 +205,7 @@ func (pk *Pack) Markdown() string {
 	}
 	w("\n### Export integrity and handling\n\nThe exported package should contain:\n\n")
 	w("- This report in PDF and/or Markdown/CSV as requested by the organization.\n- A machine-readable summary (JSON or CSV) of findings, control statuses, and metrics.\n- An evidence index with object IDs, timestamps, source system, and hashes.\n- Report-generation timestamp, reporting period, filters, and product version.\n- A signed export manifest or verifiable digital signature where supported.\n- Redaction and access controls for sensitive hostnames, IP addresses, user IDs, vulnerability details, and infrastructure topology.\n\n")
-	w("This package: `report.md` (this report), `summary.json` (machine-readable summary), `evidence/*.csv`, `manifest.json` (SHA-256 of every file, period, generation time, filters, product version) and `manifest.sig` (Ed25519 signature of manifest.json with the server's audit-signing key). Redacted: %v.\n\n", m.Redacted)
+	w("%s\n\n", packageContents(m.Redacted))
 	w("The report should state whether evidence is sampled or population-wide and disclose omitted records, unsupported platforms, stale agents, and data-collection gaps.\n\n")
 	for _, l := range pk.ScopeLimitations.Auto {
 		w("- %s\n", l)

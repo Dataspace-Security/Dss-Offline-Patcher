@@ -71,6 +71,7 @@ func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger
 		st.Policy.DeploymentApprovals = *cfg.DeploymentApprovals
 	}
 	st.Policy.RequireMFA = cfg.RequireMFA
+	st.AcqStaleAfter = cfg.AcquisitionStaleAfter.Duration
 	if cfg.MFAKeyFile != "" {
 		key, err := loadMFAKey(cfg.MFAKeyFile)
 		if err != nil {
@@ -166,19 +167,29 @@ func (s *Server) Handler() http.Handler {
 
 	admin(viewer, "GET /api/me", s.me)
 	admin(viewer, "GET /api/summary", s.summary)
-	admin(viewer, "GET /api/bundles", s.listBundles)
-	admin(viewer, "GET /api/bundles/{id}", s.getBundle)
-	admin(viewer, "GET /api/transfer/reconcile", s.reconcile)
+	// Imports (what was asked for, downloaded and received): user and up.
+	admin(user, "GET /api/bundles", s.listBundles)
+	admin(user, "GET /api/bundles/{id}", s.getBundle)
+	admin(user, "GET /api/transfer/reconcile", s.reconcile)
 	admin(viewer, "GET /api/system", s.system)
-	admin(viewer, "GET /api/acquisition", s.acquisition)
+	admin(user, "GET /api/acquisition", s.acquisition)
+	// Reports and the audit trail (incl. the server-made PDFs): every
+	// signed-in role reads them; the report profile is edited by admins.
 	admin(viewer, "GET /api/reports/compliance", s.complianceReport)
 	admin(viewer, "GET /api/reports/compliance.csv", s.complianceCSV)
 	admin(viewer, "GET /api/reports/endpoints.csv", s.endpointsCSV)
+	admin(viewer, "GET /api/reports/targets.csv", s.targetsCSV)
 	admin(viewer, "GET /api/reports/profile", s.getReportProfile)
 	admin(adm, "PUT /api/reports/profile", s.putReportProfile)
 	admin(viewer, "GET /api/reports/profile/history", s.reportProfileHistory)
 	admin(viewer, "GET /api/reports/compliance-pack", s.compliancePack)
 	admin(viewer, "GET /api/reports/compliance-pack.zip", s.compliancePackZip)
+	admin(viewer, "GET /api/reports/compliance-pack.pdf", s.compliancePackPDF)
+	admin(viewer, "GET /api/reports/compliance.pdf", s.compliancePDF)
+	admin(viewer, "GET /api/audit", s.listAudit)
+	admin(viewer, "GET /api/audit/verify", s.verifyAudit)
+	admin(viewer, "GET /api/audit/export", s.exportLifecycle)
+	admin(viewer, "GET /api/audit.pdf", s.auditPDF)
 	admin(viewer, "GET /api/alerts", s.listAlerts)
 	admin(user, "POST /api/alerts/{id}/ack", s.ackAlert)
 	mux.HandleFunc("GET /metrics", s.metrics)
@@ -192,14 +203,21 @@ func (s *Server) Handler() http.Handler {
 	admin(viewer, "GET /api/endpoints/{id}/updates", s.endpointUpdates)
 	admin(viewer, "GET /api/updates", s.fleetUpdates)
 	admin(viewer, "GET /api/intel", s.intelStatus)
-	admin(viewer, "GET /api/library", s.library)
-	admin(viewer, "GET /api/library/{kind}/{id}", s.libraryItem)
-	admin(viewer, "GET /api/reports/targets.csv", s.targetsCSV)
+	// The Library (everything that could be imported) is the vendor's tool.
+	admin(store.RoleSuperAdmin, "GET /api/library", s.library)
+	admin(store.RoleSuperAdmin, "GET /api/library/{kind}/{id}", s.libraryItem)
 	admin(user, "POST /api/acquisition-requests", s.exportAcqRequest)
+	// Auto-download policy: the vendor's (super admin) setting, read and write.
+	admin(store.RoleSuperAdmin, "GET /api/acquisition/policy", s.getAcqPolicy)
+	admin(store.RoleSuperAdmin, "PUT /api/acquisition/policy", s.putAcqPolicy)
+	admin(store.RoleSuperAdmin, "GET /api/acquisition/policy/history", s.acqPolicyHistory)
+	admin(store.RoleSuperAdmin, "GET /api/acquisition/policy/file", s.acqPolicyFile)
+	admin(store.RoleSuperAdmin, "POST /api/acquisition/policy/queue", s.requeueAcqPolicy)
+	admin(store.RoleSuperAdmin, "POST /api/acquisition/run", s.runAcquisitionNow)
 	admin(viewer, "GET /api/packages-needs", s.packageNeeds)
 	admin(viewer, "GET /api/policy", s.policy)
 	admin(viewer, "GET /api/fleet/status", s.fleetStatusHandler)
-	admin(viewer, "GET /api/acquisition-requests", s.listAcqRequests)
+	admin(user, "GET /api/acquisition-requests", s.listAcqRequests)
 	admin(user, "PATCH /api/endpoints/{id}", s.patchEndpoint)
 	admin(user, "POST /api/endpoints/{id}/retire", s.retireEndpoint)
 	admin(user, "POST /api/enrollment-tokens", s.createEnrollmentToken)
@@ -218,9 +236,6 @@ func (s *Server) Handler() http.Handler {
 	admin(viewer, "GET /api/exceptions", s.listExceptions)
 	admin(adm, "POST /api/exceptions", s.createException)
 	admin(adm, "POST /api/exceptions/{id}/revoke", s.revokeException)
-	admin(viewer, "GET /api/audit", s.listAudit)
-	admin(viewer, "GET /api/audit/verify", s.verifyAudit)
-	admin(viewer, "GET /api/audit/export", s.exportLifecycle)
 
 	mux.HandleFunc("GET /auth/config", s.authConfig)
 	mux.HandleFunc("GET /auth/login", s.authLogin)
@@ -295,6 +310,8 @@ func bearer(r *http.Request) string {
 	return ""
 }
 
+// requireAdmin admits principals of at least role; anyone lower gets 403
+// "requires role <role>" (audited as access.denied).
 func (s *Server) requireAdmin(role string, h http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p, why := s.principalFor(r)
@@ -440,6 +457,12 @@ func (s *Server) summary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, sm)
+}
+
+// isVendor: the signed-in principal is the vendor super admin.
+func isVendor(r *http.Request) bool {
+	p, _ := r.Context().Value(keyPrincipal).(*principal)
+	return p != nil && store.CanonicalRole(p.Role) == store.RoleSuperAdmin
 }
 
 func (s *Server) listBundles(w http.ResponseWriter, r *http.Request) {

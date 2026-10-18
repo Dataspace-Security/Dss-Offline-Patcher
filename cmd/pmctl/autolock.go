@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,6 +20,10 @@ var (
 	lockStale   = 15 * time.Minute
 )
 
+// errRunInProgress: another pmctl auto run holds the lock. `pmctl auto`
+// then exits with exitSkipped (scheduled runs overlap harmlessly).
+var errRunInProgress = errors.New("another pmctl auto run is in progress")
+
 func acquireLock(dir string, runTimeout time.Duration) (func(), error) {
 	p := filepath.Join(dir, ".auto.lock")
 	if stale, why := lockIsStale(p, runTimeout); stale {
@@ -28,7 +33,7 @@ func acquireLock(dir string, runTimeout time.Duration) (func(), error) {
 	}
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("another pmctl auto run is in progress (%s)", p)
+		return nil, fmt.Errorf("%w (%s)", errRunInProgress, p)
 	}
 	fmt.Fprintf(f, "%d %s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339))
 	f.Close()

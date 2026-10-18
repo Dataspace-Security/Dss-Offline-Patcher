@@ -64,7 +64,7 @@ export function PatchExposure({ packages, needs, endpoints, canPatch, onChanged 
                 action={<Link to={paths.catalog()} className="dash-link">Catalog →</Link>}>
         {loading ? <Skeleton lines={5} /> : top.length === 0 ? (
           <EmptyState title="Nothing in the catalog is waiting to be installed">
-            New needs show up on <Link to={paths.needed()}>Patches → Needed</Link>. Import them from there or from the <Link to={paths.library()}>Library</Link>.
+            New needs show up on <Link to={paths.needed()}>Patches → Needed</Link>.{canPatch && " Import them from there."}
           </EmptyState>
         ) : (
           <ol className="dash-top">
@@ -121,7 +121,7 @@ function KindSplit({ os, apps, osMachines, appMachines }: { os: number; apps: nu
       <div className="dash-kind-legend">
         <Link to="/endpoints?outdated=1"><span className="dash-swatch" style={{ ["--sw" as string]: "var(--blue-solid)" }} />
           Windows <b className="num">{os.toLocaleString()}</b> <span className="muted">· {plural(osMachines, "machine")}</span></Link>
-        <Link to={paths.library()}><span className="dash-swatch" style={{ ["--sw" as string]: "var(--purple-solid)" }} />
+        <Link to="/endpoints?outdated=1"><span className="dash-swatch" style={{ ["--sw" as string]: "var(--purple-solid)" }} />
           Applications <b className="num">{apps.toLocaleString()}</b> <span className="muted">· {plural(appMachines, "machine")}</span></Link>
       </div>
     </div>

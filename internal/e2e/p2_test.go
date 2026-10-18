@@ -77,7 +77,7 @@ func TestLibrary(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 	var empty libPage
-	if c := e.api("GET", "/api/library", tokViewer, nil, &empty); c != 200 || empty.Total != 0 || empty.Items == nil {
+	if c := e.api("GET", "/api/library", tokSuper, nil, &empty); c != 200 || empty.Total != 0 || empty.Items == nil {
 		t.Fatalf("no intel: %d %+v", c, empty)
 	}
 	if c := e.api("GET", "/api/library", "", nil, nil); c != 401 {
@@ -112,7 +112,7 @@ func TestLibrary(t *testing.T) {
 		}}, e.priv, "intel-lib")
 
 	var p libPage
-	if c := e.api("GET", "/api/library", tokViewer, nil, &p); c != 200 {
+	if c := e.api("GET", "/api/library", tokSuper, nil, &p); c != 200 {
 		t.Fatalf("library: %d", c)
 	}
 	// available (default): importable or installed; installed first.
@@ -124,7 +124,7 @@ func TestLibrary(t *testing.T) {
 		len(ch.Installers) != 1 || ch.Installers[0].Type != "wix" {
 		t.Errorf("chrome: %+v", ch)
 	}
-	if c := e.api("GET", "/api/library?view=all&sort=name", tokViewer, nil, &p); c != 200 || p.Total != 6 || p.Items[0].ID != "KB5044280" && p.Items[0].ID != "7zip.7zip" {
+	if c := e.api("GET", "/api/library?view=all&sort=name", tokSuper, nil, &p); c != 200 || p.Total != 6 || p.Items[0].ID != "KB5044280" && p.Items[0].ID != "7zip.7zip" {
 		t.Fatalf("all: %d %s", c, libIDs(p))
 	}
 	byID := map[string]libItem{}
@@ -167,7 +167,7 @@ func TestLibrary(t *testing.T) {
 		"/api/library?view=all&kind=app&sort=name&per_page=500&page=1&q=pavlov": "7zip.7zip",
 	} {
 		var r libPage
-		if c := e.api("GET", q, tokViewer, nil, &r); c != 200 || libIDs(r) != want {
+		if c := e.api("GET", q, tokSuper, nil, &r); c != 200 || libIDs(r) != want {
 			t.Errorf("%s: %d %q, want %q", q, c, libIDs(r), want)
 		}
 		if strings.Contains(q, "per_page=500") && r.PerPage != 100 {
@@ -175,33 +175,73 @@ func TestLibrary(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{"?kind=x", "?view=x", "?sort=x", "?page=0", "?per_page=-1"} {
-		if c := e.api("GET", "/api/library"+bad, tokViewer, nil, nil); c != 400 {
+		if c := e.api("GET", "/api/library"+bad, tokSuper, nil, nil); c != 400 {
 			t.Errorf("%s: %d", bad, c)
 		}
 	}
 	// Detail: the endpoints with their versions.
 	var d libItem
-	if c := e.api("GET", "/api/library/app/google.chrome", tokViewer, nil, &d); c != 200 || len(d.Endpoints) != 1 || d.Endpoints[0].Hostname != "pc-lib-01" ||
+	if c := e.api("GET", "/api/library/app/google.chrome", tokSuper, nil, &d); c != 200 || len(d.Endpoints) != 1 || d.Endpoints[0].Hostname != "pc-lib-01" ||
 		!d.Endpoints[0].Outdated || d.Endpoints[0].InstalledVersion != "155.0.8059.82" {
 		t.Fatalf("detail: %d %+v", c, d)
 	}
-	if c := e.api("GET", "/api/library/os/KB5044280", tokViewer, nil, &d); c != 200 || d.Endpoints == nil || len(d.Endpoints) != 0 {
+	if c := e.api("GET", "/api/library/os/KB5044280", tokSuper, nil, &d); c != 200 || d.Endpoints == nil || len(d.Endpoints) != 0 {
 		t.Errorf("os detail: %d %+v", c, d)
 	}
-	if c := e.api("GET", "/api/library/app/Nope.Nope", tokViewer, nil, nil); c != 404 {
+	if c := e.api("GET", "/api/library/app/Nope.Nope", tokSuper, nil, nil); c != 404 {
 		t.Errorf("unknown: %d", c)
 	}
 
-	// Import from the Library: 7-Zip (installed nowhere) for arm64, the KB
-	// no endpoint needs.
-	if c := e.api("POST", "/api/acquisition-requests", tokOperator, map[string]any{"apps": []string{"7zip.7zip"}, "app_archs": map[string]string{"7zip.7zip": "sparc"}}, nil); c != 400 {
-		t.Errorf("bad arch: %d", c)
+	// The Library is the vendor's: bank roles cannot read it, nor import
+	// something no endpoint has (with or without app_archs); they still
+	// import what their machines have (Google Chrome).
+	for _, tok := range []string{tokViewer, tokOperator, tokAdmin} {
+		for _, path := range []string{"/api/library", "/api/library/app/google.chrome"} {
+			if c, msg := e.apiErr("GET", path, tok, nil); c != 403 || !strings.Contains(msg, "super_admin") {
+				t.Errorf("%s reads %s: %d %s", tok, path, c, msg)
+			}
+		}
+	}
+	for _, tok := range []string{tokOperator, tokAdmin} {
+		for _, body := range []map[string]any{
+			{"apps": []string{"7zip.7zip"}, "app_archs": map[string]string{"7zip.7zip": "arm64"}},
+			{"apps": []string{"7zip.7zip"}},
+			{"kbs": []string{"KB5044280"}},
+			{"apps": []string{"Google.Chrome"}, "app_archs": map[string]string{"Google.Chrome": "arm64"}},
+		} {
+			if c, msg := e.apiErr("POST", "/api/acquisition-requests", tok, body); c != 403 || !strings.Contains(msg, "Library is the vendor's") {
+				t.Errorf("%s library import %v: %d %s", tok, body, c, msg)
+			}
+		}
 	}
 	if c := e.api("POST", "/api/acquisition-requests", tokOperator, map[string]any{"apps": []string{"Contoso.Nothing"}}, nil); c != 400 {
+		t.Errorf("bank user, not in intel: %d", c)
+	}
+	if c := e.api("POST", "/api/acquisition-requests", tokOperator, map[string]any{"apps": []string{"Google.Chrome"}}, nil); c != 200 {
+		t.Errorf("bank user imports what an endpoint has: %d", c)
+	}
+	var denied []store.AuditEvent
+	e.api("GET", "/api/audit?action=access.denied&limit=200", tokViewer, nil, &denied)
+	libDenied := 0
+	for _, ev := range denied {
+		if strings.Contains(string(ev.Details), "library import") {
+			libDenied++
+		}
+	}
+	if libDenied != 8 {
+		t.Errorf("library import refusals audited: %d, want 8", libDenied)
+	}
+
+	// Import from the Library (super admin): 7-Zip (installed nowhere) for
+	// arm64, the KB no endpoint needs.
+	if c := e.api("POST", "/api/acquisition-requests", tokSuper, map[string]any{"apps": []string{"7zip.7zip"}, "app_archs": map[string]string{"7zip.7zip": "sparc"}}, nil); c != 400 {
+		t.Errorf("bad arch: %d", c)
+	}
+	if c := e.api("POST", "/api/acquisition-requests", tokSuper, map[string]any{"apps": []string{"Contoso.Nothing"}}, nil); c != 400 {
 		t.Errorf("not in intel: %d", c)
 	}
 	var raw json.RawMessage
-	if c := e.api("POST", "/api/acquisition-requests", tokOperator, map[string]any{"apps": []string{"7zip.7zip", "Google.Chrome"}, "kbs": []string{"KB5044280"},
+	if c := e.api("POST", "/api/acquisition-requests", tokSuper, map[string]any{"apps": []string{"7zip.7zip", "Google.Chrome"}, "kbs": []string{"KB5044280"},
 		"app_archs": map[string]string{"7zip.7zip": "arm64", "Google.Chrome": "arm64"}}, &raw); c != 200 {
 		t.Fatalf("import: %d", c)
 	}
@@ -222,7 +262,7 @@ func TestLibrary(t *testing.T) {
 	if len(req.KBs) != 1 || req.KBs[0].KB != "KB5044280" || req.KBs[0].Arch != "x64" || req.KBs[0].Build != 22000 || req.KBs[0].Endpoints != 0 {
 		t.Errorf("kb: %+v", req.KBs)
 	}
-	if c := e.api("GET", "/api/library?view=all&q=7-zip", tokViewer, nil, &p); c != 200 || len(p.Items) != 1 || p.Items[0].Requested == nil ||
+	if c := e.api("GET", "/api/library?view=all&q=7-zip", tokSuper, nil, &p); c != 200 || len(p.Items) != 1 || p.Items[0].Requested == nil ||
 		p.Items[0].Requested.Status != "requested" || p.Items[0].Requested.RequestID != req.RequestID {
 		t.Errorf("requested state: %+v", p.Items)
 	}

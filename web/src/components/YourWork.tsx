@@ -59,8 +59,8 @@ export function YourWork({ summary, endpoints, className = "" }: { summary: Summ
   const pkgTotal = Object.values(summary.packages ?? {}).reduce((a, v) => a + (v ?? 0), 0);
   if (pkgTotal === 0) {
     firstRun.push(isOperator
-      ? <>The catalog is empty — use Import on <Link to={paths.needed()}>Needed</Link> or in the <Link to={paths.library()}>Library</Link>, then follow them on <Link to={paths.imports}>Imports</Link>.</>
-      : <>The catalog is empty. A User or Admin imports patches; you can follow them on <Link to={paths.imports}>Imports</Link>.</>);
+      ? <>The catalog is empty — use Import on <Link to={paths.needed()}>Needed</Link>{handlesAgents && <> or in the <Link to={paths.library()}>Library</Link></>}, then follow them on <Link to={paths.imports}>Imports</Link>.</>
+      : <>The catalog is empty. A User or Admin imports patches from <Link to={paths.needed()}>Needed</Link>.</>);
   }
 
   if (approvesDeployments && me) {

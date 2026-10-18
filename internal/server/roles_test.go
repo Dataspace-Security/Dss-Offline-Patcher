@@ -165,7 +165,6 @@ func TestPermissionTable(t *testing.T) {
 	routes := []struct{ method, path, min string }{
 		{"GET", "/api/summary", "viewer"},
 		{"GET", "/api/deployments", "viewer"},
-		{"GET", "/api/audit", "viewer"},
 		{"GET", "/api/policy", "viewer"},
 		{"POST", "/api/alerts/1/ack", "user"},
 		{"POST", "/api/packages/p-1/approve", "user"},
@@ -190,21 +189,36 @@ func TestPermissionTable(t *testing.T) {
 		{"POST", "/api/users/someone@bank.example/disable", "admin"},
 		{"POST", "/api/users/someone@bank.example/reset_mfa", "admin"},
 		{"POST", "/api/users/someone@bank.example/delete", "admin"},
-		{"GET", "/api/reports/profile", "viewer"},
-		{"GET", "/api/reports/profile/history", "viewer"},
-		{"PUT", "/api/reports/profile", "admin"},
-		{"GET", "/api/reports/compliance-pack", "viewer"},
+		{"GET", "/api/exceptions", "viewer"},
+		{"GET", "/api/bundles", "user"},
+		{"GET", "/api/bundles/1", "user"},
+		{"GET", "/api/transfer/reconcile", "user"},
+		{"GET", "/api/acquisition", "user"},
+		{"GET", "/api/acquisition-requests", "user"},
+		{"GET", "/api/library", "super_admin"},
+		{"GET", "/api/library/app/google.chrome", "super_admin"},
+		{"GET", "/api/updates", "viewer"},
+		{"GET", "/api/packages", "viewer"},
 		{"POST", "/api/auth/mfa/disable", "super_admin"},
 	}
+	// Reports, the audit trail and the server-made PDFs: every signed-in role.
+	for _, path := range []string{
+		"/api/reports/compliance", "/api/reports/compliance.csv", "/api/reports/endpoints.csv", "/api/reports/targets.csv",
+		"/api/reports/compliance-pack", "/api/reports/compliance-pack.zip", "/api/reports/compliance-pack.pdf", "/api/reports/compliance.pdf",
+		"/api/reports/profile/history", "/api/audit", "/api/audit/verify", "/api/audit/export?package_id=p-1", "/api/audit.pdf",
+	} {
+		routes = append(routes, struct{ method, path, min string }{"GET", path, "viewer"})
+	}
 	for _, rt := range routes {
+		min, refusal := rt.min, "requires role "+rt.min
 		for role, tok := range roleTokens {
 			w := do(h, req{method: rt.method, path: rt.path, body: map[string]any{}, token: tok})
-			allowed := store.RoleRank(role) >= store.RoleRank(rt.min)
+			allowed := store.RoleRank(role) >= store.RoleRank(min)
 			if allowed && (w.Code == 401 || (w.Code == 403 && strings.HasPrefix(errBody(w), "requires role"))) {
-				t.Errorf("%s %s as %s: refused (%d %s), min role %s", rt.method, rt.path, role, w.Code, w.Body, rt.min)
+				t.Errorf("%s %s as %s: refused (%d %s), min role %s", rt.method, rt.path, role, w.Code, w.Body, min)
 			}
-			if !allowed && (w.Code != 403 || errBody(w) != "requires role "+rt.min) {
-				t.Errorf("%s %s as %s: want 403 requires role %s, got %d %s", rt.method, rt.path, role, rt.min, w.Code, w.Body)
+			if !allowed && (w.Code != 403 || errBody(w) != refusal) {
+				t.Errorf("%s %s as %s: want 403 %q, got %d %s", rt.method, rt.path, role, refusal, w.Code, w.Body)
 			}
 		}
 	}
@@ -565,5 +579,27 @@ func TestUserManagementAPI(t *testing.T) {
 	b, _ := json.Marshal(all)
 	if strings.Contains(string(b), temp) || strings.Contains(string(b), testPW) || strings.Contains(string(b), "pbkdf2") {
 		t.Fatal("password or hash in the audit trail")
+	}
+}
+
+// /api/summary and /api/system carry their audit block for every role.
+func TestAuditBlockEveryRole(t *testing.T) {
+	s := newRolesServer(t, "", false)
+	h := s.Handler()
+	for _, path := range []string{"/api/summary", "/api/system"} {
+		for role, tok := range roleTokens {
+			w := do(h, req{method: "GET", path: path, token: tok})
+			var v map[string]any
+			if err := json.Unmarshal(w.Body.Bytes(), &v); w.Code != 200 || err != nil {
+				t.Fatalf("%s as %s: %d %v", path, role, w.Code, err)
+			}
+			_, has := v["audit"]
+			if !has {
+				t.Errorf("%s as %s: no audit block", path, role)
+			}
+			if _, ok := v["endpoints"]; path == "/api/summary" && !ok {
+				t.Errorf("%s as %s: summary lost its endpoints block", path, role)
+			}
+		}
 	}
 }

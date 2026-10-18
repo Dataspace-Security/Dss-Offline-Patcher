@@ -89,7 +89,7 @@ func processRequests(r *requestRun, dir string) []*loadedRequest {
 	}
 	var out []*loadedRequest
 	for _, e := range ents {
-		if !e.Type().IsRegular() || !strings.EqualFold(filepath.Ext(e.Name()), ".json") {
+		if !e.Type().IsRegular() || !strings.EqualFold(filepath.Ext(e.Name()), ".json") || isControlFile(e.Name()) {
 			continue
 		}
 		p := filepath.Join(dir, e.Name())

@@ -188,7 +188,7 @@ func TestReceiptsAndRateLimit(t *testing.T) {
 	e.intake.ScanOnce(ctx)
 
 	var rec store.Reconciliation
-	e.api("GET", "/api/transfer/reconcile", tokViewer, nil, &rec)
+	e.api("GET", "/api/transfer/reconcile", tokOperator, nil, &rec)
 	if len(rec.Matched) != 2 || len(rec.ReceiptWithoutBundle) != 1 || rec.UnsignedReceipts != 1 || len(rec.BundleWithoutReceipt) != 1 {
 		t.Fatalf("reconciliation: matched=%d lost=%d unsigned=%d unreceipted=%d", len(rec.Matched), len(rec.ReceiptWithoutBundle), rec.UnsignedReceipts, len(rec.BundleWithoutReceipt))
 	}

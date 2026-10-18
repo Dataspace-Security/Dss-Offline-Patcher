@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { api, downloadFile, enc, errMsg, qs } from "../api";
 import type { AcquisitionRequestRecord, LifecycleExport, Package, PackageFleet, Target, TargetState } from "../types";
 import { parseTime, useLoad } from "../util";
+import { useCan } from "../auth";
 import { ErrorBanner, Mono, Time } from "./ui";
 import "../patch.css";
 
@@ -123,9 +124,11 @@ export function buildSteps(pkg: Package, life: LifecycleExport | null, requests:
 export function LifecycleTimeline({ pkg, fleet }: { pkg: Package; fleet: PackageFleet | undefined }) {
   const id = pkg.package_id;
   const life = useLoad(() => api.get<LifecycleExport>(`/api/audit/export${qs({ package_id: id })}`), [id, pkg.state, pkg.approvals?.length]);
-  const reqs = useLoad(() => api.get<AcquisitionRequestRecord[]>("/api/acquisition-requests"), [id]);
+  // Import tracking is User and up (viewers: the timeline without request steps' details).
+  const canImport = useCan("user");
+  const reqs = useLoad(() => (canImport ? api.get<AcquisitionRequestRecord[]>("/api/acquisition-requests") : Promise.resolve(null)), [id, canImport]);
   const [dlErr, setDlErr] = useState<string | null>(null);
-  const steps = buildSteps(pkg, life.data, reqs.error ? null : reqs.data ?? [], fleet);
+  const steps = buildSteps(pkg, life.data, !canImport || reqs.error ? null : reqs.data ?? [], fleet);
 
   const download = async () => {
     setDlErr(null);

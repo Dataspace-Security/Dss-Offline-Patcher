@@ -22,6 +22,8 @@ export const paths = {
   deployment: (id: string) => `/deployments/${enc(id)}`,
   newDeployment: "/deployments/new",
   windows: "/deployments/windows",
+  /** Patch exceptions (Admins create and revoke; everyone reads). */
+  exceptions: "/deployments/exceptions",
   // Endpoints
   endpoints: "/endpoints",
   endpoint: (id: string) => `/endpoints/${enc(id)}`,
@@ -36,9 +38,10 @@ export const paths = {
     const q = filter ? new URLSearchParams(filter).toString() : "";
     return q ? `/reports/audit?${q}` : "/reports/audit";
   },
-  exceptions: "/reports/exceptions",
   // Settings
   server: "/settings/server",
+  /** Auto-download: what the downloader fetches every run (super admin). */
+  autoDownload: "/settings/auto-download",
   users: "/settings/users",
   /** Agent versions: offpatch agent packages (kept out of the Catalog). */
   agentVersions: (packageId?: string | null) => (packageId ? `/settings/agents/${enc(packageId)}` : "/settings/agents"),

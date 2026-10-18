@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"offpatch/internal/store"
 	"offpatch/internal/trust"
 )
 
@@ -93,7 +92,7 @@ func (s *Server) system(w http.ResponseWriter, r *http.Request) {
 	for k, v := range c.PatchDeadlines {
 		deadlines[k] = v.String()
 	}
-	writeJSON(w, 200, map[string]any{
+	out := map[string]any{
 		"version":        Version,
 		"go_version":     runtime.Version(),
 		"platform":       runtime.GOOS + "/" + runtime.GOARCH,
@@ -126,7 +125,8 @@ func (s *Server) system(w http.ResponseWriter, r *http.Request) {
 			"lost_after_install": c.LostAfterInstall.String(), "preinstall_min_free_disk_mb": c.Preinstall.MinFreeDiskMB, "preinstall_min_battery_pct": c.Preinstall.policyFor("windows").MinBatteryPct,
 		},
 		"open_alerts": len(alerts),
-	})
+	}
+	writeJSON(w, 200, out)
 }
 
 func (s *Server) acquisition(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +136,5 @@ func (s *Server) acquisition(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"sources": srcs, "history": hist, "stale_after_hours": int(storeAcqStale().Hours())})
+	writeJSON(w, 200, map[string]any{"sources": srcs, "history": hist, "stale_after_hours": int(s.store.AcqStale().Hours())})
 }
-
-func storeAcqStale() time.Duration { return store.AcqStaleAfter }

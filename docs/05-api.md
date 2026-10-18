@@ -12,8 +12,8 @@ Roles are cumulative: `viewer` < `user` < `admin` < `super_admin` (v1.8; the old
 |---|---|---|
 | `GET /api/me` | viewer | → `{user, role}` |
 | `GET /api/summary` | viewer | → `Summary` |
-| `GET /api/bundles` | viewer | → `Bundle[]` (newest first) |
-| `GET /api/bundles/{id}` | viewer | → `Bundle` (`id` = numeric intake id) |
+| `GET /api/bundles` | user | → `Bundle[]` (newest first) |
+| `GET /api/bundles/{id}` | user | → `Bundle` (`id` = numeric intake id) |
 | `GET /api/packages?state=` | viewer | → `Package[]` |
 | `GET /api/packages/{package_id}` | viewer | → `Package` |
 | `POST /api/packages/{package_id}/approve` | user | `{reason}` → `Package` |
@@ -172,7 +172,7 @@ Cookie-authenticated requests (SSO and email + password) that change state MUST 
 | `GET /api/maintenance-windows` | viewer | → `MaintenanceWindow[]` |
 | `POST /api/maintenance-windows` | user | `MaintenanceWindow` (without id/created_*) → `MaintenanceWindow` |
 | `POST /api/maintenance-windows/{id}/delete` | user | `{reason}` → `{ok}` |
-| `GET /api/transfer/reconcile` | viewer | → `Reconciliation` |
+| `GET /api/transfer/reconcile` | user | → `Reconciliation` |
 | `GET /api/reports/compliance` | viewer | → `ComplianceReport` |
 | `GET /api/reports/compliance.csv` · `/api/reports/endpoints.csv` | viewer | CSV download |
 | `GET /api/alerts?open=1` | viewer | → `Alert[]` |
@@ -307,7 +307,7 @@ TypeScript shapes: `web/src/types.ts`, section "UX iteration" (`Policy`, `Packag
 | `GET /api/fleet/status` | viewer | → `FleetStatus`: one row per KB / app of the intelligence fleet view, including KBs and apps every matched endpoint already has. Per endpoint `status` by precedence `exception` > `failed` > `being_patched` > `verified` > `outdated` > `up_to_date`, from the row's catalog package (the update's package; for rows without one, the package of the installed version) and its install targets and active exceptions. `requested`: latest tracked request listing it. By default every row has its counts and `endpoints: []`. **`?key=<KB or winget id>[&kind=os\|app]`** (key case-insensitive; kind optional): `rows` holds only that row, with its full `endpoints` list; 404 if there is no such row, 400 for another `kind` or `kind` without `key`. Cached like `/api/updates` (60 s, and rebuilt after the changes listed for `/api/packages-needs`; one rebuild at a time). `rows: []` without intelligence. |
 | `GET /api/updates` | viewer | rows gain `requested: AcquisitionRequestRef \| null` (latest tracked request listing the KB / winget id). |
 | `POST /api/acquisition-requests` | user | Unchanged response; the request is also stored (table `acq_requests`) in the same transaction as its audit event. |
-| `GET /api/acquisition-requests` | viewer | → `AcquisitionRequestRecord[]`, newest first, at most 100. Items: `{kind: "app", key: winget id, version}` per app and `{kind: "kb", key: KB, version: architecture}` per KB and architecture. `seen_at`: `received_at` of the first acquisition status report with a `request` feed naming the request id. An item is `fulfilled` when a validated bundle received at or after the request's `created_at` holds `<KB>-<arch>`, or pmctl's package id for the app version (`<winget id>-<version>[-<arch>]`, hash-suffixed form included); then `package_id` and `fulfilled_at` (`received_at` of the earliest such bundle; a later bundle that carries an already-imported package again counts) are set. A package that was already in the catalog before the request does not fulfil it. Otherwise `seen` once the request was seen, else `requested`. For a KB requested for several architectures, `requested` refs take the least advanced status. Computed on read. |
+| `GET /api/acquisition-requests` | user | → `AcquisitionRequestRecord[]`, newest first, at most 100. Items: `{kind: "app", key: winget id, version}` per app and `{kind: "kb", key: KB, version: architecture}` per KB and architecture. `seen_at`: `received_at` of the first acquisition status report with a `request` feed naming the request id. An item is `fulfilled` when a validated bundle received at or after the request's `created_at` holds `<KB>-<arch>`, or pmctl's package id for the app version (`<winget id>-<version>[-<arch>]`, hash-suffixed form included); then `package_id` and `fulfilled_at` (`received_at` of the earliest such bundle; a later bundle that carries an already-imported package again counts) are set. A package that was already in the catalog before the request does not fulfil it. Otherwise `seen` once the request was seen, else `requested`. For a KB requested for several architectures, `requested` refs take the least advanced status. Computed on read. |
 | `POST /api/deployments/{id}/retry_failed` | user | `{reason}` (required) → `Deployment`. Targets in **every ring up to the current ring** in state `failed` with retries exhausted (`attempts > max_retries`) go back to `pending` with `attempts` 0. The deployment must be `active`, `paused` or `completed`: a paused one stays paused (an operator resumes it); a completed one becomes `active` again with `state_reason` `retry requested by <actor>: <reason>` (an install deployment only while its package is still approved). 409 for other states, an unapproved package, or when nothing is to retry ("no failed targets with exhausted retries in rings up to the current ring"). Audited as `deployment.retry_failed` (`details`: `reason`, `ring`, `state` before the retry, `targets` with their ring and last attempts / detail). The failure threshold is then re-checked as after a failure (remaining health-check failures or lost endpoints can auto-pause it again). |
 | `GET /api/deployments/{id}` | viewer | each target gains `live: TargetLive \| null` (see heartbeat). |
 
@@ -328,7 +328,7 @@ Behaviour:
 - The queued file is exactly the request document, i.e. the response **without** `queued_to` (`pmctl` parses strictly, so the console strips `queued_to` before saving the file).
 - The file is written before the audit event; if the event cannot be recorded the file is removed again and the request fails (no audit record, no export).
 - `acquisition_requests_dir` must be an absolute path (config load fails otherwise). If it is not writable at startup, pmserver logs a warning and keeps running; exports then fall back to the carried file.
-- Production with separate server and acquisition hosts keeps it **unset** (strict one-way transfer). Set it only when acquisition runs on the same machine (`install-ubuntu.sh --role all` does) or the organisation approved an outbound folder. See [07-admin-guide.md](07-admin-guide.md) §3.9 and [08-acquisition.md](08-acquisition.md).
+- The two-machine layout (separate server and acquisition hosts) keeps it **unset** (strict one-way transfer). Set it only when acquisition runs on the same machine (the single-server `install-ubuntu.sh`, `--role all`, does) or the organisation approved an outbound folder. See [07-admin-guide.md](07-admin-guide.md) §3.9 and [08-acquisition.md](08-acquisition.md).
 
 ## v1.6 additions — P1 fixes (honest status, auto-advance, import results)
 
@@ -337,7 +337,7 @@ Behaviour:
 | `POST /api/deployments` | user | `NewDeployment` gains `auto_advance: boolean` (default `false`), echoed on `Deployment`. When the current ring is finished within `max_failure_pct` and is not the last ring, the deployment advances by itself (audited `deployment.advanced`, actor `system:scheduler`, `details.auto: true`); see [03-state-model.md](03-state-model.md). A second **active or paused** deployment of the same package and operation is refused with **409** ("already running; open it, wait for it to finish, or cancel it first"). |
 | `GET /api/endpoints`, `GET /api/endpoints/{id}`, `GET /api/reports/endpoints.csv` | viewer | `status` may also be `updates_available` (would be `compliant`, but `missing.os + missing.apps > 0`), `out_of_support` (would be `compliant` or `updates_available`, but `missing.os_support` is `out_of_support`) and `awaiting_checkin` (enrolled < 24 h ago, no inventory yet; after 24 h `offline`). `missing` gains `os_support` (`supported` \| `out_of_support` \| omitted) and `os_last_update` (date of the build's newest cumulative update). |
 | `GET /api/summary` | viewer | `endpoints.by_status` has a key for every status, including `updates_available`, `out_of_support` and `awaiting_checkin`; the same refined statuses as the endpoint list (so `compliant` no longer counts machines the intelligence says are behind). The `offpatch_endpoints` metric uses the same counts. |
-| `GET /api/acquisition-requests` | viewer | Item `status` may also be `unsupported` (can never be fetched this way: no MSI installer for the architecture, no ProductCode, version no longer in winget, KB not in the catalog for the build/arch) or `failed` (transient: download, hash, network — the next run may work), with `reason`. Taken from the **newest** acquisition status report whose `items` list that request id + kind + key + version (key and version case-insensitive); `fetched` / `already_sent` there mean `seen`. `fulfilled` (the package arrived) wins over both. |
+| `GET /api/acquisition-requests` | user | Item `status` may also be `unsupported` (can never be fetched this way: no MSI installer for the architecture, no ProductCode, version no longer in winget, KB not in the catalog for the build/arch) or `failed` (transient: download, hash, network — the next run may work), with `reason`. Taken from the **newest** acquisition status report whose `items` list that request id + kind + key + version (key and version case-insensitive); `fetched` / `already_sent` there mean `seen`. `fulfilled` (the package arrived) wins over both. |
 | `GET /api/updates`, `GET /api/fleet/status`, `GET /api/endpoints/{id}/updates` | viewer | `requested` (`AcquisitionRequestRef`) gains `reason` (for `unsupported` / `failed`); status rank for a KB requested for several architectures: `requested` 0, `seen` / `failed` / `unsupported` 1, `fulfilled` 2 (least advanced wins; on a tie the one with a reason). `GET /api/endpoints/{id}/updates` rows (`os[]`, `apps[]`) now carry `requested` too. |
 
 ```ts
@@ -360,10 +360,10 @@ Server behaviour without new endpoints (details in [03-state-model.md](03-state-
 
 | Method & path | Role | Body → Response |
 |---|---|---|
-| `GET /api/library?q=&kind=app\|os&view=available\|installed\|catalog\|all&publisher=&sort=installed\|name\|date&page=1&per_page=50` | viewer | → `LibraryPage` (below). One searchable list of everything the update intelligence knows: winget apps (`kind: "app"`) and Windows cumulative updates (`kind: "os"`, one row per KB). `q`: words (case-insensitive, all must match) over name, id, publisher and MSI product codes. `publisher`: exact publisher, case-insensitive. `view`: `available` (default: `importable` = `yes` or installed in the fleet), `installed` (installed on at least one endpoint), `catalog` (has a catalog package), `all`. `sort`: `installed` (default: installed endpoints, then name), `name`, `date` (release date for KBs, `resolved_at` for apps; newest first). `per_page` is capped at 100. 400 for other `kind` / `view` / `sort` values or a page / per_page < 1. Without usable intelligence: `total: 0, items: []`. |
-| `GET /api/library/{kind}/{id}` | viewer | → `LibraryItem` plus `endpoints: [{endpoint_id, hostname, installed_version, outdated}]` (sorted by hostname; for a KB: endpoints on its build, `installed_version` = their `os_version`). `id` is case-insensitive. 404 when not in the Library or without usable intelligence. |
-| `POST /api/acquisition-requests` | user | Body gains `app_archs: {"<winget id>": "x64" \| "x86" \| "arm64"}`. Apps and KBs that no endpoint needs are now accepted when they are in the update intelligence (a Library import): an app is written with `architectures: [app_archs[id] or "x64"]`, `endpoints: 0` and no installed forms; a KB with every architecture the intelligence lists for it and `endpoints: 0`. `app_archs` is ignored for apps installed in the fleet (they keep the fleet's architectures). 400 for an architecture other than x64 / x86 / arm64, more than 500 `app_archs` entries, or an item that is not in the intelligence ("not in the update intelligence (reload the page): …"). |
-| `GET /api/acquisition-requests` (and every `requested` ref) | viewer | Item `status` may also be `stale` with `reason` `the acquisition run at <finished_at> did not pick this request up`: the item is still `requested` / `seen`, and the **newest** acquisition status report (by `finished_at`), finished more than 10 min after the request's `created_at`, lists the request id neither in a `request` feed nor in `items`. An item with a `fetched` / `already_sent` result is on its way and never stale; `fulfilled` wins. Rank for `requested` refs: `stale` 0 (like `requested`). The console shows it as "Not picked up" with "Ask again". |
+| `GET /api/library?q=&kind=app\|os&view=available\|installed\|catalog\|all&publisher=&sort=installed\|name\|date&page=1&per_page=50` | super_admin | → `LibraryPage` (below). One searchable list of everything the update intelligence knows: winget apps (`kind: "app"`) and Windows cumulative updates (`kind: "os"`, one row per KB). `q`: words (case-insensitive, all must match) over name, id, publisher and MSI product codes. `publisher`: exact publisher, case-insensitive. `view`: `available` (default: `importable` = `yes` or installed in the fleet), `installed` (installed on at least one endpoint), `catalog` (has a catalog package), `all`. `sort`: `installed` (default: installed endpoints, then name), `name`, `date` (release date for KBs, `resolved_at` for apps; newest first). `per_page` is capped at 100. 400 for other `kind` / `view` / `sort` values or a page / per_page < 1. Without usable intelligence: `total: 0, items: []`. |
+| `GET /api/library/{kind}/{id}` | super_admin | → `LibraryItem` plus `endpoints: [{endpoint_id, hostname, installed_version, outdated}]` (sorted by hostname; for a KB: endpoints on its build, `installed_version` = their `os_version`). `id` is case-insensitive. 404 when not in the Library or without usable intelligence. |
+| `POST /api/acquisition-requests` | user (Library items and `app_archs`: super_admin) | Body gains `app_archs: {"<winget id>": "x64" \| "x86" \| "arm64"}`. Apps and KBs that no endpoint needs are now accepted when they are in the update intelligence (a Library import): an app is written with `architectures: [app_archs[id] or "x64"]`, `endpoints: 0` and no installed forms; a KB with every architecture the intelligence lists for it and `endpoints: 0`. `app_archs` is ignored for apps installed in the fleet (they keep the fleet's architectures). 400 for an architecture other than x64 / x86 / arm64, more than 500 `app_archs` entries, or an item that is not in the intelligence ("not in the update intelligence (reload the page): …"). |
+| `GET /api/acquisition-requests` (and every `requested` ref) | user | Item `status` may also be `stale` with `reason` `the acquisition run at <finished_at> did not pick this request up`: the item is still `requested` / `seen`, and the **newest** acquisition status report (by `finished_at`), finished more than 10 min after the request's `created_at`, lists the request id neither in a `request` feed nor in `items`. An item with a `fetched` / `already_sent` result is on its way and never stale; `fulfilled` wins. Rank for `requested` refs: `stale` 0 (like `requested`). The console shows it as "Not picked up" with "Ask again". |
 | `GET /api/summary` | viewer | Gains `intel: {generated_at, age_hours, stale} \| null` (null: no intelligence received). `stale`: older than 8 days. |
 | `GET /api/endpoints`, `GET /api/endpoints/{id}` | viewer | `missing` gains `catalog`: approved **or quarantined** catalog packages the endpoint needs (`ready` counts the approved ones). `status` `updates_available` now also applies when `missing.catalog` > 0, so "fully up to date" means `os`, `apps` and `catalog` all 0. Without intelligence `missing` is set when `catalog` > 0. |
 | `GET /api/alerts` | viewer | Each alert gains `details` (object, e.g. `{endpoint_ids: string[], hostnames: string[]}` for alerts about endpoints; omitted when empty), `resolved_at` and `resolved_by` (set when the condition cleared and the alert closed itself; `acknowledged_by` / `acknowledged_at` are then `system:scheduler` and that time). `?open=1` excludes resolved alerts. |
@@ -599,7 +599,7 @@ JSON shapes: `internal/compliance/types.go` (`Pack`) and `internal/store/report_
 | `PUT /api/reports/profile` | admin | `ReportProfile` (strict JSON) → `ReportProfileRecord` of the new version. `?base_version=N`: 409 when another version was saved since N. 400 lists every problem: `regulators` ∈ RBI, SEBI, IRDAI, PFRDA, MeitY, CERT-In, other; `deadlines[].priority` ∈ emergency, critical, high, moderate, low (once each; missing ones are filled from the policy), `max_days` 1–3650, `clock_start` ∈ release, acquired, approved; `regulatory_mappings[].applicable` ∈ yes, no, unknown, `result` and `manual_controls.*.status` ∈ the status values; `manual_controls` keys PM-01…PM-17; dates `YYYY-MM-DD` (or RFC 3339); strings ≤ 8000 characters, lists ≤ 200. Audited `report.profile_updated` (`version`, `sha256`, `previous_version`, `changed`: top-level field names). |
 | `GET /api/reports/profile/history` | viewer | → `[{version, edited_by, edited_at, sha256}]`, newest first. |
 | `GET /api/reports/compliance-pack?from=YYYY-MM-DD&to=YYYY-MM-DD[&redact=1][&tz=Asia/Kolkata]` | viewer | → `Pack` (below). `to` is inclusive; defaults: this month so far, the server's time zone. 400 for bad dates, `from` after `to`, more than 3660 days, a period starting in the future, an unknown `tz`. Audited `report.compliance_generated` (`report_id`, `period_from`, `period_to`, `format: "json"`, `redacted`, `profile_version`, `overall_suggested`, `generated_at`). |
-| `GET /api/reports/compliance-pack.zip?…` | viewer | Same parameters → `application/zip` (`compliance-<report_id>[-redacted].zip`), streamed: `report.md`, `summary.json` (= `Pack`), `evidence/E-001…E-010-*.csv`, `manifest.json`, `manifest.sig`, `signing-key.pub`. Audited like the JSON with `format: "zip"` and `manifest_sha256`, before the ZIP is finished (an audit failure leaves the download incomplete). |
+| `GET /api/reports/compliance-pack.zip?…` | viewer | Same parameters → `application/zip` (`compliance-<report_id>[-redacted].zip`), streamed: `report.pdf`, `report.md`, `summary.json` (= `Pack`), `evidence/E-001…E-010-*.csv`, `manifest.json`, `manifest.sig`, `signing-key.pub`. Audited like the JSON with `format: "zip"` and `manifest_sha256`, before the ZIP is finished (an audit failure leaves the download incomplete). |
 
 Status values (controls, mappings, overall): `Compliant`, `Partially compliant`, `Non-compliant`,
 `Not applicable`, `Not assessed`.
@@ -642,3 +642,61 @@ files: [{path, sha256, size}], key_id, public_key (base64), public_key_fingerpri
 `manifest.sig` is the base64 Ed25519 signature of the `manifest.json` bytes with the server's audit-signing key
 (`<data_dir>/audit-signing.key`, created on first use). Verify offline: `pmserver verify-report -zip … -pub audit-signing.pub`.
 `redact=1` replaces hostnames, endpoint IDs, IP addresses and user IDs with stable pseudonyms (HMAC-SHA-256 with a per-server salt).
+
+## Reports and exceptions
+
+Every signed-in role (`viewer` and up) reads the whole Reports area: every
+`/api/reports/*` GET (`compliance`, `compliance.csv`, `endpoints.csv`,
+`targets.csv`, `compliance-pack`, `compliance-pack.zip`, `compliance-pack.pdf`,
+`compliance.pdf`, `profile`, `profile/history`) and `GET /api/audit`,
+`/api/audit/verify`, `/api/audit/export`, `/api/audit.pdf`.
+`PUT /api/reports/profile` needs `admin`. The exceptions API is unchanged
+(`GET /api/exceptions` viewer; `POST /api/exceptions`, `/{id}/revoke` admin);
+the console shows it under Deployments → Exceptions.
+
+### Server-made PDF files (viewer and up)
+
+The server writes real PDF files (internal/pdf: PDF 1.4, A4, standard Helvetica / Courier fonts
+with WinAnsi encoding, compressed content streams, footer "DSS Patcher · <report id> · page N of
+M"); the console downloads them (no browser print dialog). Every generation is audited.
+
+| Method & path | Role | Response |
+|---|---|---|
+| `GET /api/reports/compliance-pack.pdf?from=&to=[&redact=1][&tz=]` | viewer | `application/pdf`, `DSS-Patcher-compliance-report-<from>_<to>-<report id>[-redacted].pdf`: the auditor report (cover with logo, title block, Important note, sections 1–9 as `report.md`). Audited `report.compliance_generated` (`format: "pdf"`). The same PDF is `report.pdf` in the signed ZIP (listed in `manifest.json`). |
+| `GET /api/reports/compliance.pdf` | viewer | `application/pdf`, `DSS-Patcher-patch-compliance-<date>-PC-<…>.pdf`: the patch compliance report (Reports page: by severity, fleet, exceptions, intake, packages). Audited `report.exported` (`object_id: "compliance.pdf"`, `report_id`, `sha256`). |
+| `GET /api/audit.pdf?from=&to=[&tz=]` | viewer | `application/pdf`, `DSS-Patcher-audit-log-<from>_<to>-AL-<…>.pdf`: every audit event of the period (oldest first, at most 20 000; the signed off-box export has all) with the chain status. 400 for bad dates (as the compliance pack). Audited `report.exported` (`object_id: "audit.pdf"`, period, `events`, `truncated`, `sha256`). |
+
+## Patches by role: the Library is the vendor's, Imports user and up
+
+Owner decision. `GET /api/library` and `GET /api/library/{kind}/{id}` require
+`super_admin` (403 `requires role super_admin` for bank roles). The Imports
+reads, `GET /api/acquisition`, `GET /api/acquisition-requests`,
+`GET /api/bundles`, `GET /api/bundles/{id}` and `GET /api/transfer/reconcile`,
+require `user` (viewer: 403 `requires role user`). `POST /api/acquisition-requests`
+stays `user`, but a bank role (user, admin) may only request keys that the
+fleet view lists (what its machines have or need, i.e. Patches → Needed): a key
+that only the Library index has, or any `app_archs`, is refused with **403**
+`the Library is the vendor's (super admin): import what your machines need from Patches → Needed`,
+audited `access.denied` (`details.reason: "library import"`, `items`). Keys in
+neither are still **400** "not in the update intelligence".
+
+## v1.10 additions — auto-download policy (docs/08-acquisition.md "Auto-download policy")
+
+Every route is **super_admin** only (bank roles: 403 `requires role super_admin`, audited
+`access.denied`).
+
+| Route | Role | Contract |
+|---|---|---|
+| `GET /api/acquisition/policy` | super_admin | → `AcqPolicyView`: `{version, edited_by, edited_at, sha256, summary: string[], policy: AcqPolicy, is_default, default_source: "acquire.json" \| "downloader" \| "none", banner?, default_feeds: string[], downloader: DownloaderView \| null, delivery: {direct: bool}, windows_choices: [{product, build, arch, server?, catalog_product}], last_run_request: {run_id, requested_by, requested_at, queued_to} \| null}`. `version: 0, is_default: true` until the first save; `policy` is then the starting point (see `default_source`). `?version=N` → that stored version `{version, edited_by, edited_at, sha256, summary, policy}` (404 if none). |
+| `PUT /api/acquisition/policy?base_version=N` | super_admin | Body `AcqPolicy` (unknown fields refused). Normalized and validated (400 listing every problem). `base_version` must be the latest version (0 before the first save), else **409** "changed by someone else … reload"; omitted = unconditional. Each source's `added_by` is set by the server (kept for existing ids). → the stored version plus `queued_to` (the folder, or `""`) and `queued_error?`. Audited `acquisition.policy_updated` (`details`: version, sha256, previous_version, changes) and, with `acquisition_requests_dir`, `acquisition.policy_queued`. |
+| `GET /api/acquisition/policy/history` | super_admin | → `[{version, edited_by, edited_at, sha256, summary}]`, newest first. |
+| `GET /api/acquisition/policy/file[?version=N]` | super_admin | → the delivered document (`AcqPolicyFile`) as the attachment `policy-<NNNNNN>.json` (latest by default; 404 before the first save). Audited `acquisition.policy_downloaded`. |
+| `POST /api/acquisition/policy/queue` | super_admin | Writes the latest version to `acquisition_requests_dir` again → `{version, queued_to}`. 409 without the folder, 404 before the first save, 500 if the write fails. |
+| `POST /api/acquisition/run` | super_admin | Queues a run request `run-<UTC time>-<6 hex>.json` (`{format: "offpatch.acquisition-run", version: 1, run_id, requested_by, requested_at}`) → `{run_id, requested_by, requested_at, queued_to}`. 409 without `acquisition_requests_dir` (two machines). Audited `acquisition.run_requested`. |
+
+Types:
+
+- `AcqPolicy`: `{windows: [{product, build, arch: x64|x86|arm64, classification: security|all, enabled}], apps: [{source: "winget", id, arch: [...], channel: "latest", enabled, note}], sources: [{id, type: winget|microsoft-catalog|msrc|vendor-url|internal-mirror, enabled, added_by, note, url?, manifests_url?, name?, vendor?, expected_sha256?, signer?, kind?: msi|msu, version?, product_code?, kb?, arch?, replaces?: winget-index|winget-manifests|microsoft-catalog|msrc}], limits: {max_download_gb_per_run, keep_last_n_versions}}`.
+- `AcqPolicyFile`: `{format: "offpatch.acquisition-policy", version: 1, policy_version, edited_by, edited_at, sha256 (hex SHA-256 of the compact JSON of policy), policy: AcqPolicy}`.
+- `DownloaderView` (from the newest acquisition status report): `{source, host, finished_at, outcome, schedule, policy_version, policy_sha256, policy_applied_at, policy_error?, run_request?, sources: [{kind: source|app|windows, id, type?, result, detail?, packages?}], reports_policy}` (`reports_policy: false`: the downloader's pmctl predates the policy).
+- The acquisition status report (`acqstatus.Report`) gains `policy_version`, `policy_sha256`, `policy_edited_by`, `policy_applied_at`, `policy_error`, `sources`, `defaults: {policy: AcqPolicy, feeds: string[]}` and `run_request`; older servers ignore them.

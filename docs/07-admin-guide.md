@@ -12,6 +12,32 @@ Everything here describes what the code does today. Where a feature is missing, 
 
 ---
 
+## 0. Installation (production, one command)
+
+The OS administrator installs everything on **one Ubuntu server** with one command from the
+release folder (details: [runbook 01, method A1](runbooks/01-install-management-server.md#method-a1-single-server-one-command-production-default)):
+
+```bash
+sudo ./install-ubuntu.sh
+```
+
+It installs the server and console, the downloader (`pmctl auto`, **every hour**, as its own
+account `offpatch-acq`), daily verified backups and the hardening: only the downloader account may
+open outbound internet connections (TCP 80/443, DNS; nftables egress lock), the console port is
+limited to the local subnet when ufw is active, and the compliance report discloses the
+single-server deployment. Then:
+
+1. Move the offline root key off the server: `sudo ./install-ubuntu.sh --export-root-key /media/usb`.
+2. Sign in at the URL the installer prints (`https://<server IP>:8443`) as
+   `superadmin@dataspacesecurity.com` with the default password (vendor handbook) and change the password.
+3. **Settings → Users**: create the bank's Admin.
+4. **Endpoints → Create enrollment token** → run the PowerShell line on each PC as Administrator
+   (§5.1). Each PC needs TCP 8443 to the server's IP.
+5. **Patches → Needed → Import**, **Catalog → Approve**, **Patch this** (2 approvals).
+
+A two-machine layout (`--role server` in the isolated zone, `--role acquisition` in the connected
+zone, one-way transfer between them) is stricter and is described in the README and runbooks 01/02.
+
 ## 1. Concepts
 
 ### 1.1 Zones
@@ -22,6 +48,11 @@ Everything here describes what the code does today. Where a feature is missing, 
 | Transfer boundary | Data diode, gateway, or (in the MVP) a drop directory | Files flow one way only: into the isolated zone. Nothing flows back. |
 | Isolated management zone | `pmserver` and its web console | Intake, quarantine, approval, repository, deployments, reports, audit. |
 | Endpoint zone | `pmagent` | Inventory, download from `pmserver` only, verify, install, report. The agent has no internet or Windows Update fallback. Network egress denial must still be enforced by firewalls. |
+
+On a **single server** (the default install) the acquisition zone is the account `offpatch-acq`
+on the management server: it is the only account allowed out to the internet (TCP 80/443, DNS),
+and the "transfer boundary" is the server's inbox, which that account can only drop files into.
+The compliance report says so (scope limitations, PM-04).
 
 ### 1.2 Bundles and packages
 
@@ -144,10 +175,10 @@ old name are moved to `user` automatically.
 
 | Role | Can do (in addition to the roles below it) |
 |---|---|
-| `viewer` | Read everything: Overview, Intake (bundles and transfer reconciliation), Catalog, Deployments, Windows, Endpoints, Agent setup (and download staged agent files), Exceptions, Reports (incl. CSV), Alerts, Audit (incl. verify and lifecycle export). No action buttons. |
-| `user` (bank) | Create enrollment tokens; edit endpoint groups/site/owner/criticality; retire endpoints; export acquisition requests; approve and reject packages; create deployments and rollbacks (they wait for two approvals); **approve or reject other people's deployments and rollbacks** (not agent versions); pause, resume, cancel, advance and retry deployments; create and delete maintenance windows; acknowledge alerts. |
+| `viewer` | Read: Overview, Patches → Needed and Catalog, Deployments, Windows, Exceptions, Endpoints, Agent setup (and download staged agent files), Reports (incl. CSV and PDF, the auditor report and evidence ZIP), Alerts, Audit (incl. verify, lifecycle export and PDF). No action buttons. **Not Imports** (bundles, transfer reconciliation, acquisition requests: user and up) and **not the Library** (vendor super admin only). |
+| `user` (bank) | Patches → Imports; import what the machines need (not from the Library: the vendor's); create enrollment tokens; edit endpoint groups/site/owner/criticality; retire endpoints; export acquisition requests; approve and reject packages; create deployments and rollbacks (they wait for two approvals); **approve or reject other people's deployments and rollbacks** (not agent versions); pause, resume, cancel, advance and retry deployments; create and delete maintenance windows; acknowledge alerts. |
 | `admin` (bank) | Users page: create, disable / enable and delete local users, reset passwords and MFA, change roles of Users, Viewers and Admins; create and revoke exceptions; revoke packages; **approve or reject agent-version deployments** (only bank admins can). |
-| `super_admin` (vendor) | Everything, including super admin accounts and **agent versions** (approve, reject, revoke, deploy and roll back packages of kind `agent`). Not a deployment approver, agent-version deployments included. |
+| `super_admin` (vendor) | Everything, including super admin accounts, the **Library** and **agent versions** (approve, reject, revoke, deploy and roll back packages of kind `agent`). Not a deployment approver, agent-version deployments included. |
 
 The console shows each role only what it can use; the server enforces the same table (a refused call
 is HTTP 403 and audited `access.denied`). The full matrix is in
@@ -255,6 +286,7 @@ and the `metrics_token` for `GET /metrics` are unchanged.
 | `endpoints_offline` / `inventory_stale` | warning | Fleet sweep found offline / stale endpoints (the message names them) |
 | `install_unverified` | warning | Endpoints reported an install more than 6 h ago and inventory has not confirmed it (counts as a failure for auto-pause) |
 | `out_of_support` | warning | Endpoints run a Windows build Microsoft no longer updates: plan the upgrade |
+| `acquisition_stale` | warning | No acquisition status report for `acquisition_stale_after` (default 3 h on a single server, i.e. three missed hourly runs; 26 h in the two-machine layout, where reports arrive with carried files). Check `systemctl status offpatch-acquire.timer offpatch-acquire.service` |
 | `intel_stale` | warning | The update intelligence is more than 8 days old: what the console says is missing may be out of date; ask the acquisition team |
 | `cert_expiring` | warning | An endpoint's client certificate expires within 14 days and has not been renewed (agent offline?) |
 | `exception_expiring` | info | An active exception expires within 7 days |
@@ -393,7 +425,7 @@ failures explained; health checks `ok`; pilot owners have confirmed their applic
 
 ### 3.7 Exceptions
 
-**Exceptions → New exception** (admin). Required: endpoint, owner, reason, compensating controls,
+**Deployments → Exceptions → New exception** (admin; everyone else reads the list). Required: endpoint, owner, reason, compensating controls,
 and expiry (in the future and at most one year away). Package is optional: empty means **all**
 packages for that endpoint. Exceptions are per endpoint; there are no group-wide exceptions.
 
@@ -469,8 +501,8 @@ zone ([08-acquisition.md](08-acquisition.md)). How it gets there depends on one 
 
 | `acquisition_requests_dir` | What happens on export | Use it for |
 |---|---|---|
-| unset (default) | The browser downloads `<request_id>.json`; the operator carries it on approved media into the acquisition host's `requests` folder. The console says "Strict one-way transfer". | **Production with separate hosts.** Keep it unset: the isolated server never writes anything towards the connected zone. |
-| absolute path, e.g. `/var/lib/offpatch-acq/requests` | The server also writes the request into that folder (atomically, mode 0640); the console says "Queued for download". | Only when acquisition runs **on the same machine** (the `--role all` lab sets it), or the organisation has formally approved an outbound folder. |
+| unset (default) | The browser downloads `<request_id>.json`; the operator carries it on approved media into the acquisition host's `requests` folder. The console says "Strict one-way transfer". | **Two-machine layout.** Keep it unset: the isolated server never writes anything towards the connected zone. |
+| absolute path, e.g. `/var/lib/offpatch-acq/requests` | The server also writes the request into that folder (atomically, mode 0640); the console says "Queued for download". | Only when acquisition runs **on the same machine** (the single-server install sets it), or the organisation has formally approved an outbound folder. |
 
 - The audit event `acquisition.request_exported` records `queued_to` (the folder, or empty). If
   the write fails, the export still succeeds as a download, and the event carries `queued_error`;
@@ -478,8 +510,9 @@ zone ([08-acquisition.md](08-acquisition.md)). How it gets there depends on one 
   rename).
 - The path must be absolute (the server refuses to start otherwise). If it is not writable at
   startup the server logs a warning and keeps running.
-- Requests queued this way are handled by the next `pmctl auto` run; the lab also starts
-  `pmctl auto -only-requests` as soon as a file appears (`offpatch-acquire-requests.path`).
+- Requests queued this way are handled by the next hourly `pmctl auto` run; the single-server
+  install also starts `pmctl auto -only-requests` as soon as a file appears
+  (`offpatch-acquire-requests.path`).
 - **Imports** shows each request item as requested, seen, fulfilled, can't import (with the
   reason), or **Not picked up**: the newest acquisition run, finished more than 10 minutes after
   the request, did not list it (the file never reached the acquisition host, or was set aside).
@@ -501,6 +534,31 @@ never opens a link and never installs anything from the Library; links are shown
   pick the architecture (default x64). What arrives is a signed bundle in **quarantine**, to be
   reviewed and approved like any other package.
 - The row then shows requested → seen → in catalog (or Not picked up).
+
+### 3.11 Auto-download: what the downloader fetches (super admin)
+
+**Settings → Auto-download** decides what the downloader fetches on every run, on top of the
+installer's settings (`acquire.json`, which stay in force underneath):
+
+- **Windows updates**: add the Windows releases your machines run (security updates, or all
+  severities); switch a release **Off** to stop downloading it even if `acquire.json` lists it.
+- **Apps**: search the Library and add an app by its winget id (the "can import" badge says
+  whether it has an MSI). It is kept at its newest version; tick the architectures you need.
+- **Download sources**: point winget or Microsoft at a bank-approved **internal mirror**, or
+  add a **vendor download link** for software that is not in winget (MSI or MSU only; enter the
+  SHA-256 the vendor publishes, or, on a Windows downloader, the code-signing name).
+- **Limits**: the most GB one run downloads, and how many old versions the downloader keeps.
+
+**Save** creates a new version (History shows who changed what). If someone else saved in the
+meantime you are asked to reload. On one server the version is handed to the downloader at
+once, and **Status** shows "Applied by the downloader at …" after its next run (usually within
+a minute); **Run now** asks for a full run immediately. With a separate downloader machine,
+click **Download policy file** and copy it into the downloader's `requests` folder like a
+request file; it is applied on the next scheduled run. A refused file (damaged, edited by hand)
+shows under Status as **Refused**; the previous version stays in force.
+
+Nothing here weakens the checks: every file is still verified by its hash or signature and
+arrives in quarantine for approval. See docs/08-acquisition.md "Auto-download policy".
 
 ## 4. Monthly Patch Tuesday workflow (end to end)
 
@@ -528,10 +586,15 @@ The full commands are in [runbooks/02-acquisition-zone-setup-and-monthly-run.md]
 ### 5.1 Enrolling a single endpoint
 
 1. **Endpoints → Create enrollment token** (role `user`): groups (for example `pilot`), site, expiry
-   in hours, max uses 1. The token (`enr_…`) is shown **once**. The dialog shows ready-to-run
+   in hours, max uses 1 (more for several PCs). The token (`enr_…`) is shown **once**. The dialog shows ready-to-run
    commands. **Agent setup** shows the same commands and offers `bundle.pub`, `ca.pem` and any agent
    binaries staged in `<data_dir>/agent-dist/` for download.
-2. On a Windows endpoint, in an elevated shell:
+2. **Windows (usual way):** paste the one-line PowerShell command from the dialog into **Windows
+   PowerShell as Administrator** on the PC. It pins the server's CA by SHA-256 fingerprint,
+   downloads `pmagent.exe` from the server and checks its SHA-256, enrolls the PC and starts the
+   `offpatch-agent` service. The PC needs TCP 8443 (the server port) to the address in the
+   command: open the console with the address the PCs use (the server IP the installer prints), or
+   edit the server URL in the dialog. Manual alternative, in an elevated shell:
 
 ```powershell
 pmagent.exe enroll -server https://pm.corp.internal:8443 -token enr_… -pubkey bundle.pub -ca ca.pem -root-pubkey root.pub

@@ -112,7 +112,9 @@ export function EndpointUpdatesTable({ endpointId, hostname, os }: { endpointId:
   const avail = useLoad(() => api.get<Available[]>(`/api/endpoints/${enc(endpointId)}/available`), [endpointId], 15000);
   const canImport = useCan("user");
   // Tracked acquisition requests: "Importing… requested 5m ago" on the rows already asked for.
-  const reqs = useLoad(() => api.get<AcquisitionRequestRecord[]>("/api/acquisition-requests"), [endpointId], 30000);
+  // Imports tracking is User and up (viewers get 403).
+  const reqs = useLoad(() => (canImport ? api.get<AcquisitionRequestRecord[]>("/api/acquisition-requests") : Promise.resolve(null)),
+    [endpointId, canImport], canImport ? 30000 : undefined);
   const [patching, setPatching] = useState<string | null>(null);
   const imp = useImportRequest(() => { void reqs.reload(); void intel.reload(); void avail.reload(); });
   const requestedBy = latestRequests(reqs.data);

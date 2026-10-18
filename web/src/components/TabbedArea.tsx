@@ -21,10 +21,11 @@ export type AreaTab = {
  * description and controls. Used as a layout route: the tab pages are its
  * child routes and render in the <Outlet />.
  */
-export function TabbedArea({ title, sub, tabs }: { title: string; sub?: ReactNode; tabs: AreaTab[] }) {
+export function TabbedArea({ title, sub, tabs, top }: { title: string; sub?: ReactNode; tabs: AreaTab[]; top?: ReactNode }) {
   return (
     <>
       <PageHeader title={title} sub={sub} />
+      {top}
       <nav className="tabs" aria-label={`${title} sections`}>
         {tabs.filter((t) => !t.hidden).map((t) => (
           <NavLink key={t.to} to={t.to} end={t.end} className={({ isActive }) => `tab tab-link ${isActive ? "tab-on" : ""}`}>

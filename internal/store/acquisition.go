@@ -33,8 +33,22 @@ type AcqSource struct {
 	AgeHrs float64   `json:"age_hours"`
 }
 
-// AcqStaleAfter: a daily job that has not reported for this long is stale.
-var AcqStaleAfter = 26 * time.Hour
+// Acquisition staleness defaults. The unattended run is hourly: on a single
+// server its status report arrives within the hour, so three missed runs
+// are stale. In a two-machine layout reports cross the one-way transfer
+// when the operator carries files, so a day (plus slack) is the default.
+const (
+	DefaultAcqStaleAfter      = 26 * time.Hour
+	SingleServerAcqStaleAfter = 3 * time.Hour
+)
+
+// AcqStale is the configured staleness threshold.
+func (s *Store) AcqStale() time.Duration {
+	if s.AcqStaleAfter > 0 {
+		return s.AcqStaleAfter
+	}
+	return DefaultAcqStaleAfter
+}
 
 // RecordAcquisition stores a verified report and raises an alert when the
 // run failed or partly failed.
@@ -90,7 +104,7 @@ func (s *Store) Acquisition(ctx context.Context, limit int) ([]AcqSource, []AcqR
 		if t, e := time.Parse(time.RFC3339, r.FinishedAt); e == nil {
 			age = s.Now().Sub(t)
 		}
-		srcs = append(srcs, AcqSource{Source: r.Source, Last: r, Stale: age > AcqStaleAfter, AgeHrs: float64(int(age.Hours()*10)) / 10})
+		srcs = append(srcs, AcqSource{Source: r.Source, Last: r, Stale: age > s.AcqStale(), AgeHrs: float64(int(age.Hours()*10)) / 10})
 	}
 	if limit <= 0 || limit > 500 {
 		limit = 50

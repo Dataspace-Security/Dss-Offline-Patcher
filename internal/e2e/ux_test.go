@@ -192,7 +192,7 @@ func TestUXIteration(t *testing.T) {
 	reqs := func() []store.AcqRequestRecord {
 		t.Helper()
 		var v []store.AcqRequestRecord
-		if code := e.api("GET", "/api/acquisition-requests", tokViewer, nil, &v); code != 200 {
+		if code := e.api("GET", "/api/acquisition-requests", tokOperator, nil, &v); code != 200 {
 			t.Fatalf("acquisition-requests: %d", code)
 		}
 		return v

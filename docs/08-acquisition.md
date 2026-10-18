@@ -289,8 +289,8 @@ On the isolated side:
 - **Alerts:**
   - `acquisition_partial` and `acquisition_failed` when a run reports failures.
   - `acquisition_status_rejected` when a report's signature does not verify.
-  - `acquisition_stale` when no report arrives for 26 h ("silence is not success").
-- Set `"schedule": "daily at 07:00"` in `acquire.json` to show the schedule on that page.
+  - `acquisition_stale` when no report arrives for `acquisition_stale_after` in `pmserver.json` ("silence is not success"): default 3 h with `"deployment_mode": "single-server"` (hourly runs on the same machine), else 26 h.
+- Set `"schedule": "every hour (systemd timer)"` (what the installer writes) in `acquire.json` to show the schedule on that page. The installer's `offpatch-acquire.timer` runs hourly; a run that finds the previous one still holding the run lock exits 3 ("skipped"), which the units treat as success.
 
 The isolated server cannot start a run (there is no reverse path), so **Refresh** only re-reads the latest report. To run now, start `pmctl auto` on the acquisition host, or `launchctl kickstart gui/$(id -u)/com.offpatch.acquire` for the launchd job installed by `packaging/acquisition/install-launchd.sh`.
 
@@ -302,13 +302,13 @@ The console's **Updates** page lists everything the fleet is missing according t
 
 **The boundary stays one-way.** The isolated server never sends anything out. In production the request leaves only as a file the operator downloads in the browser and carries to the acquisition zone on approved media.
 
-**Direct when co-located.** With `acquisition_requests_dir` set in `pmserver.json` (absolute path), the server also writes each exported request into that folder (`<request_id>.json`, temp file + fsync + rename, mode 0640) and the response says `queued_to`. Production with separate hosts keeps it **unset** (strict one-way: carry the file). Set it only when acquisition runs on the same machine — the `--role all` lab sets it to `/var/lib/offpatch-acq/requests` — or the organisation approves an outbound folder. See [07-admin-guide.md](07-admin-guide.md) §3.9.
+**Direct when co-located.** With `acquisition_requests_dir` set in `pmserver.json` (absolute path), the server also writes each exported request into that folder (`<request_id>.json`, temp file + fsync + rename, mode 0640) and the response says `queued_to`. Production with separate hosts keeps it **unset** (strict one-way: carry the file). Set it only when acquisition runs on the same machine — the single-server install (`--role all`) sets it to `/var/lib/offpatch-acq/requests` — or the organisation approves an outbound folder. See [07-admin-guide.md](07-admin-guide.md) §3.9.
 
 ### Workflow
 
 1. **Select and export (isolated zone, role `user`).** On **Updates**, tick the outdated apps and missing KBs that are not imported yet. "Select all" ticks every visible row that is not in the catalog. Click **Export acquisition request**. The browser saves `acq-request-<time>-<id>.json` (`POST /api/acquisition-requests`, see [05-api.md](05-api.md)). Every export is written to the audit log as `acquisition.request_exported`, with the user, the request id, every `winget_id@version` and every `KB/arch`.
 2. **Carry it across.** Move the file on approved media into the requests directory on the acquisition host: `"requests": "requests"` in `acquire.json`, or `pmctl auto -requests <dir>`. With `acquisition_requests_dir` (co-located only) the server has already put it there.
-   - `pmctl auto -only-requests` handles just the requests directory: no Microsoft feeds, configured apps or update intelligence. Bundles, retention, the run lock and the status report work as usual; the report carries the warning "requests-only run" and only `request` feeds. The `--role all` lab runs it from `offpatch-acquire-requests.path` as soon as a request appears; the daily run still does everything.
+   - `pmctl auto -only-requests` handles just the requests directory: no Microsoft feeds, configured apps or update intelligence. Bundles, retention, the run lock and the status report work as usual; the report carries the warning "requests-only run" and only `request` feeds. The single-server install runs it from `offpatch-acquire-requests.path` as soon as a request appears; the hourly run still does everything.
 3. **Fetch (acquisition zone).** The next `pmctl auto` run reads every `*.json` in that directory:
    - **Apps:** for each `winget_id` and each requested architecture (`x64`, `x86`, `arm64`, taken from the endpoints that have the app; for an app no endpoint has, the architecture the operator chose when importing it from the Library):
      - pmctl downloads the per-version installer manifest from the winget community repository (`manifests/<l>/<Publisher>/<Name>/<version>/<id>.installer.yaml`, falling back to the singleton `<id>.yaml`) over HTTPS.
@@ -401,3 +401,100 @@ Tested:
 - `cmd/pmctl/requests_test.go`: a full `pmctl auto` run with a request. Chrome and 7-Zip MSIs and a KB go into one signed bundle. VS Code (Inno only) and an unknown id become warnings and `unsupported` items with short reasons. The request is archived and a garbage file is rejected. The same request carried again is fetched and sent again. A tampered installer fails (`failed`, "SHA-256 mismatch") and its request is kept. The tests use no live network.
 - `cmd/pmctl/requestitems_test.go`: per-item results. A KB not in the catalog for the build/arch is `unsupported`; on the retry of a request with a failed item, the item already sent for it is `already_sent` and not sent again, and `request_sent` is cleared once the request is done. A KB the Microsoft feed sent earlier is sent again when a request names it, and fetched once when feed and request bring it in the same run. Unit tests cover error classification (hash, timeout, network, catalog), MSI reasons, folding architectures, and "downloaded but not sent".
 - `internal/e2e/acq_request_test.go`: export permissions, an audit record with who and what, a file that pmctl parses with no host names, unknown selections refused, and the Catalog link for winget-sourced Chrome (by product code) and 7-Zip (by name).
+
+## Auto-download policy
+
+The installer writes `acquire.json` with sensible defaults (Windows 11 24H2 security updates,
+update intelligence, acquisition requests). The **super admin** changes what the downloader
+fetches from the console, **Settings → Auto-download**, without editing files on the
+acquisition host. `acquire.json` stays the **base**; the policy is merged over it on every run.
+
+What the policy holds (`internal/acqpolicy`):
+
+| Part | Entries | Effect in `pmctl auto` |
+|---|---|---|
+| Windows updates | `{product, build, arch, classification: security\|all, enabled}`, chosen from the releases the downloader knows plus those in the update intelligence | Adds the release to the Microsoft feed (`catalog_product` from the known list; Windows Server entries get the package suffix `-server`), or re-classifies the matching `acquire.json` product (`all` = every severity, `security` = `acquire.json`'s `min_severity`, `important` if `acquire.json` has no Microsoft section). `enabled: false` removes the matching `acquire.json` product. |
+| Apps | `{source: winget, id, arch[], channel: latest, enabled, note}` | Kept at the newest version the update intelligence's Library knows (the id is added to the Library list, so its newest version is looked up by the same run's intelligence and downloaded on the next run). One MSI per architecture, checked against the winget manifest's SHA-256, package id `<id>-<version>[-<arch>]`. An app that an `acquire.json` app feed covers (same `winget_id`) is left to that feed; `enabled: false` also skips that feed. |
+| Sources | `winget` (index `url`, `manifests_url`), `microsoft-catalog` / `msrc` (`url`), `vendor-url`, `internal-mirror` | URL overrides replace `intel.winget_url`, `winget_manifests_url`, `catalog_url`, `msrc_url`. Switching off `microsoft-catalog` or `msrc` stops all Windows downloads; switching off `winget` stops policy apps. `internal-mirror {url, replaces: winget-index\|winget-manifests\|microsoft-catalog\|msrc}` wins over the source's own URL. `vendor-url {name, url, kind msi\|msu, version, expected_sha256 \| signer, product_code?, kb (msu), arch?, vendor?}` is fetched like `pmctl fetch-url`: the file must match `expected_sha256`, or (Windows downloader only) carry a valid Authenticode signature whose subject contains `signer`; package id `<source id>-<version>`; an MSI without `product_code` has it read from the file. EXE installers are refused. |
+| Limits | `max_download_gb_per_run` (0 = none), `keep_last_n_versions` (0 = by age) | A run stops downloading once this much was read (the rest fails for this run and is retried next run). Downloaded files of policy apps and vendor downloads beyond the newest N sent versions are deleted (state `families`). |
+| Schedule | read-only | Shown from the status report (`schedule` in `acquire.json`); the timer belongs to the installer. |
+
+Validation (server and pmctl run the same code): https only, a host, no user name or password,
+no `#fragment`, no query parameter that looks like a credential (`token`, `key`, `secret`,
+`sig`, `auth`, …), SHA-256 as 64 hex characters, winget ids and versions as for requests, at
+most 50 Windows entries, 500 apps and 100 sources, one enabled source per type (vendor
+downloads excepted) and per mirrored upstream, limits 0–10000 GB and 0–100 versions.
+
+### How the policy reaches the downloader
+
+Every save is a new **version** (who, when, SHA-256 of the content, a plain summary of what
+changed), audited `acquisition.policy_updated`. The delivered file is
+`policy-<version, 6 digits>.json`:
+
+```json
+{ "format": "offpatch.acquisition-policy", "version": 1, "policy_version": 3,
+  "edited_by": "user:sam@vendor", "edited_at": "2026-10-18T10:00:00Z",
+  "sha256": "<hex SHA-256 of the compact policy JSON>", "policy": { "windows": [], "apps": [], "sources": [], "limits": {} } }
+```
+
+- **One server** (the usual layout: `pmctl` as `offpatch-acq`, `pmserver` as `offpatch`):
+  with `acquisition_requests_dir` set, the server writes the file into that folder on every
+  save, exactly like acquisition requests (temp file, fsync, rename, mode 0640, group
+  `offpatch-inbox` through the folder's setgid bit), audited `acquisition.policy_queued`. The
+  request watcher (`offpatch-acquire-requests.path`, `PathExistsGlob=*.json`) starts
+  `pmctl auto -only-requests`, which applies the policy at once; downloads follow on the next
+  timer run. **Run now** writes `run-<id>.json` (audited `acquisition.run_requested`): a
+  requests-only run that finds one does a full run.
+- **Two machines**: nothing is written; the super admin clicks **Download policy file** and
+  carries it, like a request file, into the downloader's `requests` folder. It is applied on
+  the next scheduled run. Run now is not offered (409).
+
+`pmctl auto` on every run (also `-only-requests`):
+
+1. reads every `policy-*.json` in the requests folder strictly (unknown fields refused,
+   SHA-256 checked, the policy validated and required to be in normalized form). Invalid files
+   go to `rejected/` and the reason is reported as `policy_error`; the previous version stays
+   in force. Valid ones go to `done/`; the newest one newer than the active version becomes
+   active in `work_dir/policy.json` (with `applied_at`); older ones are ignored with a warning;
+2. merges the active policy over `acquire.json`, so later timer runs keep applying it without
+   the file;
+3. reports in the signed status report: `policy_version`, `policy_sha256`, `policy_edited_by`,
+   `policy_applied_at`, `policy_error`, `sources` (per entry: `kind` source / app / windows,
+   `id`, `result` new / up_to_date / failed / unsupported / waiting / disabled / applied,
+   `detail`, `packages`), `run_request`, and `defaults` (what `acquire.json` configures, as
+   policy entries, plus the names of its custom app feeds).
+
+The console shows **Applied by the downloader at …** when the newest status report names the
+saved version, and **waiting for version N** otherwise (with **Hand over again** on one
+server).
+
+**Starting point.** Until the first save the page offers the installer's settings:
+`acquire.json` itself if pmserver can read it (`/etc/offpatch/acquire.json`, or the path in the
+environment variable `OFFPATCH_ACQUIRE_CONFIG`; the file is normally readable only by the
+acquisition user), else the `defaults` from the newest status report, else an empty policy with
+a banner. Nothing is stored or sent until Save. `acquire.json` app feeds with their own version
+URLs are listed as "Also from the installer's settings" and keep running.
+
+**Trust.** Like a request, the policy file is only as trusted as the folder it is written to
+(owner `offpatch`, group `offpatch-inbox`, 0640) or the person who carries it. Its SHA-256
+detects damage, not forgery. It cannot make the downloader accept anything unverified: every
+download is still checked (winget manifest SHA-256, catalog hashes, vendor SHA-256 or
+Authenticode signer) and arrives on the isolated side as a signed bundle in **quarantine**.
+
+Tested:
+- `internal/acqpolicy/acqpolicy_test.go`: normalisation, every validation rule (https,
+  credentials, SHA-256, EXE refused, duplicates, one enabled source per type), the file's
+  hash and tamper check, run requests, the `acquire.json` import and the change summary.
+- `internal/store/acqpolicy_test.go`: versions, conflict on a stale `base_version`, invalid
+  content refused, history, audit.
+- `cmd/pmctl/policy_test.go`: the merge (add / re-classify / switch off Windows releases, app
+  feeds switched off, URL overrides, mirrors, catalog off stops Windows), a full run with a
+  delivered policy (vendor download by SHA-256, Chrome through a winget-manifests mirror, a
+  release switched off, policy archived and kept, status report signed with version, results
+  and defaults), a damaged version refused with the previous one kept, Run now turning a
+  requests-only run into a full run, the per-run download limit and keep-last-N, and the known
+  Windows list matching `acquire.DefaultWindowsProducts`.
+- `internal/e2e/acq_policy_test.go`: super admin only (403 for viewer, user, admin), the
+  starting point from `acquire.json` / the downloader's report / empty, save → file in
+  `acquisition_requests_dir` that pmctl parses → status report → "applied", conflict, history,
+  audit, Run now, the carried file on two machines.

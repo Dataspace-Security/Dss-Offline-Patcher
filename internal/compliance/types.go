@@ -80,7 +80,13 @@ type Settings struct {
 	AuditCheckpointEvery time.Duration
 	OfflineAfter         time.Duration
 	StaleAfter           time.Duration
+	// DeploymentMode: "single-server", "two-machine" or "" (not stated).
+	DeploymentMode string
 }
+
+// SingleServerLimitation is disclosed in the scope limitations when the
+// downloader runs on the management server.
+const SingleServerLimitation = "Single-server deployment: the internet-facing downloader runs on the management server; egress is limited to the downloader account by host firewall rules."
 
 // Input is everything Build reads. The server fills it (cached fleet views
 // where they exist); Build does not touch the database.

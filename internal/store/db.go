@@ -35,6 +35,9 @@ func Errf(sentinel error, format string, a ...any) error {
 type Store struct {
 	db     *sql.DB
 	Policy Policy
+	// AcqStaleAfter: an acquisition source with no status report for this
+	// long is stale (0 = DefaultAcqStaleAfter).
+	AcqStaleAfter time.Duration
 	// Now is overridable in tests.
 	Now func() time.Time
 

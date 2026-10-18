@@ -1,9 +1,11 @@
 [Unit]
-Description=Daily offpatch acquisition run
+Description=Hourly offpatch acquisition run
 
 [Timer]
-OnCalendar=*-*-* 03:00
-RandomizedDelaySec=15m
+# Every hour. A run that finds the previous one still downloading exits 3
+# (skipped; SuccessExitStatus in offpatch-acquire.service).
+OnCalendar=hourly
+RandomizedDelaySec=5min
 Persistent=true
 
 [Install]

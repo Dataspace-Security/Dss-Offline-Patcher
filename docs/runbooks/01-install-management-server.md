@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Install `pmserver` in the isolated management zone with TLS, the internal CA for agent mTLS,
+Install `pmserver` with TLS, the internal CA for agent mTLS,
 admin sign-in (email + password with an authenticator app, and/or SSO), staged agent binaries, off-box audit export and
 metrics.
 
@@ -15,28 +15,80 @@ metrics.
 
 | Item | Notes |
 |---|---|
-| Linux host in the isolated zone | Ubuntu 22.04 / 24.04 / 26.04 with systemd for the installer (method A). Other systemd Linux: method B. Container image: `packaging/server/Dockerfile` (see the comments in it). Windows (`pmserver.exe`) builds, but there is no service wrapper for it. |
+| Linux host | Single server (default): one Ubuntu server whose downloader account may reach the internet (TCP 80/443, DNS). Two-machine layout: a host in the isolated zone. Ubuntu 22.04 / 24.04 / 26.04 with systemd for the installer (method A). Other systemd Linux: method B. Container image: `packaging/server/Dockerfile` (see the comments in it). Windows (`pmserver.exe`) builds, but there is no service wrapper for it. |
 | OS administrator | Root on the host. Nothing here is done in the console. |
 | Release | Built in the build environment with **Go 1.27.2 or later** (`docs/security/README.md` §2.2): `make dist` (installer tarball, method A) or `make release VERSION=x.y.z` (method B). Carry it and its `SHA256SUMS` across the boundary and verify the hashes. |
-| `bundle.pub` | Public bundle signing key from the acquisition zone ([runbook 02](02-acquisition-zone-setup-and-monthly-run.md)). Public keys only — never copy a `.key` file into this zone. |
+| `bundle.pub` | Two-machine layout only: public bundle signing key from the acquisition zone ([runbook 02](02-acquisition-zone-setup-and-monthly-run.md)). Public keys only — never copy a `.key` file into this zone. |
 | `root.pub` | Public **root** key for signed key rotation (runbook 02/03). Strongly recommended. |
 | DNS name / IP | The name(s) endpoints and admins use, e.g. `pm.corp.internal`. |
-| Transfer receiver | The diode/gateway must deliver files into `<data_dir>/inbox/`. |
+| Transfer receiver | Two-machine layout only: the diode/gateway must deliver files into `<data_dir>/inbox/`. |
 | For SSO | An OIDC client registered at your IdP, IdP reachable from the server, IdP groups per role. |
 | Audit export storage | A mount for `audit_export_dir` on separate / WORM storage (see step 9). |
 | Time source | An internal NTP server. The installer warns if the clock is not synchronized. |
 
 Two install methods. Their paths differ; see [Paths by install method](README.md#paths-by-install-method).
 
-| | Method A: `install-ubuntu.sh --role server` (recommended) | Method B: manual (`packaging/server/`) |
+| | Method A: `install-ubuntu.sh` (recommended; A1 single server or A2 `--role server`) | Method B: manual (`packaging/server/`) |
 |---|---|---|
 | Config | `/etc/offpatch/pmserver.json` | `/etc/offpatch-server/pmserver.json` |
 | PKI | `/etc/offpatch/pki` | `/etc/offpatch-server/pki` |
 | Public keys | `/etc/offpatch/keys/bundle.pub`, `root.pub` | `/etc/offpatch-server/bundle.pub`, `root.pub` |
 | Data | `/var/lib/offpatch-server` | `/var/lib/offpatch-server` |
-| Unit | `offpatch-server.service` (+ `offpatch-backup.timer`) | `pmserver.service` |
+| Unit | `offpatch-server.service` (+ `offpatch-backup.timer`; A1 also `offpatch-acquire.timer`, `offpatch-egress.service`) | `pmserver.service` |
 
-## Method A: installer
+## Method A1: single server, one command (production default)
+
+On the server, from the verified release tarball:
+
+```bash
+tar xzf offpatch-<version>-linux-amd64.tar.gz && cd offpatch-<version>-linux-amd64
+sudo ./install-ubuntu.sh
+```
+
+No `--role` = `--role all`. Everything in method A2 below applies (CA and certificate, super admin,
+MFA key, hardened `offpatch-server.service`, daily backup, ufw), plus:
+
+- **Downloader** `pmctl auto` as user `offpatch-acq`, every hour (`offpatch-acquire.timer`,
+  `RandomizedDelaySec=5min`, `Persistent=true`). A run still downloading when the next one starts
+  holds the run lock; the new run exits 3 ("skipped"), which the unit treats as success. Console
+  acquisition requests are queued to `/var/lib/offpatch-acq/requests` and fetched at once by
+  `offpatch-acquire-requests.path`. It creates the bundle signing key (readable only by `offpatch-acq`).
+- **Egress lock**: nftables table `inet offpatch_egress` (`/etc/nftables.d/offpatch.nft`, loaded at
+  boot by `offpatch-egress.service`; nftables is installed if missing). Only `offpatch-acq` may open
+  new outbound connections, to TCP 80/443 and DNS 53; `offpatch` (pmserver) may open new connections
+  to loopback only. Replies to agents and browsers, other users, root and SSH are not affected.
+  Refusals are logged as `offpatch-egress denied:` (`journalctl -k`). It also blocks outbound SSO,
+  SMTP and webhooks from pmserver (steps 6 and 10): add a rule for those, or `--no-egress-lock`
+  (not recommended; `--egress-lock` restores it). Check: `sudo nft list table inet offpatch_egress`.
+- **Root key**: created as `/etc/offpatch/keys/root.key` unless you pass `--root-pubkey root.pub`
+  (root key made offline, runbook 02 A2). Move it off the server at once:
+
+  ```bash
+  sudo ./install-ubuntu.sh --export-root-key /media/usb   # mount point of offline media
+  ```
+
+  It refuses a folder on the server's own filesystem, copies `root.key`, `root.pub` and `root.sha256`,
+  verifies the copy by SHA-256, asks you to type `DELETE` (`--yes` skips the question) and shreds the
+  server copy. `root.pub` stays on the server. `--status` reminds you while `root.key` is present.
+- **Firewall**: with ufw active, the port is opened only from `--allow-from` CIDRs or, without
+  them, from the local subnet of the server's address (both printed). PCs on other subnets need
+  `--allow-from`. ufw is never enabled by the installer; when it is inactive the summary prints
+  `ufw allow OpenSSH`, the port rules and `ufw enable` for you to run.
+- **Disclosure**: `pmserver.json` gets `"deployment_mode": "single-server"` (added on upgrades when
+  missing). The compliance report states in the scope limitations and in PM-04 that the downloader
+  runs on the management server and that egress is limited to the downloader account by host
+  firewall rules. `acquisition_stale_after` defaults to 3h (hourly runs).
+
+The summary ends with the next steps: the console URL with the server's IP, the super admin
+email (default password), then 1. sign in and change the password, 2. Settings → Users: create the
+bank's Admin, 3. Endpoints → Create enrollment token → run the PowerShell line on each PC (as
+Administrator), 4. Patches → Needed → Import, Catalog → Approve, Patch this (2 approvals). Each PC
+needs TCP 8443 (or `--port`) to the server's IP.
+
+A two-machine layout (A2 with a separate acquisition host) is stricter: the internet-facing
+downloader then shares no machine with the server's data.
+
+## Method A2: two-machine layout (`--role server`, stricter)
 
 On the server, from the verified release tarball, with `bundle.pub` from the acquisition host and
 `root.pub` from the offline root key ceremony (runbook 02 A1/A2):
@@ -73,11 +125,13 @@ What it does (covers steps 1-5, 7 and 8 below, plus the daily backup of runbook 
   write `/var/lib/offpatch-server/inbox`.
 - Installs `offpatch-backup.timer`: a daily verified backup into `/var/lib/offpatch-backup`
   (`--backup-dir`), keeping 14 (`--backup-keep`). See runbook 05.
-- ufw: opens the port only to each `--allow-from` CIDR (repeatable). Without it, the port is open
-  to any source and the installer warns.
+- ufw (only if active; never enabled by the installer): opens the port only to each `--allow-from`
+  CIDR (repeatable), else to the local subnet of the server's address.
+- Writes `"deployment_mode": "two-machine"` into the new `pmserver.json`
+  (`acquisition_stale_after` stays 26h: status reports cross the transfer when files are carried).
 - Warns loudly if `--audit-dir` is on the same filesystem as the data, and if NTP is not synchronized.
 
-Upgrade: run the same command from the new release. It takes a verified pre-upgrade backup, keeps
+Upgrade: run the same command from the new release (A1: `sudo ./install-ubuntu.sh`; the role is remembered). It takes a verified pre-upgrade backup, keeps
 the previous binaries in `/opt/offpatch/bin.prev`, and keeps keys, PKI, config and data. If no
 local super admin exists yet (an install from before local users), the upgrade creates the built-in
 super admin with the default password. An upgrade from a release with static admin tokens removes

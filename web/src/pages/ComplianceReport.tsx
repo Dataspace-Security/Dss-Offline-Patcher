@@ -1,14 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { flushSync } from "react-dom";
+import { useCallback, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, downloadFileNamed, errMsg, qs } from "../api";
 import { ErrorBanner, PageHeader } from "../components/ui";
 import { paths } from "../paths";
 import type { CompliancePack } from "../compliance/types";
 import { normalizePack } from "../compliance/normalize";
-import { fmtStamp, PERIOD_LABELS, periodRange, safeToken, type PeriodKind } from "../compliance/format";
+import { fmtStamp, PERIOD_LABELS, periodRange, type PeriodKind } from "../compliance/format";
 import { ComplianceDocument } from "../compliance/ComplianceDocument";
-import { REPORT_TITLE } from "../compliance/templateText";
 import "../compliance/compliance.css";
 
 const KINDS: PeriodKind[] = ["this_month", "last_month", "this_quarter", "custom"];
@@ -17,26 +15,6 @@ const DAY = /^\d{4}-\d{2}-\d{2}$/;
 function initialKind(sp: URLSearchParams): PeriodKind {
   const k = sp.get("period") as PeriodKind | null;
   return k && KINDS.includes(k) ? k : "last_month";
-}
-
-/** Text for CSS `content:` strings (the @page header/footer). */
-function cssString(s: string): string {
-  return `"${s.replace(/[\\"]/g, "\\$&").replace(/[\r\n<>]+/g, " ").slice(0, 120)}"`;
-}
-
-function pageCss(pack: CompliancePack | null): string {
-  const id = pack?.meta.report_id || "";
-  const entity = pack?.profile.legal_entity || "";
-  return `@media print {
-  @page {
-    size: A4; margin: 18mm 15mm 20mm 15mm;
-    @top-left { content: ${cssString(`DSS Patcher · ${REPORT_TITLE}`)}; font: 8pt ${"system-ui, sans-serif"}; color: #555; }
-    @top-right { content: ${cssString(entity)}; font: 8pt system-ui, sans-serif; color: #555; }
-    @bottom-left { content: ${cssString(id ? `Report ID ${id}` : "")}; font: 8pt system-ui, sans-serif; color: #555; }
-    @bottom-right { content: "Page " counter(page) " of " counter(pages); font: 8pt system-ui, sans-serif; color: #555; }
-  }
-  @page :first { @top-left { content: none; } @top-right { content: none; } }
-}`;
 }
 
 export default function ComplianceReport() {
@@ -54,7 +32,7 @@ export default function ComplianceReport() {
   const [busy, setBusy] = useState(false);
   const [zipBusy, setZipBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [printing, setPrinting] = useState(false);
+  const [pdfBusy, setPdfBusy] = useState(false);
   const seq = useRef(0);
 
   const periodError = !DAY.test(from) || !DAY.test(to) ? "Choose a start and end date." : from > to ? "The start date is after the end date." : null;
@@ -99,47 +77,24 @@ export default function ComplianceReport() {
     }
   };
 
-  // Printing (button or Ctrl+P): light theme, report-only layout, per-endpoint
-  // table expanded, and a document title that becomes the PDF file name.
-  const packRef = useRef(pack);
-  packRef.current = pack;
-  useEffect(() => {
-    const root = document.documentElement;
-    let savedTheme: string | null = null;
-    let savedTitle = "";
-    const before = () => {
-      const p = packRef.current;
-      savedTheme = root.getAttribute("data-theme");
-      savedTitle = document.title;
-      root.setAttribute("data-theme", "light");
-      root.classList.add("crep-printing");
-      if (p) {
-        const period = `${p.meta.period.from || from}_${p.meta.period.to || to}`;
-        document.title = `DSS-Patcher-Compliance-Report-${safeToken(period)}-${safeToken(p.meta.report_id) || "draft"}`;
-      }
-      flushSync(() => setPrinting(true));
-    };
-    const after = () => {
-      if (savedTheme) root.setAttribute("data-theme", savedTheme);
-      root.classList.remove("crep-printing");
-      if (savedTitle) document.title = savedTitle;
-      savedTheme = null;
-      savedTitle = "";
-      setPrinting(false);
-    };
-    window.addEventListener("beforeprint", before);
-    window.addEventListener("afterprint", after);
-    return () => {
-      window.removeEventListener("beforeprint", before);
-      window.removeEventListener("afterprint", after);
-      after();
-    };
-  }, [from, to]);
+  // Download PDF: the server renders the report for the period (a new
+  // report ID, audited) and names the file DSS-Patcher-compliance-report-….
+  const downloadPdf = async () => {
+    if (periodError) return;
+    setPdfBusy(true);
+    setError(null);
+    try {
+      const name = `DSS-Patcher-compliance-report-${from}_${to}${redact ? "-redacted" : ""}.pdf`;
+      await downloadFileNamed(`/api/reports/compliance-pack.pdf${qs({ from, to, redact: redact ? 1 : undefined })}`, name);
+    } catch (e) {
+      setError(`PDF download failed: ${errMsg(e)}`);
+    } finally {
+      setPdfBusy(false);
+    }
+  };
 
   return (
     <div className="crep-page">
-      {/* React sets this as text; the strings are escaped for CSS (cssString). */}
-      <style>{pageCss(pack)}</style>
       <PageHeader title="Compliance report" sub="Auditor report for a period: controls PM-01 to PM-17, regulatory mapping, timeliness, evidence register and sign-off. Organization details come from the report profile." />
       <div className="crep-toolbar no-print" role="group" aria-label="Report period and export">
         <div className="crep-periods" role="radiogroup" aria-label="Reporting period">
@@ -164,12 +119,12 @@ export default function ComplianceReport() {
         <button type="button" className="btn btn-primary" disabled={busy || !!periodError} onClick={() => void generate()}>
           {busy ? "Generating…" : pack ? "Regenerate" : "Generate"}
         </button>
-        <button type="button" className="btn" disabled={!pack || stale || busy} onClick={() => window.print()}
-                title={stale ? "Regenerate first: the period or redaction changed" : "Opens the print dialog; choose “Save as PDF”"}>
-          Download PDF
+        <button type="button" className="btn" disabled={pdfBusy || !!periodError} onClick={() => void downloadPdf()}
+                title="The report for this period as a PDF file made by the server (also inside the evidence package as report.pdf)">
+          {pdfBusy ? "Preparing…" : "Download PDF"}
         </button>
         <button type="button" className="btn" disabled={zipBusy || !!periodError} onClick={() => void downloadZip()}
-                title="Signed package: report.md, summary.json, evidence CSVs E-001 to E-010, manifest.json, manifest.sig and signing-key.pub">
+                title="Signed package: report.pdf, report.md, summary.json, evidence CSVs E-001 to E-010, manifest.json, manifest.sig and signing-key.pub">
           {zipBusy ? "Preparing…" : "Download evidence package (ZIP)"}
         </button>
       </div>
@@ -192,7 +147,7 @@ export default function ComplianceReport() {
             Report <span className="mono">{pack.meta.report_id || "—"}</span> · generated {fmtStamp(pack.meta.generated_at) || "—"}
             {pack.meta.redacted && " · redacted"}
           </div>
-          <ComplianceDocument pack={pack} printing={printing} />
+          <ComplianceDocument pack={pack} />
         </>
       )}
     </div>

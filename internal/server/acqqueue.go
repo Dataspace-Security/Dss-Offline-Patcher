@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"offpatch/internal/acqrequest"
 )
@@ -23,48 +22,13 @@ type queuedRequest struct {
 
 // queueAcqRequest writes req as <dir>/<request_id>.json atomically (temp
 // file, fsync, rename; mode 0640). The file is exactly the request document.
-func queueAcqRequest(dir string, req *acqrequest.Request) (err error) {
+func queueAcqRequest(dir string, req *acqrequest.Request) error {
 	// req passed Validate: RequestID is a safe file name.
 	b, err := json.MarshalIndent(req, "", "  ")
 	if err != nil {
 		return err
 	}
-	b = append(b, '\n')
-	f, err := os.CreateTemp(dir, ".tmp-"+req.RequestID+"-*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer func() {
-		if err != nil {
-			os.Remove(tmp)
-		}
-	}()
-	if err := f.Chmod(0o640); err != nil {
-		f.Close()
-		return err
-	}
-	if _, err := f.Write(b); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	final := filepath.Join(dir, req.RequestID+".json")
-	if err := os.Rename(tmp, final); err != nil {
-		return err
-	}
-	// Make the rename durable (best effort: not supported on every OS).
-	if d, err := os.Open(dir); err == nil {
-		d.Sync()
-		d.Close()
-	}
-	return nil
+	return writeQueued(dir, req.RequestID+".json", append(b, '\n'))
 }
 
 // CheckAcquisitionRequestsDir reports whether pmserver can create files in

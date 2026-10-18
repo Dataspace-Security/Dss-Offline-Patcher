@@ -90,6 +90,8 @@ var tableMigrations = []string{
 	reportProfileSchema,
 	// Authenticator-app (TOTP) MFA of local users.
 	mfaSchema,
+	// Auto-download policy (acquisition), one row per saved version.
+	acqPolicySchema,
 }
 
 // The role names operator and approver were removed: stored users and

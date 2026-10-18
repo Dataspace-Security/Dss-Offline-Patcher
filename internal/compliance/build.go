@@ -259,6 +259,9 @@ func (pk *Pack) limitations(res pairsResult) []string {
 	if in.PrivilegedTruncated {
 		out = append(out, "The privileged audit event list is truncated; the complete trail is in the signed off-box audit export.")
 	}
+	if in.Settings.DeploymentMode == "single-server" {
+		out = append(out, SingleServerLimitation)
+	}
 	if !in.Settings.AuditExportDir {
 		out = append(out, "Audit events are held only in the server database (no signed off-box export configured).")
 	}

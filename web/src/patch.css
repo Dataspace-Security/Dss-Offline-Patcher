@@ -56,3 +56,14 @@
 .lib-link { margin: 8px 0; }
 .lib-link-head { margin-bottom: 4px; }
 .lib-desc { white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0 8px; }
+
+/* Patches: "How patches flow" guide (PatchFlowGuide) */
+.flow-guide { border: 1px solid var(--blue-bd); background: var(--blue-bg); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 14px; }
+.flow-guide-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.flow-guide-title { font-size: 13px; font-weight: 600; margin: 0; }
+.flow-guide-steps { list-style: none; margin: 8px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; }
+.flow-guide-step { position: relative; font-size: 12.5px; }
+.flow-guide-name { font-weight: 600; display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
+.flow-guide-n { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; background: var(--blue-solid); color: #fff; font-size: 11px; }
+.flow-guide-text { color: var(--text); line-height: 1.4; }
+.flow-guide-reopen { margin: -6px 0 10px; font-size: 12.5px; }

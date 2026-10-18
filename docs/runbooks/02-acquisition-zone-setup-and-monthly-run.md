@@ -41,31 +41,33 @@ sudo ./install-ubuntu.sh --role acquisition
 | Bundle signing key (A1, created if missing) | `/etc/offpatch/keys/bundle.key` (root:`offpatch-acq`, 0640), `bundle.pub` |
 | Config | `/etc/offpatch/acquire.json` |
 | Work dir, sequence state, `sent.jsonl`, drop dir | `/var/lib/offpatch-acq`, outbox `/var/lib/offpatch-acq/outbox` |
-| Schedule | `offpatch-acquire.timer` (daily 07:00) runs `pmctl auto` as user `offpatch-acq` |
+| Schedule | `offpatch-acquire.timer` runs `pmctl auto` as user `offpatch-acq` **every hour** (`OnCalendar=hourly`, `RandomizedDelaySec=5min`, `Persistent=true`). A run that finds the previous one still downloading exits 3 ("skipped: another pmctl auto run is in progress"), which the unit treats as success (`SuccessExitStatus=2 3`). Re-running the installer switches an older daily timer to hourly. |
 
 The installer **never creates a root key** on an acquisition host, and warns if it finds
 `/etc/offpatch/keys/root.key` there. Do A2 on the offline machine. Carry
 `/etc/offpatch/keys/bundle.pub` to the server (`--role server --pubkey bundle.pub`, runbook 01).
 Re-running the same command upgrades and keeps the key, config and state.
 
-`--role all` (single-box lab) is the one exception: it also creates a root key so the lab works,
-and it prints a warning that this layout is not for production. The lab also hands acquisition
-requests over directly (fresh install and re-runs):
+`--role all` (the single-server install, `sudo ./install-ubuntu.sh` with no arguments) is the one
+exception: unless `--root-pubkey` is given it creates a root key, and tells you to move it to offline
+media at once with `sudo ./install-ubuntu.sh --export-root-key <mount point>` (runbook 01, method
+A1). Its downloader may reach only TCP 80/443 and DNS (egress lock, runbook 01). It also hands
+acquisition requests over directly (fresh install and re-runs):
 
-| What | Lab (`--role all`) layout |
+| What | Single-server (`--role all`) layout |
 |---|---|
 | `acquisition_requests_dir` in `/etc/offpatch/pmserver.json` | `/var/lib/offpatch-acq/requests` |
 | `/var/lib/offpatch-acq` | `offpatch-acq`:`offpatch-inbox` 0710 (the server may traverse, not list) |
 | `/var/lib/offpatch-acq/requests` | `offpatch-acq`:`offpatch-inbox` 2770 (setgid): the server creates request files, `offpatch-acq` reads and moves them to `done/` / `rejected/`; in the server unit's `ReadWritePaths` |
-| Request watcher | `offpatch-acquire-requests.path` (`PathExistsGlob=/var/lib/offpatch-acq/requests/*.json`) starts `offpatch-acquire-requests.service`: `pmctl auto -config /etc/offpatch/acquire.json -only-requests` as `offpatch-acq`, same hardening as `offpatch-acquire.service`, `SuccessExitStatus=2` |
+| Request watcher | `offpatch-acquire-requests.path` (`PathExistsGlob=/var/lib/offpatch-acq/requests/*.json`) starts `offpatch-acquire-requests.service`: `pmctl auto -config /etc/offpatch/acquire.json -only-requests` as `offpatch-acq`, same hardening as `offpatch-acquire.service`, `SuccessExitStatus=2 3` |
 
-A request that keeps failing stays in the folder; after a failed or partial run the service
-waits 10 minutes before the path unit can start it again, and the path unit is trigger-limited
+A request that keeps failing stays in the folder; after a failed, partial or skipped run (the hourly
+run holds the lock) the service waits 10 minutes before the path unit can start it again, and the path unit is trigger-limited
 (`TriggerLimitIntervalSec=10min`, `TriggerLimitBurst=10`; systemd 250+). If it ever stops
 (`systemctl status offpatch-acquire-requests.path` shows `failed`):
 `sudo systemctl reset-failed offpatch-acquire-requests.path && sudo systemctl start offpatch-acquire-requests.path`.
-The daily run handles pending requests either way. `--role server` and `--role acquisition` do
-not set `acquisition_requests_dir`: production carries the file.
+The hourly run handles pending requests either way. `--role server` and `--role acquisition` (the
+stricter two-machine layout) do not set `acquisition_requests_dir`: the operator carries the file.
 
 Every run's status report lists each requested item with a result: `fetched`, `already_sent`
 (sent for the same request by an earlier try), `unsupported` (never importable this way, e.g.
@@ -78,7 +80,7 @@ names are fetched and sent again even if `state.json` says they were sent before
 A Linux acquisition host needs nothing extra for MSIs whose winget manifest states no product
 code (Microsoft Edge, for example): pmctl reads it from the downloaded MSI itself.
 
-With `"intel": {}` in `acquire.json`, every daily run also fills the console's **Library**: winget
+With `"intel": {}` in `acquire.json`, every run also fills the console's **Library**: winget
 installer and description details for the configured apps, every app ever requested, and about
 290 common enterprise packages. The first runs look up at most 300 packages each; later
 runs only look up new versions (cached in `state.json`). Lookup failures are warnings in the
@@ -173,7 +175,7 @@ than the last accepted one (Intake page shows each bundle's sequence).
 
 ## Part B — Monthly run
 
-> **Unattended alternative:** `pmctl auto` performs B1–B6 on a daily schedule, including the send. Set it up once with the installer (A0, `offpatch-acquire.timer`) or `packaging/acquisition/` (Task Scheduler or systemd timer) and check `auto-log.jsonl` and the scheduler result each morning. See [docs/08-acquisition.md](../08-acquisition.md#unattended-acquisition-pmctl-auto). The manual steps below remain the procedure for out-of-band patches and troubleshooting.
+> **Unattended alternative:** `pmctl auto` performs B1–B6 every hour (installer timer), including the send. Set it up once with the installer (A0, `offpatch-acquire.timer`) or `packaging/acquisition/` (Task Scheduler or systemd timer) and check `auto-log.jsonl` and the scheduler result daily (the console warns when no status report arrived for `acquisition_stale_after`: 3h on a single server, 26h in the two-machine layout). See [docs/08-acquisition.md](../08-acquisition.md#unattended-acquisition-pmctl-auto). The manual steps below remain the procedure for out-of-band patches and troubleshooting.
 
 Set a working directory per month, for example `acq/2026-11/`.
 

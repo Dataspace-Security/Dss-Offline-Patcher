@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -363,8 +364,8 @@ func TestAutoLockStaleness(t *testing.T) {
 	unlock()
 	os.WriteFile(p, []byte(strconv.Itoa(os.Getpid())+" now\n"), 0o600) // owner alive
 	os.Chtimes(p, old, old)
-	if _, err := acquireLock(dir, time.Hour); err == nil {
-		t.Fatal("lock of a live process taken over")
+	if _, err := acquireLock(dir, time.Hour); !errors.Is(err, errRunInProgress) {
+		t.Fatalf("lock of a live process taken over, or not reported as a run in progress (exit %d): %v", exitSkipped, err)
 	}
 	// Refresh keeps the mtime fresh while the run lasts.
 	os.Remove(p)

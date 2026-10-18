@@ -3,7 +3,7 @@ import { ControlMatrixSection, Cover, ExecutiveSummarySection, RegulatorySection
 import { EvidenceSection, FindingsSection, ReferencesSection, SignOffSection, TimelinessSection } from "./ReportBack";
 
 /** The auditor report as a print-ready document (template sections 1–9; §10 is not part of the output). */
-export function ComplianceDocument({ pack, printing }: { pack: CompliancePack; printing: boolean }) {
+export function ComplianceDocument({ pack, printing = false }: { pack: CompliancePack; printing?: boolean }) {
   return (
     <article className="crep" aria-label="Patch Management Compliance Report">
       <Cover pack={pack} />
