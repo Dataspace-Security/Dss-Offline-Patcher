@@ -213,26 +213,26 @@ func TestRollback(t *testing.T) {
 		t.Fatalf("pkg rollback_unsupported: %q", pkg.RollbackUnsupported)
 	}
 	rb := store.NewDeployment{PackageID: "KB5009201-x64", Name: "rollback KB5009201", Rings: rings, MaxFailurePct: 100, Operation: "rollback"}
-	if c := e.api("POST", "/api/deployments", tokOperator, rb, nil); c != 400 {
+	if c := e.createDep(tokOperator, rb, nil); c != 400 {
 		t.Fatalf("rollback without justification: %d", c)
 	}
 	rb.Justification = "CHG-1234: KB5009201 breaks the core banking client"
-	if c := e.api("POST", "/api/deployments", tokOperator, store.NewDeployment{PackageID: "Chrome-150", Name: "rb mac", Rings: rings, Operation: "rollback", Justification: "x"}, nil); c != 409 {
+	if c := e.createDep(tokOperator, store.NewDeployment{PackageID: "Chrome-150", Name: "rb mac", Rings: rings, Operation: "rollback", Justification: "x"}, nil); c != 409 {
 		t.Fatalf("macOS pkg rollback must be refused: %d", c)
 	}
 	// The MSI install completed, so its rollback may start.
 	var dep store.Deployment
-	if c := e.api("POST", "/api/deployments", tokOperator, store.NewDeployment{PackageID: "AcmeApp-3.0", Name: "rb msi", Rings: rings, MaxFailurePct: 100, Operation: "rollback", Justification: "x"}, &dep); c != 201 {
+	if c := e.createDep(tokOperator, store.NewDeployment{PackageID: "AcmeApp-3.0", Name: "rb msi", Rings: rings, MaxFailurePct: 100, Operation: "rollback", Justification: "x"}, &dep); c != 201 {
 		t.Fatalf("msi rollback: %d (install %s)", c, e.deployment(instMSI.DeploymentID).State)
 	}
 	var rbd store.Deployment
-	if c := e.api("POST", "/api/deployments", tokOperator, rb, &rbd); c != 201 {
+	if c := e.createDep(tokOperator, rb, &rbd); c != 201 {
 		t.Fatalf("rollback create: %d", c)
 	}
 	if rbd.Operation != "rollback" {
 		t.Fatalf("operation %q", rbd.Operation)
 	}
-	if c := e.api("POST", "/api/deployments", tokOperator, store.NewDeployment{PackageID: "KB5009201-x64", Name: "reinstall", Rings: rings, MaxFailurePct: 100}, nil); c != 409 {
+	if c := e.createDep(tokOperator, store.NewDeployment{PackageID: "KB5009201-x64", Name: "reinstall", Rings: rings, MaxFailurePct: 100}, nil); c != 409 {
 		t.Fatalf("install while a rollback is active must be refused: %d", c)
 	}
 	// Ring 1 (pilot) only.
@@ -256,7 +256,7 @@ func TestRollback(t *testing.T) {
 		t.Fatalf("install target should be rolled_back: %s", s)
 	}
 	// Revoking the bad package does not cancel the rollback.
-	if c := e.api("POST", "/api/packages/KB5009201-x64/revoke", tokApprover, map[string]string{"reason": "bad patch"}, nil); c != 200 {
+	if c := e.api("POST", "/api/packages/KB5009201-x64/revoke", tokAdmin, map[string]string{"reason": "bad patch"}, nil); c != 200 {
 		t.Fatalf("revoke %d", c)
 	}
 	if s := e.deployment(rbd.DeploymentID).State; s != "active" {

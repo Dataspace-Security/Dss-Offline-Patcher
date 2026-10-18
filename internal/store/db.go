@@ -23,6 +23,8 @@ var (
 	ErrNotFound = errors.New("not found")
 	ErrConflict = errors.New("conflict")
 	ErrInvalid  = errors.New("invalid")
+	// ErrForbidden: the actor's role does not allow this (HTTP 403).
+	ErrForbidden = errors.New("forbidden")
 )
 
 // Errf wraps a sentinel with detail so callers can errors.Is() it.
@@ -185,6 +187,26 @@ type Policy struct {
 	// Deadlines from vendor release to required install, by severity
 	// (defaults: critical 7d, important 30d, moderate 60d, low 90d).
 	Deadlines map[string]time.Duration
+	// DeploymentApprovals: distinct approvers (bank user or admin, not the
+	// creator) a deployment or rollback needs before it starts. 0 = 2.
+	DeploymentApprovals int
+	// TokenSuperAdmins: static admin_tokens with role super_admin that
+	// can sign in; they count towards "at least one super admin remains".
+	TokenSuperAdmins int
+	// ReservedUsers: names of static admin_tokens; local users may not
+	// take them (one name, one person, in the audit trail).
+	ReservedUsers map[string]bool
+}
+
+// DefaultDeploymentApprovals is the approval count when none is configured.
+const DefaultDeploymentApprovals = 2
+
+// RequiredDeploymentApprovals is the configured count (default 2).
+func (p Policy) RequiredDeploymentApprovals() int {
+	if p.DeploymentApprovals > 0 {
+		return p.DeploymentApprovals
+	}
+	return DefaultDeploymentApprovals
 }
 
 func (p Policy) required(severity string) int {

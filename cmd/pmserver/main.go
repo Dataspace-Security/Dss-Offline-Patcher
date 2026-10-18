@@ -56,6 +56,12 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "create-admin", "reset-admin":
+			if err := adminCmd(os.Args[1], os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+				os.Exit(1)
+			}
+			return
 		case "init-pki":
 			if err := initPKI(os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, "error:", err)
@@ -192,6 +198,65 @@ func run(cfgPath string, log *slog.Logger) error {
 		return nil
 	}
 	return err
+}
+
+// adminCmd: create-admin creates the built-in super admin (the vendor)
+// with a generated password; reset-admin gives an existing local super
+// admin a new generated password (recovery, as root on the server). The
+// password is printed once and only its PBKDF2 hash is stored. Run as the
+// service user so the database keeps its owner.
+func adminCmd(cmd string, args []string) error {
+	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
+	cfgPath := fs.String("config", "pmserver.json", "server config")
+	email := fs.String("email", "", "sign-in email of the super admin")
+	name := fs.String("name", "Vendor support", "create-admin: display name")
+	ifNone := fs.Bool("if-none", false, "create-admin: do nothing when an enabled local super admin already exists (installer upgrades)")
+	fs.Parse(args)
+	if *email == "" {
+		return fmt.Errorf("-email is required")
+	}
+	cfg, err := server.LoadConfig(*cfgPath)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
+		return err
+	}
+	st, err := store.Open(filepath.Join(cfg.DataDir, "pm.db"))
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	st.Policy.ReservedUsers = map[string]bool{}
+	for _, t := range cfg.AdminTokens {
+		st.Policy.ReservedUsers[strings.ToLower(t.User)] = true
+	}
+	ctx := context.Background()
+	pw := store.GeneratePassword()
+	if cmd == "reset-admin" {
+		if err := st.RecoverSuperAdmin(ctx, *email, pw); err != nil {
+			return err
+		}
+		e, _ := store.NormalizeEmail(*email)
+		fmt.Printf("super admin password reset (shown ONCE; other sessions of this account ended)\nemail:    %s\npassword: %s\n", e, pw)
+		return nil
+	}
+	if *ifNone {
+		has, err := st.HasLocalSuperAdmin(ctx)
+		if err != nil {
+			return err
+		}
+		if has {
+			fmt.Println("a local super admin already exists; nothing to do (lost the password? pmserver reset-admin -email ...)")
+			return nil
+		}
+	}
+	u, err := st.CreateBuiltinSuperAdmin(ctx, *email, *name, pw)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("created the built-in super admin (password shown ONCE; only its hash is stored)\nemail:    %s\npassword: %s\n", u.Email, pw)
+	return nil
 }
 
 // initPKI creates the internal CA and the server certificate.

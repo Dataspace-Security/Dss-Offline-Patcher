@@ -4,11 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 )
 
-// Users are created on first SSO login (identity lives in the IdP); the
-// store keeps last-login, role at last login, and a local disable switch.
+// Users are created on first SSO login (identity lives in the IdP) or by an
+// admin as local (email + password) users (localusers.go); the store keeps
+// last-login, role at last login, and a local disable switch for both.
 const usersSchema = `
 CREATE TABLE IF NOT EXISTS users(
   username TEXT PRIMARY KEY, role TEXT NOT NULL, source TEXT NOT NULL, email TEXT NOT NULL DEFAULT '',
@@ -23,26 +25,48 @@ CREATE TABLE IF NOT EXISTS package_approvals(
   PRIMARY KEY(package_id, approver));
 `
 
+// User is one row of GET /api/users. Password hashes are never part of it.
 type User struct {
-	Username       string `json:"username"`
+	Username       string `json:"username"` // the sign-in id (the email for local users)
 	Role           string `json:"role"`
-	Source         string `json:"source"`
+	Source         string `json:"source"` // oidc (SSO) | local (email + password)
+	Auth           string `json:"auth"`   // sso | password
 	Email          string `json:"email"`
+	DisplayName    string `json:"display_name"`
 	MFA            bool   `json:"mfa"`
 	FirstLogin     string `json:"first_login"`
 	LastLogin      string `json:"last_login"`
 	Disabled       bool   `json:"disabled"`
 	DisabledReason string `json:"disabled_reason"`
 	ActiveSessions int    `json:"active_sessions"`
+	// Local (password) users only.
+	MustChangePassword bool   `json:"must_change_password"`
+	Locked             bool   `json:"locked"`
+	LockedUntil        string `json:"locked_until,omitempty"`
+	CreatedBy          string `json:"created_by,omitempty"`
+	CreatedAt          string `json:"created_at,omitempty"`
+	PasswordChangedAt  string `json:"password_changed_at,omitempty"`
 }
 
 var ErrDisabled = errors.New("user disabled")
 
-// Login records a successful SSO login and creates a session. Disabled
-// users are refused (and the attempt audited).
+// Login records a successful sign-in (SSO, or a verified local password:
+// source "password") and creates a session. Disabled users are refused
+// (and the attempt audited). An SSO identity with the name of a local user
+// is refused: it would act as that user.
 func (s *Store) Login(ctx context.Context, username, role, email, source string, mfa bool, ttl time.Duration) (string, error) {
 	token := "ses_" + RandomSecret()
+	role = canonicalOr(role)
 	err := s.tx(ctx, func(tx *sql.Tx) error {
+		if source != "password" {
+			var n int
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM local_users WHERE email=lower(?)`, username).Scan(&n); err != nil {
+				return err
+			}
+			if n > 0 || s.Policy.ReservedUsers[strings.ToLower(username)] {
+				return Errf(ErrConflict, "%s is a local (password) user or a static token name; SSO sign-in with that name is refused", username)
+			}
+		}
 		var disabled int
 		err := tx.QueryRow(`SELECT disabled FROM users WHERE username=?`, username).Scan(&disabled)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -57,36 +81,57 @@ func (s *Store) Login(ctx context.Context, username, role, email, source string,
 			m = 1
 		}
 		if _, err := tx.Exec(`INSERT INTO users(username,role,source,email,mfa,first_login,last_login) VALUES(?,?,?,?,?,?,?)
-			ON CONFLICT(username) DO UPDATE SET role=excluded.role, source=excluded.source, email=excluded.email, mfa=excluded.mfa, last_login=excluded.last_login`,
+			ON CONFLICT(username) DO UPDATE SET role=excluded.role, source=excluded.source, email=excluded.email, mfa=excluded.mfa, last_login=excluded.last_login,
+			first_login=CASE WHEN users.first_login='' THEN excluded.first_login ELSE users.first_login END`,
 			username, role, source, email, m, now, now); err != nil {
 			return err
 		}
 		exp := s.Now().Add(ttl).UTC().Format(time.RFC3339Nano)
-		if _, err := tx.Exec(`INSERT INTO sessions(id_hash,username,role,mfa,created_at,expires_at) VALUES(?,?,?,?,?,?)`, HashSecret(token), username, role, m, now, exp); err != nil {
+		if _, err := tx.Exec(`INSERT INTO sessions(id_hash,username,role,mfa,created_at,expires_at,source) VALUES(?,?,?,?,?,?,?)`,
+			HashSecret(token), username, role, m, now, exp, source); err != nil {
 			return err
 		}
 		return s.audit(tx, Ev{Actor: "user:" + username, Action: "auth.login", ObjectType: "user", ObjectID: username,
 			Details: map[string]any{"role": role, "source": source, "mfa": mfa, "session_expires": exp}})
 	})
-	if errors.Is(err, ErrDisabled) {
+	if errors.Is(err, ErrDisabled) || errors.Is(err, ErrConflict) {
+		reason := "user disabled"
+		if errors.Is(err, ErrConflict) {
+			reason = "SSO name is a local user"
+		}
 		s.Audit(ctx, Ev{Actor: "user:" + username, Action: "auth.login_denied", ObjectType: "user", ObjectID: username, Failure: true,
-			Details: map[string]any{"reason": "user disabled"}})
+			Details: map[string]any{"reason": reason, "source": source}})
 	}
 	return token, err
+}
+
+// canonicalOr maps aliases to canonical role names, keeping unknown names
+// as they are (they have no access: RoleRank 0).
+func canonicalOr(role string) string {
+	if c := CanonicalRole(role); c != "" {
+		return c
+	}
+	return role
 }
 
 type Session struct {
 	Username string
 	Role     string
 	MFA      bool
+	// Source: oidc (SSO) | password (local user).
+	Source string
+	// MustChangePassword: a local user signed in with a temporary
+	// password; only /api/me, password change and logout are allowed.
+	MustChangePassword bool
 }
 
 func (s *Store) LookupSession(ctx context.Context, token string) (Session, error) {
 	var ss Session
 	var exp string
-	var m, revoked, disabled int
-	err := s.db.QueryRowContext(ctx, `SELECT s.username, s.role, s.mfa, s.expires_at, s.revoked, COALESCE(u.disabled,0)
-		FROM sessions s LEFT JOIN users u ON u.username=s.username WHERE s.id_hash=?`, HashSecret(token)).Scan(&ss.Username, &ss.Role, &m, &exp, &revoked, &disabled)
+	var m, revoked, disabled, must int
+	err := s.db.QueryRowContext(ctx, `SELECT s.username, s.role, s.mfa, s.expires_at, s.revoked, COALESCE(u.disabled,0), s.source, COALESCE(l.must_change_password,0)
+		FROM sessions s LEFT JOIN users u ON u.username=s.username LEFT JOIN local_users l ON l.email=s.username AND s.source='password'
+		WHERE s.id_hash=?`, HashSecret(token)).Scan(&ss.Username, &ss.Role, &m, &exp, &revoked, &disabled, &ss.Source, &must)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ss, ErrNotFound
 	}
@@ -96,7 +141,8 @@ func (s *Store) LookupSession(ctx context.Context, token string) (Session, error
 	if revoked == 1 || disabled == 1 || s.Now().After(parseTime(exp)) {
 		return ss, ErrNotFound
 	}
-	ss.MFA = m == 1
+	ss.MFA, ss.MustChangePassword = m == 1, must == 1
+	ss.Role = canonicalOr(ss.Role)
 	return ss, nil
 }
 
@@ -113,10 +159,15 @@ func (s *Store) Logout(ctx context.Context, token string) error {
 	})
 }
 
+// ListUsers returns SSO users (seen at sign-in) and local users. No
+// password hashes.
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
+	now := s.now()
 	rows, err := s.db.QueryContext(ctx, `SELECT u.username,u.role,u.source,u.email,u.mfa,u.first_login,u.last_login,u.disabled,u.disabled_reason,
-		(SELECT COUNT(*) FROM sessions s WHERE s.username=u.username AND s.revoked=0 AND s.expires_at > ?)
-		FROM users u ORDER BY u.username`, s.now())
+		(SELECT COUNT(*) FROM sessions s WHERE s.username=u.username AND s.revoked=0 AND s.expires_at > ?),
+		l.email IS NOT NULL, COALESCE(l.display_name,''), COALESCE(l.role,''), COALESCE(l.must_change_password,0), COALESCE(l.locked_until,''),
+		COALESCE(l.created_by,''), COALESCE(l.created_at,''), COALESCE(l.password_changed_at,'')
+		FROM users u LEFT JOIN local_users l ON l.email=u.username ORDER BY u.username`, now)
 	if err != nil {
 		return nil, err
 	}
@@ -124,45 +175,34 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	out := []User{}
 	for rows.Next() {
 		var u User
-		var m, d int
-		if err := rows.Scan(&u.Username, &u.Role, &u.Source, &u.Email, &m, &u.FirstLogin, &u.LastLogin, &d, &u.DisabledReason, &u.ActiveSessions); err != nil {
+		var m, d, must int
+		var local bool
+		var lrole string
+		if err := rows.Scan(&u.Username, &u.Role, &u.Source, &u.Email, &m, &u.FirstLogin, &u.LastLogin, &d, &u.DisabledReason, &u.ActiveSessions,
+			&local, &u.DisplayName, &lrole, &must, &u.LockedUntil, &u.CreatedBy, &u.CreatedAt, &u.PasswordChangedAt); err != nil {
 			return nil, err
 		}
-		u.MFA, u.Disabled = m == 1, d == 1
+		u.MFA, u.Disabled, u.MustChangePassword = m == 1, d == 1, must == 1
+		u.Auth = "sso"
+		if local {
+			u.Auth, u.Source, u.Role, u.Email = "password", "local", lrole, u.Username
+			u.Locked = u.LockedUntil != "" && parseTime(u.LockedUntil).After(s.Now())
+			if !u.Locked {
+				u.LockedUntil = ""
+			}
+		}
+		u.Role = canonicalOr(u.Role)
 		out = append(out, u)
 	}
 	return out, rows.Err()
 }
 
-// SetUserDisabled blocks (or unblocks) a user locally and revokes sessions.
-func (s *Store) SetUserDisabled(ctx context.Context, actor, username string, disabled bool, reason string) error {
-	if err := requireReason(reason); err != nil {
-		return err
+// UserEmail is the email recorded for a user at sign-in ("" if none).
+func (s *Store) UserEmail(ctx context.Context, username string) (string, error) {
+	var e string
+	err := s.db.QueryRowContext(ctx, `SELECT email FROM users WHERE username=?`, username).Scan(&e)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
 	}
-	if actor == "user:"+username && disabled {
-		return Errf(ErrConflict, "you cannot disable yourself")
-	}
-	return s.tx(ctx, func(tx *sql.Tx) error {
-		d := 0
-		if disabled {
-			d = 1
-		}
-		res, err := tx.Exec(`UPDATE users SET disabled=?, disabled_reason=? WHERE username=?`, d, reason, username)
-		if err != nil {
-			return err
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return Errf(ErrNotFound, "user %s", username)
-		}
-		if disabled {
-			if _, err := tx.Exec(`UPDATE sessions SET revoked=1 WHERE username=?`, username); err != nil {
-				return err
-			}
-		}
-		action := "user.enabled"
-		if disabled {
-			action = "user.disabled"
-		}
-		return s.audit(tx, Ev{Actor: actor, Action: action, ObjectType: "user", ObjectID: username, Details: map[string]any{"reason": reason}})
-	})
+	return e, err
 }

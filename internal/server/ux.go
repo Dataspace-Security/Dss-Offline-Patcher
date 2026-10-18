@@ -20,11 +20,15 @@ type policyView struct {
 	ApprovalsRequired  map[string]int    `json:"approvals_required"`
 	SeparationOfDuties bool              `json:"separation_of_duties"`
 	Deadlines          map[string]string `json:"deadlines"`
+	// DeploymentApprovals: different people who approve each deployment and
+	// rollback before it starts (two-person rule).
+	DeploymentApprovals int `json:"deployment_approvals"`
 }
 
 func (s *Server) policy(w http.ResponseWriter, r *http.Request) {
 	p := s.store.Policy
-	v := policyView{ApprovalsRequired: map[string]int{}, SeparationOfDuties: p.SeparationOfDuties, Deadlines: map[string]string{}}
+	v := policyView{ApprovalsRequired: map[string]int{}, SeparationOfDuties: p.SeparationOfDuties, Deadlines: map[string]string{},
+		DeploymentApprovals: p.RequiredDeploymentApprovals()}
 	for _, sev := range store.Severities {
 		v.ApprovalsRequired[sev] = p.RequiredApprovals(sev)
 		v.Deadlines[sev] = p.DeadlineFor(sev).String()

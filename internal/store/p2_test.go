@@ -110,7 +110,7 @@ func TestTargetAlertsResolve(t *testing.T) {
 	s := openTest(t)
 	addPackage(t, s, Package{PackageID: "Acme-3.0", Kind: "msi", Version: "3.0.0", PackageName: "Acme App", ProductCode: "{A}"})
 	addEndpoint(t, s, "e-1", []string{"pilot"}, acmeOld)
-	d, err := s.CreateDeployment(ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: []Ring{{Name: "all", Groups: []string{"all"}}}, MaxFailurePct: 100, MaxRetries: 3})
+	d, err := createApproved(s, ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: []Ring{{Name: "all", Groups: []string{"all"}}}, MaxFailurePct: 100, MaxRetries: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +260,7 @@ func TestUBRCheckinEvidenceAndUserScope(t *testing.T) {
 	if n := needs["Acme-3.0"]; n.Needed != 1 {
 		t.Errorf("per-user install not counted as needing the update: %+v", n)
 	}
-	d, err := s.CreateDeployment(ctx, "user:otto", NewDeployment{PackageID: "KB5099999-x64", Name: "lcu", Rings: []Ring{{Name: "all", Groups: []string{"all"}}}, MaxFailurePct: 100})
+	d, err := createApproved(s, ctx, "user:otto", NewDeployment{PackageID: "KB5099999-x64", Name: "lcu", Rings: []Ring{{Name: "all", Groups: []string{"all"}}}, MaxFailurePct: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +275,7 @@ func TestUBRCheckinEvidenceAndUserScope(t *testing.T) {
 		t.Fatalf("UBR target: %+v", tg)
 	}
 	// Per-user Acme 3.0 verifies the msi like a machine-wide install.
-	d2, err := s.CreateDeployment(ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: []Ring{{Name: "all", Groups: []string{"all"}}}, MaxFailurePct: 100})
+	d2, err := createApproved(s, ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: []Ring{{Name: "all", Groups: []string{"all"}}}, MaxFailurePct: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +311,7 @@ func TestComplianceNeededDenominator(t *testing.T) {
 	addEndpoint(t, s, "e-1", []string{"pilot"}, acmeOld)
 	addEndpoint(t, s, "e-2", []string{"broad"}, acmeOld)
 	addEndpoint(t, s, "e-3", []string{"broad"}, acmeOld)
-	if _, err := s.CreateDeployment(ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: []Ring{{Name: "pilot", Groups: []string{"pilot"}}}, MaxFailurePct: 100}); err != nil {
+	if _, err := createApproved(s, ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: []Ring{{Name: "pilot", Groups: []string{"pilot"}}}, MaxFailurePct: 100}); err != nil {
 		t.Fatal(err)
 	}
 	checkin(t, s, "e-1", acmeCurrent, false) // verified
@@ -345,7 +345,7 @@ func TestInstallUnverified(t *testing.T) {
 	addPackage(t, s, Package{PackageID: "Acme-3.0", Kind: "msi", Version: "3.0.0", PackageName: "Acme App", ProductCode: "{A}"})
 	addEndpoint(t, s, "e-1", []string{"pilot"}, acmeOld)
 	addEndpoint(t, s, "e-2", []string{"pilot"}, acmeOld)
-	d, err := s.CreateDeployment(ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: []Ring{{Name: "all", Groups: []string{"all"}}}, MaxFailurePct: 40})
+	d, err := createApproved(s, ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: []Ring{{Name: "all", Groups: []string{"all"}}}, MaxFailurePct: 40})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +408,7 @@ func TestHealthAfterRestartOnVerifiedTarget(t *testing.T) {
 	addPackage(t, s, Package{PackageID: "Acme-3.0", Kind: "msi", Version: "3.0.0", PackageName: "Acme App", ProductCode: "{A}"})
 	addEndpoint(t, s, "e-1", []string{"pilot"}, acmeOld)
 	addEndpoint(t, s, "e-2", []string{"pilot"}, acmeOld)
-	d, err := s.CreateDeployment(ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: []Ring{{Name: "all", Groups: []string{"all"}}}, MaxFailurePct: 100})
+	d, err := createApproved(s, ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: []Ring{{Name: "all", Groups: []string{"all"}}}, MaxFailurePct: 100})
 	if err != nil {
 		t.Fatal(err)
 	}

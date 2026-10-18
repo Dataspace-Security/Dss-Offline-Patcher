@@ -149,7 +149,7 @@ func TestSSOAndTwoPersonApproval(t *testing.T) {
 	code, b := call(t, carol, "GET", e.srv.URL+"/api/me", nil, false)
 	var me map[string]any
 	json.Unmarshal(b, &me)
-	if code != 200 || me["user"] != "carol" || me["role"] != "approver" || me["source"] != "sso" || me["mfa"] != true {
+	if code != 200 || me["user"] != "carol" || me["role"] != "user" || me["source"] != "sso" || me["auth"] != "sso" || me["mfa"] != true {
 		t.Fatalf("me: %d %s", code, b)
 	}
 
@@ -193,10 +193,10 @@ func TestSSOAndTwoPersonApproval(t *testing.T) {
 
 	// ---- separation of duties: approvers may not deploy ----
 	dep := store.NewDeployment{PackageID: "KB5000009-x64", Name: "x", Rings: []store.Ring{{Name: "all", Groups: []string{"all"}}}, MaxFailurePct: 50}
-	if c := e.api("POST", "/api/deployments", tokApprover, dep, nil); c != 409 {
+	if c := e.createDep(tokApprover, dep, nil); c != 409 {
 		t.Fatalf("approver deploying own approval: %d", c)
 	}
-	if c := e.api("POST", "/api/deployments", tokOperator, dep, nil); c != 201 {
+	if c := e.createDep(tokOperator, dep, nil); c != 201 {
 		t.Fatalf("operator deploy: %d", c)
 	}
 

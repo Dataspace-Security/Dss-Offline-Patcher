@@ -309,7 +309,7 @@ func TestUBRVerificationAndEvidenceCSV(t *testing.T) {
 		t.Fatal(err)
 	}
 	var d store.Deployment
-	if c := e.api("POST", "/api/deployments", tokOperator, store.NewDeployment{PackageID: "KB5099999-x64", Name: "lcu", Rings: []store.Ring{{Name: "pilot", Groups: []string{"pilot"}}},
+	if c := e.createDep(tokOperator, store.NewDeployment{PackageID: "KB5099999-x64", Name: "lcu", Rings: []store.Ring{{Name: "pilot", Groups: []string{"pilot"}}},
 		MaxFailurePct: 100, MaxRetries: 1}, &d); c != 201 {
 		t.Fatalf("deploy: %d", c)
 	}

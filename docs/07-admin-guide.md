@@ -136,14 +136,39 @@ intelligence a machine with nothing deployed to it is `compliant`.
 
 ## 2. Roles and sign-in
 
-Roles are cumulative: `viewer` < `operator` < `approver` < `admin`.
+Roles are cumulative: `viewer` < `user` < `admin` < `super_admin`. The bank has Admins, Users and
+Viewers; the **super admin is the vendor** (setup and support). Older role names in the config or the
+IdP mapping still work: `operator` and `approver` both mean `user`.
 
 | Role | Can do (in addition to the roles below it) |
 |---|---|
-| `viewer` | Read everything: Overview, Intake (bundles and transfer reconciliation), Catalog, Deployments, Windows, Endpoints, Agent setup (and download staged agent files), Exceptions, Reports (incl. CSV), Alerts, Audit (incl. verify and lifecycle export). |
-| `operator` | Create enrollment tokens; edit endpoint groups/site/owner/criticality; retire endpoints; create, pause, resume, cancel and advance deployments; create and delete maintenance windows; acknowledge alerts. |
-| `approver` | Approve, reject and revoke packages; create and revoke exceptions. |
-| `admin` | Users page: list SSO users, disable or enable them. |
+| `viewer` | Read everything: Overview, Intake (bundles and transfer reconciliation), Catalog, Deployments, Windows, Endpoints, Agent setup (and download staged agent files), Exceptions, Reports (incl. CSV), Alerts, Audit (incl. verify and lifecycle export). No action buttons. |
+| `user` (bank) | Create enrollment tokens; edit endpoint groups/site/owner/criticality; retire endpoints; export acquisition requests; approve and reject packages; create deployments and rollbacks (they wait for two approvals); **approve or reject other people's deployments and rollbacks**; pause, resume, cancel, advance and retry deployments; create and delete maintenance windows; acknowledge alerts. |
+| `admin` (bank) | Users page: create local users, disable / enable, reset passwords and change roles of Users, Viewers and Admins; create and revoke exceptions; revoke packages. |
+| `super_admin` (vendor) | Everything, including super admin accounts. Not a deployment approver. |
+
+The console shows each role only what it can use; the server enforces the same table (a refused call
+is HTTP 403 and audited `access.denied`).
+
+### Email + password sign-in (local users)
+
+- The sign-in page asks for **email and password**. An Admin creates users on **Settings → Users**
+  (email, name, role, temporary password, or let the server generate one: it is shown once).
+- At first sign-in with a temporary password the user must choose their own (at least 12 characters,
+  not the email). Until then nothing else works.
+- Five wrong passwords in a row lock the account for 15 minutes; an Admin can unlock it with
+  **Enable** or **Reset password**. Sign-in attempts are also limited per client address. The error is
+  always "wrong email or password", so nobody can find out which emails exist.
+- **Reset password** gives a new temporary password and signs the user out everywhere. **Change role**
+  signs the user out (the new role applies at the next sign-in). Nobody can disable, demote or reset
+  themselves, and the last super admin cannot be disabled or demoted.
+- The installer creates the **built-in super admin** (`--admin-email`, default
+  `superadmin@offpatch.local`) with a random password it prints once. The super admin signs in and
+  creates the bank's first Admin. Lost password: on the server, as root,
+  `runuser -u offpatch -- /opt/offpatch/bin/pmserver reset-admin -config /etc/offpatch/pmserver.json -email <email>`
+  prints a new one (audited `user.password_reset` by `system:cli`).
+- With `require_mfa: true`, email + password sign-in is switched off (a password is one factor):
+  use SSO.
 
 Nobody can change the server configuration, trusted keys or audit settings from the console. Those
 live in `pmserver.json` and need OS access to the server plus a restart.
@@ -165,7 +190,11 @@ live in `pmserver.json` and need OS access to the server plus a restart.
 ### Static tokens (break-glass and automation)
 
 `pmserver new-token` prints a token and its SHA-256. The hash goes in `admin_tokens` in the config.
-Tokens are sent as `Authorization: Bearer <token>` and are what scripts use against the API. Notes:
+Tokens are sent as `Authorization: Bearer <token>` and are what scripts use against the API. The
+console does not offer them on the sign-in page; break-glass sign-in with a token is at
+`/login?token=1`. New installs give the installer's token role `super_admin`; an existing config whose
+token has `"role": "admin"` keeps admin (to make it super admin, edit `pmserver.json`, set
+`"role": "super_admin"` and restart `offpatch-server`). Notes:
 
 - They are managed only in the config file. Adding or removing one needs a server restart.
 - `allow_static_tokens: false` disables all of them. **Default: `true`, with or without SSO**
@@ -253,7 +282,7 @@ it"). Plan who approves and who deploys.
 
 ### 3.3 Creating a staged deployment
 
-**Deployments → New** (operator). Fields:
+**Deployments → New** (user). The new deployment waits for approval (below). Fields:
 
 | Field | Meaning and rules |
 |---|---|
@@ -288,14 +317,25 @@ when inventory shows the update **and** the OS no longer reports a pending reboo
 window allows automatic restarts (restart the machine or add a window)"), and the console's "Patch
 this" defaults to `never` in that case. The console shows `pending_reboot` as "Restart needed".
 
+**Two-person approval of deployments and rollbacks.** Every deployment and rollback (emergency too)
+starts as **Waiting for approval (0 of 2)**: no machine gets anything yet. Two **different** bank
+Users or Admins, neither of them the creator, open it and **Approve** with a reason (the change
+number). The second approval starts it (audited `deployment.approved` twice and
+`deployment.activated` with both names). **Reject** (with a reason) ends it for good; the creator can
+**Cancel** it instead. The super admin (vendor) and Viewers cannot approve. While it waits, it counts
+as running: a second deployment of the same package and operation is refused until it is approved
+and finished, rejected or cancelled. `deployment_approvals` in `pmserver.json` sets the count
+(default 2, 1–5; an isolated single-person lab may use 1). An `info` alert
+`deployment_awaiting_approval` is open while it waits.
+
 ### 3.4 Advancing, pausing, resuming, cancelling
 
 | Action | Who | Rules |
 |---|---|---|
-| Advance | operator | Deployment `active`, not on the last ring, and no target in the current ring is `downloading`/`downloaded`/`installing`. Failed targets do **not** block advance; look at them first. Reason optional. |
-| Pause | operator | From `active`. Reason required. Agents get no new assignments. An agent that already received an assignment may still be working on it; content downloads it starts after the pause are refused, so such a target can show `failed`. |
-| Resume | operator | From `paused`. Reason required. Resuming does not immediately re-pause; only a **new** failure re-evaluates the threshold. |
-| Cancel | operator | From `active` or `paused`. Reason required. Final. Targets of cancelled deployments no longer count in endpoint status or compliance reports. |
+| Advance | user | Deployment `active`, not on the last ring, and no target in the current ring is `downloading`/`downloaded`/`installing`. Failed targets do **not** block advance; look at them first. Reason optional. |
+| Pause | user | From `active`. Reason required. Agents get no new assignments. An agent that already received an assignment may still be working on it; content downloads it starts after the pause are refused, so such a target can show `failed`. |
+| Resume | user | From `paused`. Reason required. Resuming does not immediately re-pause; only a **new** failure re-evaluates the threshold. |
+| Cancel | user | From `pending_approval`, `active` or `paused`. Reason required. Final. Targets of cancelled deployments no longer count in endpoint status or compliance reports. |
 
 Pilot gate before advancing: every pilot target is `verified`, `not_applicable` or `exception`;
 failures explained; health checks `ok`; pilot owners have confirmed their applications work.
@@ -332,7 +372,7 @@ failures explained; health checks `ok`; pilot owners have confirmed their applic
 
 ### 3.7 Exceptions
 
-**Exceptions → New exception** (approver). Required: endpoint, owner, reason, compensating controls,
+**Exceptions → New exception** (admin). Required: endpoint, owner, reason, compensating controls,
 and expiry (in the future and at most one year away). Package is optional: empty means **all**
 packages for that endpoint. Exceptions are per endpoint; there are no group-wide exceptions.
 
@@ -453,7 +493,8 @@ The full commands are in [runbooks/02-acquisition-zone-setup-and-monthly-run.md]
 | 4 | Boundary | acquisition operator | `pmctl send -bundle acq/out/2026-11.pmb -to <drop dir> -key <bundle key>` (or `-via command` for a gateway). Keep `sent.jsonl`. |
 | 5 | Isolated | operator | Intake page: bundle `validated`, every check green. Transfer reconciliation: receipt matched. |
 | 6 | Isolated | approver(s) | Catalog: review and approve each package with the change reference. Critical patches may need two approvers. |
-| 7 | Isolated | operator (not an approver, if SoD is on) | Create the deployment: rings `pilot` → `broad`, deadline from your policy, `max_failure_pct`, `max_retries`, reboot policy, health checks for the business services on pilot machines. |
+| 7 | Isolated | user (not a package approver, if SoD is on) | Create the deployment: rings `pilot` → `broad`, deadline from your policy, `max_failure_pct`, `max_retries`, reboot policy, health checks for the business services on pilot machines. |
+| 7a | Isolated | two other bank users / admins | Approve the deployment with the change reference (two-person rule; nothing installs before). |
 | 8 | Isolated | operator | Watch the pilot ring. Fix failures. Get sign-off from pilot owners. |
 | 9 | Isolated | operator | Advance to `broad` (console: **Start next stage**). Watch for auto-pause, `install_failed`, `health_check_failed`. |
 | 10 | Isolated | operator / support | Work the remainder: offline endpoints, pending reboots, failures, exceptions. |
@@ -662,7 +703,11 @@ Notes:
 | Package `rejected`, operator clicked "Import again" | The next acquisition run sends it again | The package returns to `quarantined` for a new review (audit `package.reimported`, earlier approvals cleared). A `revoked` package is never imported again. |
 | Endpoint `awaiting_checkin` for a long time | Agent installed but not running, or cannot reach the server | As for `offline` (§3.6). After 24 h it is shown `offline`. |
 | Approve returns 409 `already approved this package; a different approver is required` | Two-person rule | A second approver approves. |
-| Create deployment returns 409 `separation of duties` | You approved the package | Another operator creates the deployment. |
+| Create deployment returns 409 `separation of duties` | You approved the package | Another user creates the deployment. |
+| Approve deployment returns 409 `you created this deployment` / `you already approved` | Two-person rule for deployments | Two other bank users or admins approve it. |
+| Approve deployment returns 403 | Your role is viewer or super_admin (vendor) | A bank user or admin approves it. |
+| Every call returns 403 `password_change_required` | Signed in with a temporary password | Change the password (the console shows the form). |
+| Sign-in says "wrong email or password" with the right password | Account locked after 5 wrong passwords (15 min), or a typo in the email | Wait, or ask an admin to **Enable** / **Reset password**. |
 
 ---
 
@@ -697,8 +742,8 @@ Notes:
    the enrollment/renewal. Fix: re-enroll.
 9. **A package was approved and deployed, then found to break an application. What does revoking
    it do, and what does it not do?**
-   Revoking (approver, reason required) stops new installs and cancels all its active and paused
-   deployments. It does **not** uninstall anything; offpatch has no automated rollback. Recovery is
+   Revoking (admin, reason required) stops new installs and cancels all its waiting, active and
+   paused deployments. It does **not** uninstall anything; offpatch has no automated rollback. Recovery is
    the manual per-class procedure (runbook 06).
 10. **What is the difference between the deployment window and a maintenance window, and which one
     does the deadline override?**

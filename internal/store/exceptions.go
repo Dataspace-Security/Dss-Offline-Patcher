@@ -245,7 +245,7 @@ func (s *Store) Summary(ctx context.Context, th Thresholds) (Summary, error) {
 	if sm.Bundles, err = count("bundles", "received", "validated", "rejected"); err != nil {
 		return sm, err
 	}
-	if sm.Deployments, err = count("deployments", "active", "paused", "cancelled", "completed"); err != nil {
+	if sm.Deployments, err = count("deployments", "pending_approval", "active", "paused", "cancelled", "completed", "rejected"); err != nil {
 		return sm, err
 	}
 	s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM exceptions WHERE revoked=0 AND expires_at > ?`, s.now()).Scan(&sm.ActiveExceptions)

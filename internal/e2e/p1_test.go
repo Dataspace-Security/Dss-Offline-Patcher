@@ -152,7 +152,10 @@ func TestImportAgainAfterReject(t *testing.T) {
 		t.Fatalf("approve re-imported: %d %s", c, p.State)
 	}
 	// Revoked stays revoked.
-	if c := e.api("POST", "/api/packages/KB5000002-x64/revoke", tokApprover, map[string]string{"reason": "vendor pulled it"}, &p); c != 200 {
+	if c := e.api("POST", "/api/packages/KB5000002-x64/revoke", tokApprover, map[string]string{"reason": "vendor pulled it"}, nil); c != 403 {
+		t.Fatalf("revoke by a user (not admin): want 403, got %d", c)
+	}
+	if c := e.api("POST", "/api/packages/KB5000002-x64/revoke", tokAdmin, map[string]string{"reason": "vendor pulled it"}, &p); c != 200 {
 		t.Fatalf("revoke: %d", c)
 	}
 	if b := e.transferAndIntake(e.bundle(bundleOpts{seq: 3}, pkgs, files)); b.State != "validated" {
@@ -180,7 +183,7 @@ func TestAutoAdvanceFirstMachines(t *testing.T) {
 	var d store.Deployment
 	nd := store.NewDeployment{PackageID: "KB5000002-x64", Name: "Oct CU", MaxFailurePct: 0, AutoAdvance: true,
 		Rings: []store.Ring{{Name: "First machines", Groups: []string{"endpoint:" + first.id}}, {Name: "Everything else", Groups: []string{"all"}}}}
-	if c := e.api("POST", "/api/deployments", tokOperator, nd, &d); c != 201 || !d.AutoAdvance {
+	if c := e.createDep(tokOperator, nd, &d); c != 201 || !d.AutoAdvance {
 		t.Fatalf("create: %d %+v", c, d)
 	}
 	e.cycle(first) // installs

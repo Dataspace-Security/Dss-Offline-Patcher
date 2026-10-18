@@ -38,7 +38,10 @@ import (
 const (
 	tokViewer   = "viewer-token"
 	tokOperator = "operator-token"
-	tokApprover = "approver-token"
+	tokApprover = "approver-token" // alice: role approver (= user)
+	tokUser2    = "user2-token"    // bob: role user, the second deployment approver
+	tokAdmin    = "admin-token"    // adam: bank admin
+	tokSuper    = "super-token"    // sam: super_admin (vendor)
 	msiGUID     = "{11111111-2222-3333-4444-555555555555}"
 )
 
@@ -78,8 +81,10 @@ func newEnvOpts(t *testing.T, tlsMode bool, extra string) *env {
 		mode = `"pki_dir": "pki",`
 	}
 	cfgJSON := fmt.Sprintf(`{`+mode+extra+`"data_dir": %q, "trusted_keys":[{"public_key": %q, "sources":["acq-zone-1"]}],
-	  "admin_tokens":[{"user":"vera","role":"viewer","token_sha256":%q},{"user":"otto","role":"operator","token_sha256":%q},{"user":"alice","role":"approver","token_sha256":%q}],
-	  "intake_interval":"1h"}`, filepath.Join(dir, "data"), e.pubPEM, store.HashSecret(tokViewer), store.HashSecret(tokOperator), store.HashSecret(tokApprover))
+	  "admin_tokens":[{"user":"vera","role":"viewer","token_sha256":%q},{"user":"otto","role":"operator","token_sha256":%q},{"user":"alice","role":"approver","token_sha256":%q},
+	    {"user":"bob","role":"user","token_sha256":%q},{"user":"adam","role":"admin","token_sha256":%q},{"user":"sam","role":"super_admin","token_sha256":%q}],
+	  "intake_interval":"1h"}`, filepath.Join(dir, "data"), e.pubPEM, store.HashSecret(tokViewer), store.HashSecret(tokOperator), store.HashSecret(tokApprover),
+		store.HashSecret(tokUser2), store.HashSecret(tokAdmin), store.HashSecret(tokSuper))
 	cfgPath := filepath.Join(dir, "pmserver.json")
 	os.WriteFile(cfgPath, []byte(cfgJSON), 0o600)
 	cfg, err := server.LoadConfig(cfgPath)
@@ -230,6 +235,45 @@ func (e *env) api(method, path, token string, body any, out any) int {
 	return resp.StatusCode
 }
 
+// createDep creates a deployment (POST /api/deployments) and, when that
+// succeeds (201), approves it with two bank users who did not create it,
+// so it starts as deployments did before the two-person rule. out, if set,
+// receives the deployment after approval.
+func (e *env) createDep(token string, n any, out any) int {
+	e.t.Helper()
+	var d store.Deployment
+	c := e.api("POST", "/api/deployments", token, n, &d)
+	if c != 201 {
+		return c
+	}
+	if d.State != "pending_approval" || d.ApprovalsRequired != 2 {
+		e.t.Fatalf("new deployment: state %s, approvals_required %d", d.State, d.ApprovalsRequired)
+	}
+	e.approveDep(d.DeploymentID, d.CreatedBy)
+	if out != nil {
+		if c := e.api("GET", "/api/deployments/"+d.DeploymentID, tokViewer, nil, out); c != 200 {
+			e.t.Fatalf("get deployment: %d", c)
+		}
+	}
+	return c
+}
+
+// approveDep approves deployment id with the two first of alice, bob and
+// adam who are not its creator.
+func (e *env) approveDep(id, createdBy string) {
+	e.t.Helper()
+	n := 0
+	for _, a := range []struct{ user, tok string }{{"alice", tokApprover}, {"bob", tokUser2}, {"adam", tokAdmin}} {
+		if n == 2 || "user:"+a.user == createdBy {
+			continue
+		}
+		if c := e.api("POST", "/api/deployments/"+id+"/approve", a.tok, map[string]string{"reason": "change approved"}, nil); c != 200 {
+			e.t.Fatalf("approve deployment %s as %s: %d", id, a.user, c)
+		}
+		n++
+	}
+}
+
 type simAgent struct {
 	*agent.Agent
 	dir    string
@@ -378,14 +422,14 @@ func TestEndToEnd(t *testing.T) {
 	// ---- approval gate ----
 	ring := []store.Ring{{Name: "pilot", Groups: []string{"pilot"}}, {Name: "broad", Groups: []string{"broad"}}}
 	newDep := store.NewDeployment{PackageID: "KB5000002-x64", Name: "Oct CU", Rings: ring, MaxFailurePct: 20, MaxRetries: 0}
-	if c := e.api("POST", "/api/deployments", tokOperator, newDep, nil); c != 409 {
+	if c := e.createDep(tokOperator, newDep, nil); c != 409 {
 		t.Fatalf("deploying unapproved package: want 409, got %d", c)
 	}
 	if c := e.api("GET", "/api/agent/content/"+pkgs["KB5000002-x64"].File.SHA256, pilot.secret, nil, nil); c == 200 {
 		t.Fatal("unapproved content served")
 	}
-	if c := e.api("POST", "/api/packages/KB5000002-x64/approve", tokOperator, map[string]string{"reason": "x"}, nil); c != 403 {
-		t.Fatalf("operator approve: want 403, got %d", c)
+	if c := e.api("POST", "/api/packages/KB5000002-x64/approve", tokViewer, map[string]string{"reason": "x"}, nil); c != 403 {
+		t.Fatalf("viewer approve: want 403, got %d", c)
 	}
 	if c := e.api("POST", "/api/packages/KB5000002-x64/approve", tokApprover, map[string]string{"reason": " "}, nil); c != 400 {
 		t.Fatalf("approve without reason: want 400, got %d", c)
@@ -400,14 +444,14 @@ func TestEndToEnd(t *testing.T) {
 
 	// Exception for broad-03 before the deployment starts.
 	var x store.Exception
-	if c := e.api("POST", "/api/exceptions", tokApprover, store.NewException{EndpointID: broad3.id, PackageID: "KB5000002-x64", Owner: "ops-lead",
+	if c := e.api("POST", "/api/exceptions", tokAdmin, store.NewException{EndpointID: broad3.id, PackageID: "KB5000002-x64", Owner: "ops-lead",
 		Reason: "vendor app incompatible", CompensatingControls: "host firewall lockdown", ExpiresAt: time.Now().Add(72 * time.Hour).UTC().Format(time.RFC3339)}, &x); c != 201 {
 		t.Fatalf("create exception: %d (endpoint %s)", c, broad3.id)
 	}
 
 	// ---- staged deployment ----
 	var d store.Deployment
-	if c := e.api("POST", "/api/deployments", tokOperator, newDep, &d); c != 201 {
+	if c := e.createDep(tokOperator, newDep, &d); c != 201 {
 		t.Fatalf("create deployment: %d", c)
 	}
 	dd := e.deployment(d.DeploymentID)
@@ -501,7 +545,7 @@ func TestEndToEnd(t *testing.T) {
 	os.WriteFile(simState, sb, 0o600)
 	e.cycle(pilot)
 	var d2 store.Deployment
-	e.api("POST", "/api/deployments", tokOperator, store.NewDeployment{PackageID: "AcmeAgent-2.1", Name: "Acme", Rings: []store.Ring{{Name: "pilot", Groups: []string{"pilot"}}}, MaxFailurePct: 100, MaxRetries: 1}, &d2)
+	e.createDep(tokOperator, store.NewDeployment{PackageID: "AcmeAgent-2.1", Name: "Acme", Rings: []store.Ring{{Name: "pilot", Groups: []string{"pilot"}}}, MaxFailurePct: 100, MaxRetries: 1}, &d2)
 	e.cycle(pilot)
 	dd = e.deployment(d2.DeploymentID)
 	if dd.Targets[0].State != "failed" || !strings.Contains(dd.Targets[0].Detail, "tampering") {
@@ -520,7 +564,7 @@ func TestEndToEnd(t *testing.T) {
 	}
 
 	// ---- revoke cancels deployments ----
-	e.api("POST", "/api/packages/AcmeAgent-2.1/revoke", tokApprover, map[string]string{"reason": "tampering incident"}, nil)
+	e.api("POST", "/api/packages/AcmeAgent-2.1/revoke", tokAdmin, map[string]string{"reason": "tampering incident"}, nil)
 	if e.deployment(d2.DeploymentID).State != "cancelled" {
 		t.Fatal("revoking a package must cancel its deployments")
 	}

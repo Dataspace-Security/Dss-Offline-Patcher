@@ -84,6 +84,10 @@ type Config struct {
 	// Install safety (docs/07-admin-guide.md "Install safety").
 	Preinstall       PreinstallConfig `json:"preinstall"`
 	LostAfterInstall Duration         `json:"lost_after_install"`
+	// DeploymentApprovals: different people (bank user or admin, not the
+	// creator) who must approve each deployment and rollback before it
+	// starts. Default 2, 1-5 (an isolated lab may use 1).
+	DeploymentApprovals *int `json:"deployment_approvals"`
 
 	dir string // directory of the config file; relative paths resolve from here
 	// staticTokensDefaulted: allow_static_tokens was not in the file.
@@ -108,6 +112,8 @@ func (c *Config) LogAuthMode(log *slog.Logger) {
 			"tokens", len(c.AdminTokens), "allow_static_tokens", how)
 	case *c.AllowStaticTokens && len(c.AdminTokens) > 0:
 		log.Info("admin sign-in: static admin tokens only (no SSO configured)", "tokens", len(c.AdminTokens), "allow_static_tokens", how)
+	case !sso && (len(c.AdminTokens) == 0 || !*c.AllowStaticTokens):
+		log.Warn("admin sign-in: local users (email + password) only: no SSO and no static admin token. If no super admin exists yet, run `pmserver create-admin`")
 	case *c.AllowStaticTokens:
 		log.Info("admin sign-in: SSO only (no admin_tokens configured, so there is no break-glass token)", "allow_static_tokens", how)
 	case len(c.AdminTokens) > 0:
@@ -117,8 +123,6 @@ func (c *Config) LogAuthMode(log *slog.Logger) {
 		log.Info("admin sign-in: SSO only; static admin tokens disabled (allow_static_tokens=false)")
 	}
 }
-
-var roleRank = map[string]int{"viewer": 1, "operator": 2, "approver": 3, "admin": 4}
 
 func LoadConfig(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
@@ -181,8 +185,12 @@ func LoadConfig(path string) (*Config, error) {
 	if c.SessionTTL.Duration == 0 {
 		c.SessionTTL.Duration = 8 * time.Hour
 	}
-	if c.OIDC == nil && (len(c.AdminTokens) == 0 || !*c.AllowStaticTokens) {
-		return nil, fmt.Errorf("config: configure \"oidc\" single sign-on, or at least one admin_tokens entry")
+	if c.DeploymentApprovals == nil {
+		n := store.DefaultDeploymentApprovals
+		c.DeploymentApprovals = &n
+	}
+	if n := *c.DeploymentApprovals; n < 1 || n > 5 {
+		return nil, fmt.Errorf("config: deployment_approvals must be 1-5 (got %d)", n)
 	}
 	if c.OIDC != nil {
 		c.OIDC.CACertFile = c.abs(c.OIDC.CACertFile)
@@ -219,10 +227,12 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, fmt.Errorf("config: approval_policy[%s] must be 1-5", sev)
 		}
 	}
-	for _, t := range c.AdminTokens {
-		if roleRank[t.Role] == 0 || t.User == "" || len(t.TokenSHA256) != 64 {
-			return nil, fmt.Errorf("config: admin token for %q needs user, role (viewer|operator|approver|admin) and token_sha256", t.User)
+	for i, t := range c.AdminTokens {
+		role := store.CanonicalRole(t.Role)
+		if role == "" || t.User == "" || len(t.TokenSHA256) != 64 {
+			return nil, fmt.Errorf("config: admin token for %q needs user, role (viewer|user|admin|super_admin; operator and approver mean user) and token_sha256", t.User)
 		}
+		c.AdminTokens[i].Role = role
 	}
 	if c.PKIDir != "" {
 		c.PKIDir = c.abs(c.PKIDir)

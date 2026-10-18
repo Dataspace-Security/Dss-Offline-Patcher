@@ -71,7 +71,7 @@ func TestAutoAdvance(t *testing.T) {
 
 	create := func(auto bool) Deployment {
 		t.Helper()
-		d, err := s.CreateDeployment(ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: firstMachines(), MaxFailurePct: 0, MaxRetries: 0, AutoAdvance: auto})
+		d, err := createApproved(s, ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: firstMachines(), MaxFailurePct: 0, MaxRetries: 0, AutoAdvance: auto})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -179,7 +179,7 @@ func TestRebootWithoutWindowDetail(t *testing.T) {
 		s.db.QueryRow(`SELECT detail FROM targets WHERE deployment_id=? AND endpoint_id='e-1'`, dep).Scan(&d)
 		return d
 	}
-	d, err := s.CreateDeployment(ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: []Ring{{Name: "all", Groups: []string{"all"}}},
+	d, err := createApproved(s, ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: []Ring{{Name: "all", Groups: []string{"all"}}},
 		MaxFailurePct: 50, RebootPolicy: "in_window"})
 	if err != nil {
 		t.Fatal(err)
@@ -426,7 +426,7 @@ func TestInstallerBusyGrace(t *testing.T) {
 	s := openTest(t)
 	addPackage(t, s, Package{PackageID: "Acme-3.0", Kind: "msi", Version: "3.0.0", PackageName: "Acme App", ProductCode: "{A}"})
 	addEndpoint(t, s, "e-1", []string{"pilot"}, acmeOld)
-	d, err := s.CreateDeployment(context.Background(), "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: []Ring{{Name: "all", Groups: []string{"all"}}},
+	d, err := createApproved(s, context.Background(), "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: []Ring{{Name: "all", Groups: []string{"all"}}},
 		MaxFailurePct: 0, MaxRetries: 0})
 	if err != nil {
 		t.Fatal(err)
@@ -498,10 +498,10 @@ func TestOneRunningDeploymentPerPackage(t *testing.T) {
 	addEndpoint(t, s, "e-old", []string{"pilot"}, acmeOld)
 	all := []Ring{{Name: "all", Groups: []string{"all"}}}
 	install := func() (Deployment, error) {
-		return s.CreateDeployment(ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: all, MaxFailurePct: 50})
+		return createApproved(s, ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: all, MaxFailurePct: 50})
 	}
 	rollback := func() (Deployment, error) {
-		return s.CreateDeployment(ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "undo", Rings: all, MaxFailurePct: 50, Operation: "rollback", Justification: "bad"})
+		return createApproved(s, ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "undo", Rings: all, MaxFailurePct: 50, Operation: "rollback", Justification: "bad"})
 	}
 	conflict := func(what string, _ Deployment, err error) {
 		t.Helper()

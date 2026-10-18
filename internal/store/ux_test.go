@@ -120,7 +120,7 @@ func TestNeedsClassification(t *testing.T) {
 
 func newDeployment(t *testing.T, s *Store, pkg string, rings []Ring, maxRetries int) Deployment {
 	t.Helper()
-	d, err := s.CreateDeployment(context.Background(), "user:otto", NewDeployment{PackageID: pkg, Name: "d", Rings: rings, MaxFailurePct: 50, MaxRetries: maxRetries})
+	d, err := createApproved(s, context.Background(), "user:otto", NewDeployment{PackageID: pkg, Name: "d", Rings: rings, MaxFailurePct: 50, MaxRetries: maxRetries})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +301,7 @@ func TestNextCheckinSeconds(t *testing.T) {
 	}
 	// A closed deployment window: no assignment, but the deployment was just created.
 	closed := clock.Add(2 * time.Hour)
-	d, err := s.CreateDeployment(ctx, "user:otto", NewDeployment{PackageID: "KB8-x64", Name: "d", Rings: []Ring{{Name: "p", Groups: []string{"pilot"}}},
+	d, err := createApproved(s, ctx, "user:otto", NewDeployment{PackageID: "KB8-x64", Name: "d", Rings: []Ring{{Name: "p", Groups: []string{"pilot"}}},
 		MaxFailurePct: 100, WindowStart: closed.Format("15:04"), WindowEnd: closed.Add(time.Hour).Format("15:04")})
 	if err != nil {
 		t.Fatal(err)

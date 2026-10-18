@@ -41,6 +41,14 @@ var columnMigrations = []struct{ table, column, ddl string }{
 	{"packages", "expected_ubr", "INTEGER NOT NULL DEFAULT 0"},
 	// Verified targets: the inventory line (or OS revision) that proved it.
 	{"targets", "evidence", "TEXT NOT NULL DEFAULT ''"},
+	// Sessions: oidc (SSO) or password (local users). Older sessions are SSO.
+	{"sessions", "source", "TEXT NOT NULL DEFAULT 'oidc'"},
+	// Two-person deployment approval: the count required when created (0 =
+	// created before approvals existed), the rejection, and activation time.
+	{"deployments", "approvals_required", "INTEGER NOT NULL DEFAULT 0"},
+	{"deployments", "rejected_by", "TEXT NOT NULL DEFAULT ''"},
+	{"deployments", "rejected_at", "TEXT NOT NULL DEFAULT ''"},
+	{"deployments", "activated_at", "TEXT NOT NULL DEFAULT ''"},
 }
 
 func hasColumn(db *sql.DB, table, column string) (bool, error) {
@@ -70,6 +78,12 @@ var tableMigrations = []string{
 	  request_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, created_by TEXT NOT NULL,
 	  intel_generated_at TEXT NOT NULL DEFAULT '', items TEXT NOT NULL DEFAULT '[]')`,
 	`CREATE INDEX IF NOT EXISTS acq_requests_created ON acq_requests(created_at)`,
+	// Local (email + password) users.
+	localUsersSchema,
+	// Deployment and rollback approvals (two different people by default).
+	`CREATE TABLE IF NOT EXISTS deployment_approvals(
+	  deployment_id TEXT NOT NULL, approver TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL,
+	  PRIMARY KEY(deployment_id, approver))`,
 }
 
 func migrate(db *sql.DB) error {

@@ -24,6 +24,9 @@
 #   --backup-keep N                   scheduled backups to keep (default 14)
 #   --skip-backup                     upgrade without the automatic pre-upgrade backup
 #   --insecure-lab                    plain HTTP (first install, isolated lab only)
+#   --admin-email EMAIL               role server/all: sign-in email of the built-in super admin (vendor),
+#                                     created when none exists (default superadmin@offpatch.local); its
+#                                     generated password is shown ONCE (lost: pmserver reset-admin)
 #   --with-agent                      role all: also enroll this machine as a managed endpoint
 #   --go-version 1.27.2               Go toolchain to install when building from source
 #
@@ -41,6 +44,7 @@ GO_VERSION="1.27.2"
 AGENT_SERVER="" AGENT_TOKEN="" AGENT_CA="" PUBKEY_IN="" ROOTPUB_IN=""
 AUDIT_DIR_IN="" BACKUP_DIR_IN="" BACKUP_KEEP_IN="" SKIP_BACKUP=0
 ALLOW_FROM=()
+ADMIN_EMAIL="superadmin@offpatch.local"
 UNINSTALL=0 PURGE=0 STATUS=0 YES=0
 
 PREFIX=/opt/offpatch                 # binaries
@@ -74,7 +78,7 @@ usage() { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; ex
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --role|--port|--hosts|--go-version|--server|--token|--ca|--pubkey|--root-pubkey|--audit-dir|--allow-from|--backup-dir|--backup-keep)
+    --role|--port|--hosts|--go-version|--server|--token|--ca|--pubkey|--root-pubkey|--audit-dir|--allow-from|--backup-dir|--backup-keep|--admin-email)
       [ $# -ge 2 ] || die "$1 needs a value" ;;
   esac
   case "$1" in
@@ -95,6 +99,7 @@ while [ $# -gt 0 ]; do
     --backup-dir) BACKUP_DIR_IN="$2"; shift ;;
     --backup-keep) BACKUP_KEEP_IN="$2"; shift ;;
     --skip-backup) SKIP_BACKUP=1 ;;
+    --admin-email) ADMIN_EMAIL="$2"; shift ;;
     --uninstall) UNINSTALL=1 ;;
     --purge) PURGE=1 ;;
     --yes) YES=1 ;;
@@ -652,6 +657,7 @@ EOF
 
 CURL_CA=()
 NEW_TOKEN=""
+ADMIN_CREATED_EMAIL="" ADMIN_CREATED_PW=""
 if [ $IS_SERVER = 1 ]; then
   step "Management server"
   install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$SRV_DATA" "$SRV_DATA/inbox" "$SRV_DATA/agent-dist"
@@ -663,7 +669,8 @@ if [ $IS_SERVER = 1 ]; then
   fi
   [ -d "$ETC/pki" ] && { chown -R "$SVC_USER":"$SVC_USER" "$ETC/pki"; chmod 0700 "$ETC/pki"; chmod 0644 "$ETC/pki/ca.pem"; }
 
-  # Break-glass admin token: only its SHA-256 is stored. Production roles show the token once;
+  # Break-glass admin token (API / automation; the console signs in with email + password and
+  # takes the token only at /login?token=1): only its SHA-256 is stored. Production roles show it once;
   # the lab keeps it in a root-only file so --with-agent and re-runs can use it.
   if [ ! -f "$ETC/admin-token.sha256" ]; then
     out=$("$PREFIX/bin/pmserver" new-token)
@@ -706,7 +713,7 @@ if [ $IS_SERVER = 1 ]; then
   $tlsline
   "data_dir": "$SRV_DATA",
   "trusted_keys": [{"public_key_file": "$ETC/keys/bundle.pub", "sources": ["acq-zone-1"]}],${rootline}
-  "admin_tokens": [{"user": "admin", "role": "admin", "token_sha256": "$sha"}],
+  "admin_tokens": [{"user": "admin", "role": "super_admin", "token_sha256": "$sha"}],
   "audit_export_dir": "$AUDIT_DIR",
   "audit_checkpoint_interval": "1h",
   "intake_interval": "5s",
@@ -757,6 +764,20 @@ PY
   # in group offpatch-inbox. setgid keeps dropped files readable by the server via that group.
   chgrp "$XFER_GROUP" "$SRV_DATA" "$SRV_DATA/inbox"
   chmod 0710 "$SRV_DATA"; chmod 2770 "$SRV_DATA/inbox"
+  # Built-in super admin (the vendor): created on first install, and on an upgrade when no
+  # local super admin exists yet. pmserver generates the password and stores only its PBKDF2
+  # hash; it is shown once in the summary. Lost it? pmserver reset-admin (see the summary).
+  if out=$(cd / && runuser -u "$SVC_USER" -- "$PREFIX/bin/pmserver" create-admin -config "$ETC/pmserver.json" -email "$ADMIN_EMAIL" -if-none 2>&1); then
+    if printf '%s\n' "$out" | grep -q '^password:'; then
+      ADMIN_CREATED_EMAIL=$(printf '%s\n' "$out" | awk '/^email:/{print $2}')
+      ADMIN_CREATED_PW=$(printf '%s\n' "$out" | awk '/^password:/{print $2}')
+      ok "created the built-in super admin $ADMIN_CREATED_EMAIL (password in the summary below)"
+    else
+      ok "keeping the existing super admin"
+    fi
+  else
+    die "could not create the built-in super admin ($ADMIN_EMAIL): $out"
+  fi
   start_server
   [ $INSECURE = 0 ] && CURL_CA=(--cacert "$ETC/pki/ca.pem")
   for _ in $(seq 1 30); do
@@ -1076,11 +1097,18 @@ chmod 0644 "$STATE_FILE"
 # ---------------------------------------------------------------- summary
 step "Done"
 if [ $IS_SERVER = 1 ]; then
-  echo "  Console:        $URL_PUBLIC"
+  echo "  Console:        $URL_PUBLIC   (sign in with email + password)"
+  if [ -n "$ADMIN_CREATED_PW" ]; then
+    banner "Built-in super admin (vendor): password shown ONCE, stored only as a hash:" "" \
+           "  email:    $ADMIN_CREATED_EMAIL" "  password: $ADMIN_CREATED_PW" "" \
+           "Sign in, then create the bank's first Admin under Settings > Users." \
+           "Changing this password after the first sign-in is recommended."
+  fi
+  echo "  Super admin:    lost the password? sudo runuser -u $SVC_USER -- $PREFIX/bin/pmserver reset-admin -config $ETC/pmserver.json -email <email>"
   if [ "$ROLE" = all ]; then
-    echo "  Admin token:    sudo cat $ETC/admin-token.txt   (paste into \"Break-glass / automation token\")"
+    echo "  Admin token:    sudo cat $ETC/admin-token.txt   (API / automation; console break-glass: $URL_PUBLIC/login?token=1)"
   elif [ -n "$NEW_TOKEN" ]; then
-    echo "  Admin token:    shown once above; it is not stored on this machine"
+    echo "  Admin token:    shown once above; not stored on this machine (API / automation; console: /login?token=1)"
   else
     echo "  Admin token:    unchanged (kept in your safe)"
   fi

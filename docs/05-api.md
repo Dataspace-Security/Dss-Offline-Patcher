@@ -4,7 +4,7 @@ All bodies are JSON and all times are RFC 3339 UTC. Errors return `{"error": "me
 
 ## Admin API — `Authorization: Bearer <admin token>`
 
-Roles are cumulative: `viewer` < `operator` < `approver` < `admin`.
+Roles are cumulative: `viewer` < `user` < `admin` < `super_admin` (v1.8; `operator` and `approver` are accepted as `user`). The Role column below is the v1.8 minimum; see "v1.8 additions" for what changed.
 
 | Method & path | Role | Body → Response |
 |---|---|---|
@@ -14,25 +14,25 @@ Roles are cumulative: `viewer` < `operator` < `approver` < `admin`.
 | `GET /api/bundles/{id}` | viewer | → `Bundle` (`id` = numeric intake id) |
 | `GET /api/packages?state=` | viewer | → `Package[]` |
 | `GET /api/packages/{package_id}` | viewer | → `Package` |
-| `POST /api/packages/{package_id}/approve` | approver | `{reason}` → `Package` |
-| `POST /api/packages/{package_id}/reject` | approver | `{reason}` → `Package` |
-| `POST /api/packages/{package_id}/revoke` | approver | `{reason}` → `Package` |
+| `POST /api/packages/{package_id}/approve` | user | `{reason}` → `Package` |
+| `POST /api/packages/{package_id}/reject` | user | `{reason}` → `Package` |
+| `POST /api/packages/{package_id}/revoke` | admin | `{reason}` → `Package` |
 | `GET /api/endpoints` | viewer | → `Endpoint[]` |
 | `GET /api/endpoints/{endpoint_id}` | viewer | → `EndpointDetail` |
-| `PATCH /api/endpoints/{endpoint_id}` | operator | `{groups?, site?, owner?, criticality?}` → `Endpoint` |
-| `POST /api/enrollment-tokens` | operator | `{groups: string[], site, expires_in_hours, max_uses?}` → **201** `{token, expires_at, max_uses}` (the token is shown **once**). `max_uses` default 1, at most 10000. `expires_in_hours` default 24, at most 720; tokens with `max_uses` > 1 at most 336 (14 days). There is no API to revoke a token. |
+| `PATCH /api/endpoints/{endpoint_id}` | user | `{groups?, site?, owner?, criticality?}` → `Endpoint` |
+| `POST /api/enrollment-tokens` | user | `{groups: string[], site, expires_in_hours, max_uses?}` → **201** `{token, expires_at, max_uses}` (the token is shown **once**). `max_uses` default 1, at most 10000. `expires_in_hours` default 24, at most 720; tokens with `max_uses` > 1 at most 336 (14 days). There is no API to revoke a token. |
 | `GET /api/agent-setup` | viewer | → `AgentSetup` (signing keys agents should pin — from the latest verified trust document, else `trusted_keys` in the config — and staged agent binaries) |
 | `GET /api/agent-setup/files/{name}` | viewer | → file from `<data_dir>/agent-dist/` (e.g. `pmagent.exe`) |
 | `GET /api/deployments` | viewer | → `Deployment[]` |
-| `POST /api/deployments` | operator | `NewDeployment` → `Deployment` |
+| `POST /api/deployments` | user | `NewDeployment` → `Deployment` |
 | `GET /api/deployments/{deployment_id}` | viewer | → `DeploymentDetail` |
-| `POST /api/deployments/{deployment_id}/pause` | operator | `{reason}` → `Deployment` |
-| `POST /api/deployments/{deployment_id}/resume` | operator | `{reason}` → `Deployment` |
-| `POST /api/deployments/{deployment_id}/cancel` | operator | `{reason}` → `Deployment` |
-| `POST /api/deployments/{deployment_id}/advance` | operator | `{reason}` → `Deployment` |
+| `POST /api/deployments/{deployment_id}/pause` | user | `{reason}` → `Deployment` |
+| `POST /api/deployments/{deployment_id}/resume` | user | `{reason}` → `Deployment` |
+| `POST /api/deployments/{deployment_id}/cancel` | user | `{reason}` → `Deployment` |
+| `POST /api/deployments/{deployment_id}/advance` | user | `{reason}` → `Deployment` |
 | `GET /api/exceptions` | viewer | → `Exception[]` |
-| `POST /api/exceptions` | approver | `NewException` → `Exception` |
-| `POST /api/exceptions/{exception_id}/revoke` | approver | `{reason}` → `Exception` |
+| `POST /api/exceptions` | admin | `NewException` → `Exception` |
+| `POST /api/exceptions/{exception_id}/revoke` | admin | `{reason}` → `Exception` |
 | `GET /api/audit?object_id=&action=&actor=&package_id=&limit=&before_seq=` | viewer | → `AuditEvent[]` (newest first, default limit 200) |
 | `GET /api/audit/verify` | viewer | → `{ok, count, first_bad_seq, error}` |
 | `GET /api/audit/export?package_id=` | viewer | → `LifecycleExport` (JSON attachment) |
@@ -166,15 +166,15 @@ Cookie-authenticated (SSO) requests that change state MUST send header `X-Offpat
 |---|---|---|
 | `GET /api/users` | admin | → `User[]` |
 | `POST /api/users/{username}/disable` · `/enable` | admin | `{reason}` → `{ok}` (disable revokes sessions) |
-| `POST /api/endpoints/{id}/retire` | operator | `{reason}` → `Endpoint` (status `retired`) |
+| `POST /api/endpoints/{id}/retire` | user | `{reason}` → `Endpoint` (status `retired`) |
 | `GET /api/maintenance-windows` | viewer | → `MaintenanceWindow[]` |
-| `POST /api/maintenance-windows` | operator | `MaintenanceWindow` (without id/created_*) → `MaintenanceWindow` |
-| `POST /api/maintenance-windows/{id}/delete` | operator | `{reason}` → `{ok}` |
+| `POST /api/maintenance-windows` | user | `MaintenanceWindow` (without id/created_*) → `MaintenanceWindow` |
+| `POST /api/maintenance-windows/{id}/delete` | user | `{reason}` → `{ok}` |
 | `GET /api/transfer/reconcile` | viewer | → `Reconciliation` |
 | `GET /api/reports/compliance` | viewer | → `ComplianceReport` |
 | `GET /api/reports/compliance.csv` · `/api/reports/endpoints.csv` | viewer | CSV download |
 | `GET /api/alerts?open=1` | viewer | → `Alert[]` |
-| `POST /api/alerts/{id}/ack` | operator | `{reason}` → `{ok}` |
+| `POST /api/alerts/{id}/ack` | user | `{reason}` → `{ok}` |
 | `GET /metrics` | `Bearer <metrics_token>` | Prometheus text |
 
 Agent API additions: `POST /api/agent/renew {csr}` → `{certificate, ca_certificate}` (mTLS). The check-in response adds `reboot_now`, `download_rate_kbps`, `trust` (signed trust document) and, per assignment, `reboot_allowed` and `health_checks`.
@@ -285,7 +285,7 @@ type Alert = { id: number; created_at: string; severity: "info" | "warning" | "c
 
 | Method & path | Role | Body → Response |
 |---|---|---|
-| `POST /api/acquisition-requests` | operator | `{apps: string[] (winget ids), kbs: string[]}` → `AcquisitionRequest` as a JSON attachment. 400 if nothing is selected, more than 500 items are selected, or an item is not currently needed by any endpoint; 409 without usable update intelligence. Audited as `acquisition.request_exported` (`details`: `apps` as `id@version`, `kbs` as `KB/arch`, `intel_generated_at`). |
+| `POST /api/acquisition-requests` | user | `{apps: string[] (winget ids), kbs: string[]}` → `AcquisitionRequest` as a JSON attachment. 400 if nothing is selected, more than 500 items are selected, or an item is not currently needed by any endpoint; 409 without usable update intelligence. Audited as `acquisition.request_exported` (`details`: `apps` as `id@version`, `kbs` as `KB/arch`, `intel_generated_at`). |
 
 Behaviour:
 - The server builds the file only from its own fleet view (`GET /api/updates`), never from text supplied by the client.
@@ -304,9 +304,9 @@ TypeScript shapes: `web/src/types.ts`, section "UX iteration" (`Policy`, `Packag
 | `GET /api/endpoints`, `GET /api/endpoints/{id}` | viewer | Each endpoint gains `missing: {os, apps, ready}`: `os`/`apps` = Windows updates / newer app versions the update intelligence says it lacks (cached fleet view), `ready` = approved catalog packages it needs. `null` for retired endpoints, and when there is no usable intelligence and `ready` is 0; without intelligence but `ready` > 0: `{os: 0, apps: 0, ready}`. The list does not parse inventories per request: `missing` comes from the cached fleet view and package needs (same caching as `/api/packages-needs`). |
 | `GET /api/fleet/status` | viewer | → `FleetStatus`: one row per KB / app of the intelligence fleet view, including KBs and apps every matched endpoint already has. Per endpoint `status` by precedence `exception` > `failed` > `being_patched` > `verified` > `outdated` > `up_to_date`, from the row's catalog package (the update's package; for rows without one, the package of the installed version) and its install targets and active exceptions. `requested`: latest tracked request listing it. By default every row has its counts and `endpoints: []`. **`?key=<KB or winget id>[&kind=os\|app]`** (key case-insensitive; kind optional): `rows` holds only that row, with its full `endpoints` list; 404 if there is no such row, 400 for another `kind` or `kind` without `key`. Cached like `/api/updates` (60 s, and rebuilt after the changes listed for `/api/packages-needs`; one rebuild at a time). `rows: []` without intelligence. |
 | `GET /api/updates` | viewer | rows gain `requested: AcquisitionRequestRef \| null` (latest tracked request listing the KB / winget id). |
-| `POST /api/acquisition-requests` | operator | Unchanged response; the request is also stored (table `acq_requests`) in the same transaction as its audit event. |
+| `POST /api/acquisition-requests` | user | Unchanged response; the request is also stored (table `acq_requests`) in the same transaction as its audit event. |
 | `GET /api/acquisition-requests` | viewer | → `AcquisitionRequestRecord[]`, newest first, at most 100. Items: `{kind: "app", key: winget id, version}` per app and `{kind: "kb", key: KB, version: architecture}` per KB and architecture. `seen_at`: `received_at` of the first acquisition status report with a `request` feed naming the request id. An item is `fulfilled` when a validated bundle received at or after the request's `created_at` holds `<KB>-<arch>`, or pmctl's package id for the app version (`<winget id>-<version>[-<arch>]`, hash-suffixed form included); then `package_id` and `fulfilled_at` (`received_at` of the earliest such bundle; a later bundle that carries an already-imported package again counts) are set. A package that was already in the catalog before the request does not fulfil it. Otherwise `seen` once the request was seen, else `requested`. For a KB requested for several architectures, `requested` refs take the least advanced status. Computed on read. |
-| `POST /api/deployments/{id}/retry_failed` | operator | `{reason}` (required) → `Deployment`. Targets in **every ring up to the current ring** in state `failed` with retries exhausted (`attempts > max_retries`) go back to `pending` with `attempts` 0. The deployment must be `active`, `paused` or `completed`: a paused one stays paused (an operator resumes it); a completed one becomes `active` again with `state_reason` `retry requested by <actor>: <reason>` (an install deployment only while its package is still approved). 409 for other states, an unapproved package, or when nothing is to retry ("no failed targets with exhausted retries in rings up to the current ring"). Audited as `deployment.retry_failed` (`details`: `reason`, `ring`, `state` before the retry, `targets` with their ring and last attempts / detail). The failure threshold is then re-checked as after a failure (remaining health-check failures or lost endpoints can auto-pause it again). |
+| `POST /api/deployments/{id}/retry_failed` | user | `{reason}` (required) → `Deployment`. Targets in **every ring up to the current ring** in state `failed` with retries exhausted (`attempts > max_retries`) go back to `pending` with `attempts` 0. The deployment must be `active`, `paused` or `completed`: a paused one stays paused (an operator resumes it); a completed one becomes `active` again with `state_reason` `retry requested by <actor>: <reason>` (an install deployment only while its package is still approved). 409 for other states, an unapproved package, or when nothing is to retry ("no failed targets with exhausted retries in rings up to the current ring"). Audited as `deployment.retry_failed` (`details`: `reason`, `ring`, `state` before the retry, `targets` with their ring and last attempts / detail). The failure threshold is then re-checked as after a failure (remaining health-check failures or lost endpoints can auto-pause it again). |
 | `GET /api/deployments/{id}` | viewer | each target gains `live: TargetLive \| null` (see heartbeat). |
 
 Agent API:
@@ -320,7 +320,7 @@ Agent API:
 
 | Method & path | Role | Body → Response |
 |---|---|---|
-| `POST /api/acquisition-requests` | operator | Response gains `queued_to: string`. With `acquisition_requests_dir` set in `pmserver.json`, the request document is also written there as `<dir>/<request_id>.json` (temp file + fsync + rename, mode 0640) and `queued_to` is that directory. `""` when the key is unset, or when the write failed: the response is still 200 with the document (the operator carries the file), the error is logged and the audit event's `details` gain `queued_error`. `details.queued_to` is always recorded. |
+| `POST /api/acquisition-requests` | user | Response gains `queued_to: string`. With `acquisition_requests_dir` set in `pmserver.json`, the request document is also written there as `<dir>/<request_id>.json` (temp file + fsync + rename, mode 0640) and `queued_to` is that directory. `""` when the key is unset, or when the write failed: the response is still 200 with the document (the operator carries the file), the error is logged and the audit event's `details` gain `queued_error`. `details.queued_to` is always recorded. |
 
 Behaviour:
 - The queued file is exactly the request document, i.e. the response **without** `queued_to` (`pmctl` parses strictly, so the console strips `queued_to` before saving the file).
@@ -332,7 +332,7 @@ Behaviour:
 
 | Method & path | Role | Body → Response |
 |---|---|---|
-| `POST /api/deployments` | operator | `NewDeployment` gains `auto_advance: boolean` (default `false`), echoed on `Deployment`. When the current ring is finished within `max_failure_pct` and is not the last ring, the deployment advances by itself (audited `deployment.advanced`, actor `system:scheduler`, `details.auto: true`); see [03-state-model.md](03-state-model.md). A second **active or paused** deployment of the same package and operation is refused with **409** ("already running; open it, wait for it to finish, or cancel it first"). |
+| `POST /api/deployments` | user | `NewDeployment` gains `auto_advance: boolean` (default `false`), echoed on `Deployment`. When the current ring is finished within `max_failure_pct` and is not the last ring, the deployment advances by itself (audited `deployment.advanced`, actor `system:scheduler`, `details.auto: true`); see [03-state-model.md](03-state-model.md). A second **active or paused** deployment of the same package and operation is refused with **409** ("already running; open it, wait for it to finish, or cancel it first"). |
 | `GET /api/endpoints`, `GET /api/endpoints/{id}`, `GET /api/reports/endpoints.csv` | viewer | `status` may also be `updates_available` (would be `compliant`, but `missing.os + missing.apps > 0`), `out_of_support` (would be `compliant` or `updates_available`, but `missing.os_support` is `out_of_support`) and `awaiting_checkin` (enrolled < 24 h ago, no inventory yet; after 24 h `offline`). `missing` gains `os_support` (`supported` \| `out_of_support` \| omitted) and `os_last_update` (date of the build's newest cumulative update). |
 | `GET /api/summary` | viewer | `endpoints.by_status` has a key for every status, including `updates_available`, `out_of_support` and `awaiting_checkin`; the same refined statuses as the endpoint list (so `compliant` no longer counts machines the intelligence says are behind). The `offpatch_endpoints` metric uses the same counts. |
 | `GET /api/acquisition-requests` | viewer | Item `status` may also be `unsupported` (can never be fetched this way: no MSI installer for the architecture, no ProductCode, version no longer in winget, KB not in the catalog for the build/arch) or `failed` (transient: download, hash, network — the next run may work), with `reason`. Taken from the **newest** acquisition status report whose `items` list that request id + kind + key + version (key and version case-insensitive); `fetched` / `already_sent` there mean `seen`. `fulfilled` (the package arrived) wins over both. |
@@ -360,7 +360,7 @@ Server behaviour without new endpoints (details in [03-state-model.md](03-state-
 |---|---|---|
 | `GET /api/library?q=&kind=app\|os&view=available\|installed\|catalog\|all&publisher=&sort=installed\|name\|date&page=1&per_page=50` | viewer | → `LibraryPage` (below). One searchable list of everything the update intelligence knows: winget apps (`kind: "app"`) and Windows cumulative updates (`kind: "os"`, one row per KB). `q`: words (case-insensitive, all must match) over name, id, publisher and MSI product codes. `publisher`: exact publisher, case-insensitive. `view`: `available` (default: `importable` = `yes` or installed in the fleet), `installed` (installed on at least one endpoint), `catalog` (has a catalog package), `all`. `sort`: `installed` (default: installed endpoints, then name), `name`, `date` (release date for KBs, `resolved_at` for apps; newest first). `per_page` is capped at 100. 400 for other `kind` / `view` / `sort` values or a page / per_page < 1. Without usable intelligence: `total: 0, items: []`. |
 | `GET /api/library/{kind}/{id}` | viewer | → `LibraryItem` plus `endpoints: [{endpoint_id, hostname, installed_version, outdated}]` (sorted by hostname; for a KB: endpoints on its build, `installed_version` = their `os_version`). `id` is case-insensitive. 404 when not in the Library or without usable intelligence. |
-| `POST /api/acquisition-requests` | operator | Body gains `app_archs: {"<winget id>": "x64" \| "x86" \| "arm64"}`. Apps and KBs that no endpoint needs are now accepted when they are in the update intelligence (a Library import): an app is written with `architectures: [app_archs[id] or "x64"]`, `endpoints: 0` and no installed forms; a KB with every architecture the intelligence lists for it and `endpoints: 0`. `app_archs` is ignored for apps installed in the fleet (they keep the fleet's architectures). 400 for an architecture other than x64 / x86 / arm64, more than 500 `app_archs` entries, or an item that is not in the intelligence ("not in the update intelligence (reload the page): …"). |
+| `POST /api/acquisition-requests` | user | Body gains `app_archs: {"<winget id>": "x64" \| "x86" \| "arm64"}`. Apps and KBs that no endpoint needs are now accepted when they are in the update intelligence (a Library import): an app is written with `architectures: [app_archs[id] or "x64"]`, `endpoints: 0` and no installed forms; a KB with every architecture the intelligence lists for it and `endpoints: 0`. `app_archs` is ignored for apps installed in the fleet (they keep the fleet's architectures). 400 for an architecture other than x64 / x86 / arm64, more than 500 `app_archs` entries, or an item that is not in the intelligence ("not in the update intelligence (reload the page): …"). |
 | `GET /api/acquisition-requests` (and every `requested` ref) | viewer | Item `status` may also be `stale` with `reason` `the acquisition run at <finished_at> did not pick this request up`: the item is still `requested` / `seen`, and the **newest** acquisition status report (by `finished_at`), finished more than 10 min after the request's `created_at`, lists the request id neither in a `request` feed nor in `items`. An item with a `fetched` / `already_sent` result is on its way and never stale; `fulfilled` wins. Rank for `requested` refs: `stale` 0 (like `requested`). The console shows it as "Not picked up" with "Ask again". |
 | `GET /api/summary` | viewer | Gains `intel: {generated_at, age_hours, stale} \| null` (null: no intelligence received). `stale`: older than 8 days. |
 | `GET /api/endpoints`, `GET /api/endpoints/{id}` | viewer | `missing` gains `catalog`: approved **or quarantined** catalog packages the endpoint needs (`ready` counts the approved ones). `status` `updates_available` now also applies when `missing.catalog` > 0, so "fully up to date" means `os`, `apps` and `catalog` all 0. Without intelligence `missing` is set when `catalog` > 0. |
@@ -397,3 +397,84 @@ Server behaviour without new endpoints (details in [03-state-model.md](03-state-
 - **LCU verification by UBR**: `manifest.Package` gains `expected_ubr` (msu only, optional, omitted when 0). A target verifies when the endpoint's build equals the package's `min_build` and the UBR parsed from `os_version` (`"(26300.9711)"`) is ≥ `expected_ubr`, even if the KB is not in inventory. Verified targets keep their evidence (`Target.evidence`, and `[<evidence>]` appended to the detail).
 - **Per-user installs**: `InventoryItem.scope` (`"user"` for installs found in loaded user hives; omitted for machine-wide) is counted like a machine-wide install for needs, targeting and verification.
 - **Health checks after the restart**: an agent report `{state: "installed", health: "ok" | "failed", health_detail}` for a target that is already `verified` records only the health result (no 409; the state stays `verified`; a failure raises `health_check_failed` and counts toward the threshold; a pass is audited `target.health_ok`). Any health `ok` closes an open `health_check_failed` alert of that target.
+
+## v1.8 additions — roles, two-person deployment approval, local users
+
+### Roles
+
+Roles are cumulative: `viewer` (1) < `user` (2, bank) < `admin` (3, bank) < `super_admin` (4, vendor).
+Older names stay accepted everywhere a role is configured (`admin_tokens`, `oidc.role_groups`, stored
+sessions): `operator` and `approver` mean `user`. API responses always use the new names.
+
+| Role | Can do (in addition to the roles below it) |
+|---|---|
+| `viewer` | Every `GET` above except `/api/users` (no secrets). |
+| `user` | Acquisition requests; create deployments and rollbacks (they start `pending_approval`); approve / reject deployments and rollbacks (not their own); approve / reject packages; acknowledge alerts; maintenance windows; enrollment tokens; edit and retire endpoints; pause / resume / cancel / advance / retry deployments. |
+| `admin` | Users: create, disable / enable, reset password, change role for `viewer`, `user` and `admin` (never `super_admin`); create and revoke exceptions; revoke packages. |
+| `super_admin` | Everything, including managing `super_admin` accounts. **Not** a deployment approver (the vendor does not approve bank changes). |
+
+The route table is the security boundary: the console hides what a role cannot do, the API refuses
+it with **403** `requires role <role>` (audited `access.denied`). Role changes in the table above
+compared with v1.7: package approve / reject `approver` → `user`; package revoke and exceptions
+`approver` → `admin`.
+
+### Deployment and rollback approval
+
+| Method & path | Role | Body → Response |
+|---|---|---|
+| `POST /api/deployments` | user | Unchanged body. The deployment is created in state **`pending_approval`** (install, rollback and emergency alike) with **no targets**: nothing is dispatched until it is approved. A pending deployment counts as running for the one-running-per-package-and-operation rule (409). Raises an `info` alert `deployment_awaiting_approval`. |
+| `POST /api/deployments/{id}/approve` | user | `{reason}` (required) → `Deployment`. 403 unless the caller's role is `user` or `admin`; 409 for the creator ("you created this deployment; N other people must approve it"), for a second approval by the same person, or when the deployment is not `pending_approval`. Audited `deployment.approved` (`details`: `reason`, `approvals`, `approvals_required`, `operation`, `role`). The approval that reaches `approvals_required` activates the deployment: state `active`, `activated_at` set, `state_reason` `approved by A and B`, targets created and evaluated, audited `deployment.activated` (`details.approved_by`: both names), the alert closes itself. |
+| `POST /api/deployments/{id}/reject` | user | `{reason}` (required) → `Deployment`. Same eligibility rules as approve (not the creator: the creator cancels instead). State **`rejected`** (final), `rejected_by`, `rejected_at`, and `state_reason` = the reason. Audited `deployment.rejected`; the alert closes itself. |
+| `POST /api/deployments/{id}/cancel` | user | Also from `pending_approval` (the creator may cancel their own). |
+| `GET /api/policy` | viewer | Gains `deployment_approvals: number`. |
+
+`pmserver.json` → `deployment_approvals` (default **2**, 1–5): different people who must approve each
+deployment and rollback. The count is fixed on the deployment when it is created
+(`approvals_required`). Deadlines are absolute times; windows and assignments only apply once the
+deployment is `active`.
+
+```ts
+// Deployment gains:
+//   approvals: {by: string; at: string; reason: string}[]   // by = "user:<name>"
+//   approvals_required: number    // 0 = created before approvals existed
+//   rejected_by: string; rejected_at: string; activated_at: string
+// DeploymentState: "pending_approval" | "active" | "paused" | "completed" | "cancelled" | "rejected"
+// Summary.deployments gains pending_approval and rejected counts.
+```
+
+### Local users (email + password)
+
+| Method & path | Auth / role | Body → Response |
+|---|---|---|
+| `GET /auth/config` | none | Gains `password_login: bool` (false when `require_mfa` is set: a password alone is one factor). |
+| `POST /api/auth/login` | none | `{email, password}` → `{user, email, role, auth: "password", must_change_password}` and the `offpatch_session` cookie (same session as SSO: `session_ttl`, `HttpOnly`, `SameSite=Strict`, `Secure` over TLS). Needs header `X-Offpatch-CSRF: 1`. **401** `wrong email or password` for an unknown email, a wrong password **and** a locked account (no enumeration; the same work is done in every case). 403 for a disabled account (only after the right password) or when `require_mfa` is set. **429** with `Retry-After` past 10 attempts per client IP (IPv6: per /64; then one per 6 s; loopback is not exempt; no proxy headers are trusted). 5 wrong passwords in a row lock the account for 15 minutes (audited `auth.locked`). Every failure is audited `auth.login_failed` with the reason; the attempted name only when it is a well-formed email, never the password. |
+| `POST /api/auth/logout` | session or token | → `{end_session_url?}`. Ends the cookie session (needs `X-Offpatch-CSRF: 1`, also on `POST /auth/logout`, which still works); with a static token there is nothing to end (200). |
+| `POST /api/auth/password` | local user session | `{current, new}` → `{ok}`. New password: at least 12 characters, not the email (or the part before the @), not the current one (400). A wrong `current` counts towards the lockout. Clears `must_change_password` and ends the user's other sessions. 409 for SSO and token callers. |
+| `GET /api/me` | any | → `{user, email, display_name, role, auth: "password" \| "sso" \| "token", source (= auth), mfa, must_change_password, password_changed_at ("" until the user changed it), builtin (the installer-created super admin)}` |
+| `GET /api/users` | admin | → `User[]`: SSO users (seen at sign-in) and local users. Never a password hash. |
+| `POST /api/users` | admin | `{email, display_name?, role, password?}` → **201** `{email, username, display_name, role, must_change_password: true, source: "local", auth: "password", temp_password?}`. The password is temporary: the user must change it at first sign-in. Without `password` one is generated and returned **once** as `temp_password`. 400 invalid email / role / password; 403 for `role: super_admin` unless the caller is a super admin; 409 if the name exists (also as an SSO user or a static token name). Audited `user.created`. |
+| `POST /api/users/{email}/disable` · `/enable` | admin | `{reason?}` → `{ok}`. Disable ends the user's sessions; enable also clears a lockout. Works for SSO and local users. |
+| `POST /api/users/{email}/reset_password` | admin | `{password?, reason?}` → `{ok, temp_password?}`. Local users only (409 for SSO). New temporary password (generated and returned once when `password` is empty), `must_change_password`, lockout cleared, sessions ended. Audited `user.password_reset`. |
+| `POST /api/users/{email}/set_role` | admin | `{role, reason?}` → `{ok}`. Local users only (SSO roles come from `oidc.role_groups`). Ends the user's sessions. Audited `user.role_changed` (`from`, `to`). |
+
+Limits (403 / 409, refusals by role audited `access.denied`): only a `super_admin` creates, changes or
+disables a `super_admin` or grants that role; nobody disables, demotes or resets themselves (409); the
+last enabled super admin cannot be disabled or demoted (409; enabled `super_admin` static tokens count).
+A user with `must_change_password` gets **403** `password_change_required` from every call except
+`GET /api/me`, `POST /api/auth/password` and `POST /api/auth/logout`. An SSO sign-in whose name is a local
+user or a static token name is refused. Audit events never contain passwords or hashes.
+
+Passwords are stored as `pbkdf2-sha256$<iterations>$<salt>$<hash>` (PBKDF2-SHA256 from the Go standard
+library, 600 000 iterations, 16-byte random salt) in table `local_users` (email, display_name, role,
+password_hash, must_change_password, failed_attempts, locked_until, created_by, created_at,
+password_changed_at, builtin). The disable switch is `users.disabled`, shared with SSO users.
+
+```ts
+// User gains: auth: "sso" | "password"; display_name; must_change_password; locked; locked_until?;
+//   created_by?; created_at?; password_changed_at?.  Local users: source "local", username = email = the email.
+```
+
+Static admin tokens keep working for the API and automation (`Authorization: Bearer`), and in the
+console only as a hidden break-glass at `/login?token=1`. `pmserver create-admin -config … -email …
+[-name …] [-if-none]` creates the built-in super admin and prints a generated password once;
+`pmserver reset-admin -config … -email …` (root on the server) prints a new one (recovery).

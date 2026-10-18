@@ -49,6 +49,7 @@ type Server struct {
 	lib        libCache // Library index, per intelligence generation
 
 	enrollLimit *ipLimiter
+	loginLimit  *ipLimiter // email + password sign-in, per client IP
 }
 
 func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger) (*Server, error) {
@@ -57,11 +58,23 @@ func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger
 	s.auth = newAuthState()
 	s.progress = newProgressMap()
 	s.enrollLimit = newIPLimiter(enrollBurst, enrollEvery)
+	s.loginLimit = newIPLimiter(loginBurst, loginEvery)
+	store.WarmPasswordCheck()
 	dl := map[string]time.Duration{}
 	for k, v := range cfg.PatchDeadlines {
 		dl[k] = v.Duration
 	}
-	st.Policy = store.Policy{ApprovalsRequired: cfg.ApprovalPolicy, SeparationOfDuties: cfg.SeparationOfDuties, Deadlines: dl}
+	st.Policy = store.Policy{ApprovalsRequired: cfg.ApprovalPolicy, SeparationOfDuties: cfg.SeparationOfDuties, Deadlines: dl,
+		DeploymentApprovals: store.DefaultDeploymentApprovals, ReservedUsers: map[string]bool{}}
+	if cfg.DeploymentApprovals != nil {
+		st.Policy.DeploymentApprovals = *cfg.DeploymentApprovals
+	}
+	for _, t := range cfg.AdminTokens {
+		st.Policy.ReservedUsers[strings.ToLower(t.User)] = true
+		if t.Role == store.RoleSuperAdmin && cfg.AllowStaticTokens != nil && *cfg.AllowStaticTokens {
+			st.Policy.TokenSuperAdmins++
+		}
+	}
 	if cfg.PKIDir != "" {
 		ca, err := pki.Load(cfg.PKIDir)
 		if err != nil {
@@ -115,9 +128,15 @@ func (s *Server) TLSConfig() *tls.Config {
 	return cfg
 }
 
+// principal is who is calling: User is the name (the email for local
+// users), Role canonical, Source token | sso | password.
 type principal struct {
 	User, Role, Source string
 	MFA                bool
+	// MustChangePassword: a local user with a temporary password; every
+	// call except /api/me, password change and logout gets 403
+	// password_change_required.
+	MustChangePassword bool
 }
 
 type ctxKey int
@@ -129,64 +148,77 @@ const (
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	// Permission table (docs/05-api.md "Roles"): viewer reads; user runs the
+	// day-to-day work; admin also manages bank users, exceptions and
+	// revocations; super_admin (vendor) everything. Each route names the
+	// lowest role allowed; the console hides what a role cannot do, but this
+	// table is the security boundary.
 	admin := func(role, pattern string, h http.HandlerFunc) { mux.Handle(pattern, s.requireAdmin(role, h)) }
+	const viewer, user, adm = store.RoleViewer, store.RoleUser, store.RoleAdmin
 
-	admin("viewer", "GET /api/me", s.me)
-	admin("viewer", "GET /api/summary", s.summary)
-	admin("viewer", "GET /api/bundles", s.listBundles)
-	admin("viewer", "GET /api/bundles/{id}", s.getBundle)
-	admin("viewer", "GET /api/transfer/reconcile", s.reconcile)
-	admin("viewer", "GET /api/system", s.system)
-	admin("viewer", "GET /api/acquisition", s.acquisition)
-	admin("viewer", "GET /api/reports/compliance", s.complianceReport)
-	admin("viewer", "GET /api/reports/compliance.csv", s.complianceCSV)
-	admin("viewer", "GET /api/reports/endpoints.csv", s.endpointsCSV)
-	admin("viewer", "GET /api/alerts", s.listAlerts)
-	admin("operator", "POST /api/alerts/{id}/ack", s.ackAlert)
+	admin(viewer, "GET /api/me", s.me)
+	admin(viewer, "GET /api/summary", s.summary)
+	admin(viewer, "GET /api/bundles", s.listBundles)
+	admin(viewer, "GET /api/bundles/{id}", s.getBundle)
+	admin(viewer, "GET /api/transfer/reconcile", s.reconcile)
+	admin(viewer, "GET /api/system", s.system)
+	admin(viewer, "GET /api/acquisition", s.acquisition)
+	admin(viewer, "GET /api/reports/compliance", s.complianceReport)
+	admin(viewer, "GET /api/reports/compliance.csv", s.complianceCSV)
+	admin(viewer, "GET /api/reports/endpoints.csv", s.endpointsCSV)
+	admin(viewer, "GET /api/alerts", s.listAlerts)
+	admin(user, "POST /api/alerts/{id}/ack", s.ackAlert)
 	mux.HandleFunc("GET /metrics", s.metrics)
-	admin("viewer", "GET /api/packages", s.listPackages)
-	admin("viewer", "GET /api/packages/{id}", s.getPackage)
-	admin("approver", "POST /api/packages/{id}/{action}", s.packageAction)
-	admin("viewer", "GET /api/endpoints", s.listEndpoints)
-	admin("viewer", "GET /api/endpoints/{id}", s.getEndpoint)
-	admin("viewer", "GET /api/endpoints/{id}/available", s.availableFor)
-	admin("viewer", "GET /api/endpoints/{id}/updates", s.endpointUpdates)
-	admin("viewer", "GET /api/updates", s.fleetUpdates)
-	admin("viewer", "GET /api/intel", s.intelStatus)
-	admin("viewer", "GET /api/library", s.library)
-	admin("viewer", "GET /api/library/{kind}/{id}", s.libraryItem)
-	admin("viewer", "GET /api/reports/targets.csv", s.targetsCSV)
-	admin("operator", "POST /api/acquisition-requests", s.exportAcqRequest)
-	admin("viewer", "GET /api/packages-needs", s.packageNeeds)
-	admin("viewer", "GET /api/policy", s.policy)
-	admin("viewer", "GET /api/fleet/status", s.fleetStatusHandler)
-	admin("viewer", "GET /api/acquisition-requests", s.listAcqRequests)
-	admin("operator", "PATCH /api/endpoints/{id}", s.patchEndpoint)
-	admin("operator", "POST /api/endpoints/{id}/retire", s.retireEndpoint)
-	admin("operator", "POST /api/enrollment-tokens", s.createEnrollmentToken)
-	admin("viewer", "GET /api/agent-setup", s.agentSetup)
-	admin("viewer", "GET /api/agent-setup/files/{name}", s.agentSetupFile)
-	admin("viewer", "GET /api/deployments", s.listDeployments)
-	admin("operator", "POST /api/deployments", s.createDeployment)
-	admin("viewer", "GET /api/deployments/{id}", s.getDeployment)
-	admin("operator", "POST /api/deployments/{id}/{action}", s.deploymentAction)
-	admin("operator", "POST /api/deployments/{id}/retry_failed", s.retryFailed)
-	admin("viewer", "GET /api/maintenance-windows", s.listWindows)
-	admin("operator", "POST /api/maintenance-windows", s.createWindow)
-	admin("operator", "POST /api/maintenance-windows/{id}/delete", s.deleteWindow)
-	admin("viewer", "GET /api/exceptions", s.listExceptions)
-	admin("approver", "POST /api/exceptions", s.createException)
-	admin("approver", "POST /api/exceptions/{id}/revoke", s.revokeException)
-	admin("viewer", "GET /api/audit", s.listAudit)
-	admin("viewer", "GET /api/audit/verify", s.verifyAudit)
-	admin("viewer", "GET /api/audit/export", s.exportLifecycle)
+	admin(viewer, "GET /api/packages", s.listPackages)
+	admin(viewer, "GET /api/packages/{id}", s.getPackage)
+	admin(user, "POST /api/packages/{id}/{action}", s.packageAction) // approve | reject
+	admin(adm, "POST /api/packages/{id}/revoke", s.packageAction)
+	admin(viewer, "GET /api/endpoints", s.listEndpoints)
+	admin(viewer, "GET /api/endpoints/{id}", s.getEndpoint)
+	admin(viewer, "GET /api/endpoints/{id}/available", s.availableFor)
+	admin(viewer, "GET /api/endpoints/{id}/updates", s.endpointUpdates)
+	admin(viewer, "GET /api/updates", s.fleetUpdates)
+	admin(viewer, "GET /api/intel", s.intelStatus)
+	admin(viewer, "GET /api/library", s.library)
+	admin(viewer, "GET /api/library/{kind}/{id}", s.libraryItem)
+	admin(viewer, "GET /api/reports/targets.csv", s.targetsCSV)
+	admin(user, "POST /api/acquisition-requests", s.exportAcqRequest)
+	admin(viewer, "GET /api/packages-needs", s.packageNeeds)
+	admin(viewer, "GET /api/policy", s.policy)
+	admin(viewer, "GET /api/fleet/status", s.fleetStatusHandler)
+	admin(viewer, "GET /api/acquisition-requests", s.listAcqRequests)
+	admin(user, "PATCH /api/endpoints/{id}", s.patchEndpoint)
+	admin(user, "POST /api/endpoints/{id}/retire", s.retireEndpoint)
+	admin(user, "POST /api/enrollment-tokens", s.createEnrollmentToken)
+	admin(viewer, "GET /api/agent-setup", s.agentSetup)
+	admin(viewer, "GET /api/agent-setup/files/{name}", s.agentSetupFile)
+	admin(viewer, "GET /api/deployments", s.listDeployments)
+	admin(user, "POST /api/deployments", s.createDeployment)
+	admin(viewer, "GET /api/deployments/{id}", s.getDeployment)
+	admin(user, "POST /api/deployments/{id}/{action}", s.deploymentAction) // pause | resume | cancel | advance
+	admin(user, "POST /api/deployments/{id}/approve", s.approveDeployment)
+	admin(user, "POST /api/deployments/{id}/reject", s.rejectDeployment)
+	admin(user, "POST /api/deployments/{id}/retry_failed", s.retryFailed)
+	admin(viewer, "GET /api/maintenance-windows", s.listWindows)
+	admin(user, "POST /api/maintenance-windows", s.createWindow)
+	admin(user, "POST /api/maintenance-windows/{id}/delete", s.deleteWindow)
+	admin(viewer, "GET /api/exceptions", s.listExceptions)
+	admin(adm, "POST /api/exceptions", s.createException)
+	admin(adm, "POST /api/exceptions/{id}/revoke", s.revokeException)
+	admin(viewer, "GET /api/audit", s.listAudit)
+	admin(viewer, "GET /api/audit/verify", s.verifyAudit)
+	admin(viewer, "GET /api/audit/export", s.exportLifecycle)
 
 	mux.HandleFunc("GET /auth/config", s.authConfig)
 	mux.HandleFunc("GET /auth/login", s.authLogin)
 	mux.HandleFunc("GET /auth/callback", s.authCallback)
 	mux.HandleFunc("POST /auth/logout", s.authLogout)
-	admin("admin", "GET /api/users", s.listUsers)
-	admin("admin", "POST /api/users/{name}/{action}", s.userAction)
+	mux.HandleFunc("POST /api/auth/login", s.passwordLogin)
+	mux.HandleFunc("POST /api/auth/logout", s.authLogout)
+	admin(viewer, "POST /api/auth/password", s.changePassword)
+	admin(adm, "GET /api/users", s.listUsers)
+	admin(adm, "POST /api/users", s.createUser)
+	admin(adm, "POST /api/users/{name}/{action}", s.userAction) // disable | enable | reset_password | set_role
 
 	mux.HandleFunc("GET /api/agent-setup/bootstrap/windows.ps1", s.bootstrapWindows)
 	mux.HandleFunc("GET /api/agent-setup/bootstrap/files/{name}", s.bootstrapFile)
@@ -253,7 +285,11 @@ func (s *Server) requireAdmin(role string, h http.HandlerFunc) http.Handler {
 			writeErr(w, http.StatusUnauthorized, why)
 			return
 		}
-		if roleRank[p.Role] < roleRank[role] {
+		if p.MustChangePassword && !passwordChangeExempt[r.URL.Path] {
+			writeErr(w, http.StatusForbidden, passwordChangeRequired)
+			return
+		}
+		if store.RoleRank(p.Role) < store.RoleRank(role) {
 			s.store.Audit(r.Context(), store.Ev{Actor: "user:" + p.User, Action: "access.denied", ObjectType: "api", ObjectID: r.Method + " " + r.URL.Path, Failure: true,
 				Details: map[string]any{"role": p.Role, "required": role}})
 			writeErr(w, http.StatusForbidden, "requires role "+role)
@@ -319,6 +355,8 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, store.ErrInvalid):
 		writeErr(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, store.ErrForbidden):
+		writeErr(w, http.StatusForbidden, err.Error())
 	default:
 		s.log.Error("internal error", "err", err)
 		writeErr(w, http.StatusInternalServerError, "internal error")
@@ -341,9 +379,30 @@ type reasonBody struct {
 
 // ---- admin handlers ----
 
+// me: who is signed in. auth: password (local user) | sso | token.
+// source is the older name of auth ("sso" also for local users' sessions
+// in versions before local users; kept for scripts).
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(keyPrincipal).(*principal)
-	writeJSON(w, 200, map[string]any{"user": p.User, "role": p.Role, "source": p.Source, "mfa": p.MFA})
+	v := map[string]any{"user": p.User, "role": p.Role, "auth": p.Source, "source": p.Source, "mfa": p.MFA,
+		"email": "", "display_name": "", "must_change_password": p.MustChangePassword, "password_changed_at": "", "builtin": false}
+	switch p.Source {
+	case "password":
+		lp, err := s.store.GetLocalProfile(r.Context(), p.User)
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		v["email"], v["display_name"], v["password_changed_at"], v["builtin"] = p.User, lp.DisplayName, lp.PasswordChangedAt, lp.Builtin
+	case "sso":
+		email, err := s.store.UserEmail(r.Context(), p.User)
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		v["email"] = email
+	}
+	writeJSON(w, 200, v)
 }
 
 func (s *Server) summary(w http.ResponseWriter, r *http.Request) {
@@ -398,6 +457,9 @@ func (s *Server) getPackage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) packageAction(w http.ResponseWriter, r *http.Request) {
 	action := r.PathValue("action")
+	if action == "" { // POST /api/packages/{id}/revoke (admin route)
+		action = "revoke"
+	}
 	if action != "approve" && action != "reject" && action != "revoke" {
 		writeErr(w, 404, "unknown action")
 		return
@@ -488,6 +550,34 @@ func (s *Server) deploymentAction(w http.ResponseWriter, r *http.Request) {
 	}
 	v, err := s.store.DeploymentAction(r.Context(), actor(r), r.PathValue("id"), r.PathValue("action"), body.Reason)
 	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, 200, v)
+}
+
+// approveDeployment / rejectDeployment: the two-person rule (store
+// ApproveDeployment). Bank users and admins only, never the creator.
+func (s *Server) approveDeployment(w http.ResponseWriter, r *http.Request) {
+	s.decideDeployment(w, r, s.store.ApproveDeployment)
+}
+
+func (s *Server) rejectDeployment(w http.ResponseWriter, r *http.Request) {
+	s.decideDeployment(w, r, s.store.RejectDeployment)
+}
+
+func (s *Server) decideDeployment(w http.ResponseWriter, r *http.Request, decide func(ctx context.Context, actor, role, id, reason string) (store.Deployment, error)) {
+	var body reasonBody
+	if !decode(w, r, &body) {
+		return
+	}
+	p := r.Context().Value(keyPrincipal).(*principal)
+	v, err := decide(r.Context(), actor(r), p.Role, r.PathValue("id"), body.Reason)
+	if err != nil {
+		if errors.Is(err, store.ErrForbidden) {
+			s.store.Audit(r.Context(), store.Ev{Actor: actor(r), Action: "access.denied", ObjectType: "deployment", ObjectID: r.PathValue("id"), Failure: true,
+				Details: map[string]any{"role": p.Role, "required": "user or admin (bank approver)", "api": r.Method + " " + r.URL.Path}})
+		}
 		s.fail(w, err)
 		return
 	}

@@ -106,6 +106,9 @@ func (s *Server) authConfig(w http.ResponseWriter, r *http.Request) {
 		"sso":           s.cfg.OIDC != nil,
 		"static_tokens": *s.cfg.AllowStaticTokens && len(s.cfg.AdminTokens) > 0,
 		"require_mfa":   s.cfg.RequireMFA,
+		// Email + password sign-in for local users (not when MFA is required:
+		// a password alone is one factor).
+		"password_login": !s.cfg.RequireMFA,
 	})
 }
 
@@ -168,6 +171,7 @@ func (s *Server) authCallback(w http.ResponseWriter, r *http.Request) {
 			Details: map[string]any{"reason": reason, "groups": id.Groups}})
 		s.loginFail(w, r, reason)
 	}
+	id.Role = store.CanonicalRole(id.Role)
 	if id.Role == "" {
 		deny("Your account is not in any offpatch role group. Ask an administrator for access.")
 		return
@@ -181,20 +185,35 @@ func (s *Server) authCallback(w http.ResponseWriter, r *http.Request) {
 		s.loginFail(w, r, "Your offpatch access has been disabled.")
 		return
 	}
+	if errors.Is(err, store.ErrConflict) {
+		s.loginFail(w, r, "This name belongs to a local (email + password) user; SSO sign-in with it is refused. Ask an administrator.")
+		return
+	}
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: tok, Path: "/", HttpOnly: true, Secure: r.TLS != nil,
-		SameSite: http.SameSiteStrictMode, MaxAge: int(s.cfg.SessionTTL.Seconds())})
+	s.setSessionCookie(w, r, tok)
 	http.Redirect(w, r, safeReturn(ls.Return), http.StatusFound)
 }
 
+// setSessionCookie: the console session (SSO and local users alike).
+func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, tok string) {
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: tok, Path: "/", HttpOnly: true, Secure: r.TLS != nil,
+		SameSite: http.SameSiteStrictMode, MaxAge: int(s.cfg.SessionTTL.Seconds())})
+}
+
+// authLogout ends the cookie session (SSO or local user). With a static
+// token there is no session: nothing to end, 200 all the same.
 func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookie); err == nil {
+		if r.Header.Get(csrfHeader) != "1" { // no forced logout from another site
+			writeErr(w, http.StatusForbidden, "missing "+csrfHeader+" header")
+			return
+		}
 		s.store.Logout(r.Context(), c.Value)
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode})
 	resp := map[string]string{}
 	if s.auth.provider != nil && s.auth.provider.EndSessionURL() != "" {
 		resp["end_session_url"] = s.auth.provider.EndSessionURL()
@@ -203,11 +222,12 @@ func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 // principalFor authenticates an admin request by static bearer token
-// (break-glass/automation, if allowed) or SSO session cookie.
+// (break-glass/automation, if allowed) or session cookie (SSO or local
+// email + password user).
 func (s *Server) principalFor(r *http.Request) (*principal, string) {
 	if tok := bearer(r); tok != "" {
 		if !*s.cfg.AllowStaticTokens {
-			return nil, "static admin tokens are disabled; sign in with SSO"
+			return nil, "static admin tokens are disabled; sign in to the console"
 		}
 		hash := store.HashSecret(tok)
 		for _, t := range s.cfg.AdminTokens {
@@ -231,37 +251,9 @@ func (s *Server) principalFor(r *http.Request) (*principal, string) {
 	if s.cfg.RequireMFA && !ss.MFA {
 		return nil, "multi-factor authentication required"
 	}
-	return &principal{User: ss.Username, Role: ss.Role, Source: "sso", MFA: ss.MFA}, ""
-}
-
-// ---- user management ----
-
-func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.ListUsers(r.Context())
-	if err != nil {
-		s.fail(w, err)
-		return
+	src := "sso"
+	if ss.Source == "password" {
+		src = "password"
 	}
-	writeJSON(w, 200, v)
-}
-
-func (s *Server) userAction(w http.ResponseWriter, r *http.Request) {
-	var body reasonBody
-	if !decode(w, r, &body) {
-		return
-	}
-	var disabled bool
-	switch r.PathValue("action") {
-	case "disable":
-		disabled = true
-	case "enable":
-	default:
-		writeErr(w, 404, "unknown action")
-		return
-	}
-	if err := s.store.SetUserDisabled(r.Context(), actor(r), r.PathValue("name"), disabled, body.Reason); err != nil {
-		s.fail(w, err)
-		return
-	}
-	writeJSON(w, 200, map[string]bool{"ok": true})
+	return &principal{User: ss.Username, Role: ss.Role, Source: src, MFA: ss.MFA, MustChangePassword: ss.MustChangePassword}, ""
 }

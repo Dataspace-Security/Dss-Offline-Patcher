@@ -64,6 +64,15 @@ type Deployment struct {
 	CreatedAt    string         `json:"created_at"`
 	UpdatedAt    string         `json:"updated_at"`
 	Counts       map[string]int `json:"counts"`
+	// Two-person approval (deploy_approval.go): a deployment starts in
+	// pending_approval and becomes active once ApprovalsRequired different
+	// people (not the creator) approved it. ApprovalsRequired 0: created
+	// before approvals existed. ActivatedAt: when it started.
+	Approvals         []Approval `json:"approvals"`
+	ApprovalsRequired int        `json:"approvals_required"`
+	RejectedBy        string     `json:"rejected_by"`
+	RejectedAt        string     `json:"rejected_at"`
+	ActivatedAt       string     `json:"activated_at"`
 }
 
 type DeploymentDetail struct {
@@ -90,14 +99,15 @@ type Target struct {
 	Evidence string `json:"evidence,omitempty"`
 }
 
-const depCols = `deployment_id,package_id,name,state,emergency,justification,rings,current_ring,max_failure_pct,max_retries,window_start,window_end,created_by,created_at,updated_at,state_reason,deadline,max_concurrent,reboot_policy,ignore_windows,health_checks,operation,auto_advance`
+const depCols = `deployment_id,package_id,name,state,emergency,justification,rings,current_ring,max_failure_pct,max_retries,window_start,window_end,created_by,created_at,updated_at,state_reason,deadline,max_concurrent,reboot_policy,ignore_windows,health_checks,operation,auto_advance,approvals_required,rejected_by,rejected_at,activated_at`
 
 func scanDeployment(sc interface{ Scan(...any) error }) (Deployment, error) {
 	var d Deployment
 	var em, iw, aa int
 	var rings, hc string
 	err := sc.Scan(&d.DeploymentID, &d.PackageID, &d.Name, &d.State, &em, &d.Justification, &rings, &d.CurrentRing, &d.MaxFailurePct, &d.MaxRetries,
-		&d.WindowStart, &d.WindowEnd, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt, &d.StateReason, &d.Deadline, &d.MaxConcurrent, &d.RebootPolicy, &iw, &hc, &d.Operation, &aa)
+		&d.WindowStart, &d.WindowEnd, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt, &d.StateReason, &d.Deadline, &d.MaxConcurrent, &d.RebootPolicy, &iw, &hc, &d.Operation, &aa,
+		&d.ApprovalsRequired, &d.RejectedBy, &d.RejectedAt, &d.ActivatedAt)
 	if err != nil {
 		return d, err
 	}
@@ -108,6 +118,7 @@ func scanDeployment(sc interface{ Scan(...any) error }) (Deployment, error) {
 		d.HealthChecks = []HealthCheck{}
 	}
 	d.Counts = map[string]int{}
+	d.Approvals = []Approval{}
 	return d, nil
 }
 
@@ -130,6 +141,9 @@ func getDeploymentCounted(ctx context.Context, q querier, id string) (Deployment
 }
 
 func fillCounts(ctx context.Context, q querier, d *Deployment) error {
+	if err := fillApprovals(ctx, q, d); err != nil {
+		return err
+	}
 	rows, err := q.QueryContext(ctx, `SELECT state, COUNT(*) FROM targets WHERE deployment_id=? GROUP BY state`, d.DeploymentID)
 	if err != nil {
 		return err
@@ -348,18 +362,18 @@ func (s *Store) CreateDeployment(ctx context.Context, actor string, n NewDeploym
 		}
 		// An install and a rollback of the same package would undo each other.
 		var other string
-		err = tx.QueryRow(`SELECT deployment_id FROM deployments WHERE package_id=? AND state IN ('active','paused') AND operation != ? LIMIT 1`, n.PackageID, n.Operation).Scan(&other)
+		err = tx.QueryRow(`SELECT deployment_id FROM deployments WHERE package_id=? AND state IN ('pending_approval','active','paused') AND operation != ? LIMIT 1`, n.PackageID, n.Operation).Scan(&other)
 		if err == nil {
-			return Errf(ErrConflict, "deployment %s (%s) of this package is still active or paused; cancel it first", other, map[bool]string{true: "install", false: "rollback"}[rollback])
+			return Errf(ErrConflict, "deployment %s (%s) of this package is still waiting for approval, active or paused; cancel it first", other, map[bool]string{true: "install", false: "rollback"}[rollback])
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
 		// One running deployment per package and operation: a second one
 		// would target the same machines again (duplicate work, confusing
 		// progress). Wait for it to finish, or cancel it first.
-		err = tx.QueryRow(`SELECT deployment_id FROM deployments WHERE package_id=? AND state IN ('active','paused') AND operation = ? LIMIT 1`, n.PackageID, n.Operation).Scan(&other)
+		err = tx.QueryRow(`SELECT deployment_id FROM deployments WHERE package_id=? AND state IN ('pending_approval','active','paused') AND operation = ? LIMIT 1`, n.PackageID, n.Operation).Scan(&other)
 		if err == nil {
-			return Errf(ErrConflict, "deployment %s of this package is already running; open it, wait for it to finish, or cancel it first", other)
+			return Errf(ErrConflict, "deployment %s of this package is already running or waiting for approval; open it, wait for it to finish, or cancel it first", other)
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
@@ -376,9 +390,10 @@ func (s *Store) CreateDeployment(ctx context.Context, actor string, n NewDeploym
 		if n.Emergency {
 			em = 1
 		}
-		if _, err := tx.Exec(`INSERT INTO deployments(`+depCols+`) VALUES(?,?,?,'active',?,?,?,0,?,?,?,?,?,?,?,'',?,?,?,?,?,?,?)`,
+		need := s.Policy.RequiredDeploymentApprovals()
+		if _, err := tx.Exec(`INSERT INTO deployments(`+depCols+`) VALUES(?,?,?,'pending_approval',?,?,?,0,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'','','')`,
 			id, n.PackageID, n.Name, em, n.Justification, mustJSON(n.Rings), n.MaxFailurePct, n.MaxRetries, n.WindowStart, n.WindowEnd, actor, now, now,
-			n.Deadline, n.MaxConcurrent, n.RebootPolicy, boolInt(n.IgnoreWindows), mustJSON(n.HealthChecks), n.Operation, boolInt(n.AutoAdvance)); err != nil {
+			awaitingReason(0, need), n.Deadline, n.MaxConcurrent, n.RebootPolicy, boolInt(n.IgnoreWindows), mustJSON(n.HealthChecks), n.Operation, boolInt(n.AutoAdvance), need); err != nil {
 			return err
 		}
 		action := "deployment.created"
@@ -392,16 +407,14 @@ func (s *Store) CreateDeployment(ctx context.Context, actor string, n NewDeploym
 			Details: map[string]any{"name": n.Name, "rings": n.Rings, "max_failure_pct": n.MaxFailurePct, "max_retries": n.MaxRetries,
 				"window": n.WindowStart + "-" + n.WindowEnd, "emergency": n.Emergency, "justification": n.Justification,
 				"deadline": n.Deadline, "max_concurrent": n.MaxConcurrent, "reboot_policy": n.RebootPolicy, "ignore_windows": n.IgnoreWindows, "health_checks": n.HealthChecks, "operation": n.Operation,
-				"auto_advance": n.AutoAdvance}}); err != nil {
+				"auto_advance": n.AutoAdvance, "approvals_required": need}}); err != nil {
 			return err
 		}
-		if err := s.ensureTargetsForDeployment(ctx, tx, id); err != nil {
-			return err
-		}
-		// Every target may already be terminal (e.g. verified because the
-		// inventory shows the package): completion is otherwise only
-		// evaluated on agent reports, which will never come.
-		if err := s.evaluateDeployment(ctx, tx, id, false); err != nil {
+		// No targets yet: nothing is dispatched until the approvals are in
+		// (activateDeployment).
+		kind := map[bool]string{true: "Rollback", false: "Deployment"}[rollback]
+		if err := s.raiseAlert(tx, "info", "deployment_awaiting_approval", "deployment", id,
+			fmt.Sprintf("%s %q of %s by %s is waiting for %d approval(s)", kind, n.Name, n.PackageID, strings.TrimPrefix(actor, "user:"), need)); err != nil {
 			return err
 		}
 		out, err = getDeploymentCounted(ctx, tx, id)
@@ -485,7 +498,7 @@ func (s *Store) DeploymentAction(ctx context.Context, actor, id, action, reason 
 			}
 			to = "active"
 		case "cancel":
-			if d.State != "active" && d.State != "paused" {
+			if d.State != "active" && d.State != "paused" && d.State != "pending_approval" {
 				return Errf(ErrConflict, "cannot cancel a %s deployment", d.State)
 			}
 			to = "cancelled"
@@ -507,6 +520,11 @@ func (s *Store) DeploymentAction(ctx context.Context, actor, id, action, reason 
 		}
 		if _, err := tx.Exec(`UPDATE deployments SET state=?, current_ring=?, state_reason=?, updated_at=? WHERE deployment_id=?`, to, ring, reason, s.now(), id); err != nil {
 			return err
+		}
+		if d.State == "pending_approval" {
+			if err := s.resolveAlert(tx, "deployment_awaiting_approval", id, "cancelled by "+strings.TrimPrefix(actor, "user:")); err != nil {
+				return err
+			}
 		}
 		evAction := "deployment." + map[string]string{"pause": "paused", "resume": "resumed", "cancel": "cancelled", "advance": "advanced"}[action]
 		if err := s.audit(tx, Ev{Actor: actor, Action: evAction, ObjectType: "deployment", ObjectID: id, PackageID: d.PackageID,

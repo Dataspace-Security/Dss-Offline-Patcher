@@ -42,7 +42,7 @@ func (e *env) deploy(n store.NewDeployment) store.Deployment {
 		n.MaxFailurePct = 100
 	}
 	var d store.Deployment
-	if c := e.api("POST", "/api/deployments", tokOperator, n, &d); c != 201 {
+	if c := e.createDep(tokOperator, n, &d); c != 201 {
 		e.t.Fatalf("deploy: %d", c)
 	}
 	return d
@@ -165,7 +165,7 @@ func TestScheduling(t *testing.T) {
 	// ---- health checks feed auto-pause ----
 	h1 := e.enroll("pc-h1", []string{"health"}, agent.SimConfig{UnhealthyServices: []string{"Spooler"}})
 	e.enroll("pc-h2", []string{"health"}, agent.SimConfig{})
-	if c := e.api("POST", "/api/deployments", tokOperator, store.NewDeployment{PackageID: "KB5000102-x64", Name: "bad check", Rings: all,
+	if c := e.createDep(tokOperator, store.NewDeployment{PackageID: "KB5000102-x64", Name: "bad check", Rings: all,
 		HealthChecks: []store.HealthCheck{{Type: "run_script", Name: "rm -rf /"}}, MaxFailurePct: 10}, nil); c != 400 {
 		t.Fatalf("arbitrary health check type accepted: %d", c)
 	}

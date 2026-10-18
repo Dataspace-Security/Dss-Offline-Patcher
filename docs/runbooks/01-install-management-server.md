@@ -54,9 +54,14 @@ What it does (covers steps 1-5, 7 and 8 below, plus the daily backup of runbook 
   It never generates signing keys. `--pubkey` is required on the first install. Existing `.pub`
   files are never overwritten (rotate keys with runbook 03).
 - Creates the internal CA and server certificate for `--hosts` (step 2).
-- Creates the break-glass admin token and **prints it once**. Only its SHA-256 is stored, in
-  `pmserver.json`. Put the token in the safe. If it is lost, create a new one (step 4) and replace
-  `token_sha256`.
+- Creates the **built-in super admin** (the vendor's console account) with `--admin-email`
+  (default `superadmin@offpatch.local`) and a random password, and **prints both once** at the end.
+  Only the PBKDF2 hash is stored (in the database); there is no password in the release or the
+  config. Sign in with it and create the bank's first Admin (Settings → Users). Lost it: step 4b.
+- Creates the break-glass admin token (role `super_admin`) and **prints it once**. Only its SHA-256
+  is stored, in `pmserver.json`. Put the token in the safe. It is for the API and automation; in the
+  console it is only accepted at `/login?token=1`. If it is lost, create a new one (step 4) and
+  replace `token_sha256`.
 - Writes `/etc/offpatch/pmserver.json` on the first install only and never changes it afterwards.
   Edit it for SSO, notifications, metrics and so on (steps 5, 6, 10), then
   `systemctl restart offpatch-server`.
@@ -71,7 +76,9 @@ What it does (covers steps 1-5, 7 and 8 below, plus the daily backup of runbook 
 - Warns loudly if `--audit-dir` is on the same filesystem as the data, and if NTP is not synchronized.
 
 Upgrade: run the same command from the new release. It takes a verified pre-upgrade backup, keeps
-the previous binaries in `/opt/offpatch/bin.prev`, and keeps keys, PKI, token, config and data. Port,
+the previous binaries in `/opt/offpatch/bin.prev`, and keeps keys, PKI, token, config and data. If no
+local super admin exists yet (an install from before local users), the upgrade creates the built-in
+super admin and prints its email and password once. Port,
 TLS mode and audit directory come from the existing `pmserver.json`; a conflicting flag is refused.
 
 Then continue with steps 6 (SSO), 9 (audit storage), 10 (metrics) and 11 (network) below, using the
@@ -133,6 +140,26 @@ as exposed (runbook 04).
 
 Repeat for any automation accounts (one token per user/role).
 
+### 4b. Create the built-in super admin (console sign-in)
+
+After step 5 (the command reads the config to find the database):
+
+```bash
+sudo -u offpatch /usr/local/bin/pmserver create-admin -config /etc/offpatch-server/pmserver.json \
+     -email superadmin@offpatch.local
+# email:    superadmin@offpatch.local
+# password: …            → shown ONCE; only its PBKDF2 hash is stored
+```
+
+`-if-none` makes it a no-op when an enabled local super admin exists. Recovery when the password is
+lost (root on the server; also re-enables the account and clears a lockout, audited
+`user.password_reset` by `system:cli`):
+
+```bash
+sudo -u offpatch /usr/local/bin/pmserver reset-admin -config /etc/offpatch-server/pmserver.json \
+     -email superadmin@offpatch.local
+```
+
 ### 5. Write the configuration
 
 Start from `packaging/server/pmserver.example.json`. Minimal production config:
@@ -144,7 +171,7 @@ Start from `packaging/server/pmserver.example.json`. Minimal production config:
   "pki_dir": "/etc/offpatch-server/pki",
   "trusted_keys": [{"public_key_file": "/etc/offpatch-server/bundle.pub", "sources": ["acq-zone-1"]}],
   "root_public_key_file": "/etc/offpatch-server/root.pub",
-  "admin_tokens": [{"user": "breakglass", "role": "admin", "token_sha256": "<from step 4>"}],
+  "admin_tokens": [{"user": "breakglass", "role": "super_admin", "token_sha256": "<from step 4>"}],
   "audit_export_dir": "/mnt/audit-worm/offpatch",
   "metrics_token": "<random secret>"
 }
@@ -168,7 +195,9 @@ Rules enforced at startup (the server refuses to start otherwise):
 
 - Unknown keys are rejected (a typo is a startup error, not silently ignored).
 - At least one `trusted_keys` entry, each with `sources`.
-- `oidc`, or at least one `admin_tokens` entry with `allow_static_tokens` not `false`.
+- With neither `oidc` nor a usable `admin_tokens` entry, console sign-in is email + password only
+  (local users): pmserver starts and logs a warning; create the super admin (step 4b).
+- `deployment_approvals` is 1–5.
 - **TLS is required**: set `pki_dir` (uses `pki/server.pem` and `server.key`) or `tls_cert` + `tls_key`.
   `pki_dir` is required whenever TLS is on, because it issues the endpoint client certificates.
   `insecure_http: true` is for an isolated lab only and cannot be combined with TLS settings.
@@ -188,11 +217,12 @@ All keys (`internal/server/config.go`, `internal/oidc/oidc.go`, `internal/server
 | `insecure_http` | `false` | Lab only: plain HTTP, agents use bearer secrets. |
 | `trusted_keys[]` | required | `public_key_file` or `public_key` (PEM), `sources[]`. Once a signed trust document has been accepted, it replaces this list for intake (runbook 03). |
 | `root_public_key_file` | — | Enables signed trust documents (key rotation / revocation). |
-| `admin_tokens[]` | — | `user`, `role` (`viewer`/`operator`/`approver`/`admin`), `token_sha256`. |
+| `admin_tokens[]` | — | `user`, `role` (`viewer`/`user`/`admin`/`super_admin`; `operator` and `approver` mean `user`), `token_sha256`. A token name cannot be taken by a local user. |
+| `deployment_approvals` | `2` | Different bank users/admins (not the creator) who approve each deployment and rollback before it starts (1–5; an isolated single-person lab may use 1). |
 | `allow_static_tokens` | `true` (also with `oidc`) | `false` disables all bearer admin tokens. Configuring `oidc` does not change the default. At startup pmserver logs `admin sign-in: ...` saying which methods work; a warning if `admin_tokens` are configured but disabled. |
 | `oidc` | — | See step 6. |
-| `session_ttl` | `8h` | SSO session lifetime. |
-| `require_mfa` | `false` | Refuse SSO logins and sessions without MFA. By design it does not apply to static (break-glass) tokens. |
+| `session_ttl` | `8h` | Console session lifetime (SSO and email + password). |
+| `require_mfa` | `false` | Refuse SSO logins and sessions without MFA, and switch email + password sign-in off. By design it does not apply to static (break-glass) tokens. |
 | `approval_policy` | 1 per severity | e.g. `{"critical": 2, "important": 2}`. |
 | `separation_of_duties` | `false` | An approver of a package cannot deploy it. |
 | `patch_deadlines` | critical `168h`, important `720h`, moderate `1440h`, low `2160h` | Release-to-install deadlines used in reports and the `overdue` metric. |
@@ -338,6 +368,9 @@ curl --cacert /etc/offpatch-server/pki/ca.pem -H "Authorization: Bearer $TOK" ht
 curl --cacert /etc/offpatch-server/pki/ca.pem -H "Authorization: Bearer <metrics_token>" https://pm.corp.internal:8443/metrics | head
 ```
 
+- Sign in to the console with the built-in super admin (email + password); `GET /api/me` shows
+  `auth: "password"`, `role: "super_admin"`, `builtin: true`. Create a bank Admin and two bank Users;
+  check that a deployment needs two of them to approve.
 - Sign in to the console with SSO as a member of each role group; `GET /api/me` shows
   `source: "sso"` and `mfa: true`. A user in no role group is refused (`auth.login_denied`).
 - Agent setup page lists the trusted key, `ca.pem` and the staged files.
@@ -346,6 +379,30 @@ curl --cacert /etc/offpatch-server/pki/ca.pem -H "Authorization: Bearer <metrics
 - After the first update intelligence arrives: `GET /api/summary` shows `intel.stale: false`, and
   **Patches → Library** lists apps (`GET /api/library?view=all` returns a non-zero `total`).
 - Take the first backup and verify it (runbook 05).
+
+### Upgrading to the roles release (email + password users, two-person deployment approval)
+
+- The database migrates by itself on start (table `local_users`, `deployment_approvals`; new
+  columns on `deployments` and `sessions`). Deployments that are already `active` or `paused` keep
+  running (`approvals_required` 0); **every new deployment and rollback waits for two approvals** from
+  bank Users/Admins other than its creator. In a single-person lab set `"deployment_approvals": 1` in
+  `pmserver.json` and restart; there you still need one bank User or Admin who did not create it (the
+  super admin does not approve).
+- Roles: `operator` and `approver` are now both `user`. Users gain package approval; package revoke
+  and exceptions now need `admin`. Check `oidc.role_groups` and `admin_tokens` against
+  docs/07-admin-guide.md §2.
+- An existing break-glass token with `"role": "admin"` stays admin (it can manage bank users but not
+  super admins). To make it the vendor super admin, set `"role": "super_admin"` on that entry in
+  `/etc/offpatch/pmserver.json` and restart (owner and mode of the file are kept):
+
+  ```bash
+  sudo python3 -c 'import json; p="/etc/offpatch/pmserver.json"; c=json.load(open(p)); [t.update(role="super_admin") for t in c["admin_tokens"] if t["user"]=="admin"]; json.dump(c, open(p,"w"), indent=2)'
+  sudo systemctl restart offpatch-server
+  ```
+- The installer upgrade creates the built-in super admin (`--admin-email`, default
+  `superadmin@offpatch.local`) when no local super admin exists, and prints its password once. Without
+  the installer: step 4b.
+- The console now signs in with email + password; tokens only at `/login?token=1`.
 
 ### Upgrading to the P2 release (Library, evidence, alerts that close themselves)
 
@@ -378,4 +435,5 @@ curl --cacert /etc/offpatch-server/pki/ca.pem -H "Authorization: Bearer <metrics
 - Final `pmserver.json` (without secrets) and its hash, in the change record.
 - CA fingerprint printed by `init-pki`.
 - Who holds the break-glass token and where it is stored.
+- Who holds the built-in super admin password (vendor) and when it was last changed or reset.
 - First successful `GET /api/audit/verify` and first backup `verify-backup` output.

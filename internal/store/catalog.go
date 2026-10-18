@@ -523,7 +523,7 @@ func (s *Store) SetPackageState(ctx context.Context, actor, id, action, reason s
 		if action == "revoke" {
 			// No new installs of revoked content. Rollbacks keep running: removing
 			// a bad package is often why it was revoked.
-			rows, err := tx.Query(`SELECT deployment_id FROM deployments WHERE package_id=? AND state IN ('active','paused') AND operation='install'`, id)
+			rows, err := tx.Query(`SELECT deployment_id FROM deployments WHERE package_id=? AND state IN ('pending_approval','active','paused') AND operation='install'`, id)
 			if err != nil {
 				return err
 			}
@@ -536,6 +536,9 @@ func (s *Store) SetPackageState(ctx context.Context, actor, id, action, reason s
 			rows.Close()
 			for _, d := range ids {
 				if _, err := tx.Exec(`UPDATE deployments SET state='cancelled', state_reason=?, updated_at=? WHERE deployment_id=?`, "package revoked: "+reason, now, d); err != nil {
+					return err
+				}
+				if err := s.resolveAlert(tx, "deployment_awaiting_approval", d, "package revoked"); err != nil {
 					return err
 				}
 				if err := s.audit(tx, Ev{Actor: actor, Action: "deployment.cancelled", ObjectType: "deployment", ObjectID: d, PackageID: id,
