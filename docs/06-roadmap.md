@@ -21,7 +21,7 @@ The software now supports each choice; it no longer blocks on any of them. Each 
 | # | Decision | What the software supports |
 |---|---|---|
 | A1 | Transfer product | `transfer.Adapter`: drop directory, or `pmctl send -via command` for a vendor upload CLI. Both use signed receipts and reconciliation. |
-| A2 | Identity provider and MFA | Generic OIDC (AD FS, Entra ID, Okta, Keycloak). `require_mfa`; role mapping from groups. |
+| A2 | Identity provider and MFA | Generic OIDC (AD FS, Entra ID, Okta, Keycloak). `require_mfa`; role mapping from groups. Local email + password users with a built-in authenticator app (TOTP) step, required for bank roles. |
 | A3 | Signing-key custody | `pmctl -key exec:<hsm-cli>` external signer. Offline root key with trust documents. |
 | A4 | Scale | 20k endpoints measured at ~2,000 check-ins/s, about 60k at a 60 s interval ([09-capacity.md](09-capacity.md)). |
 | A5 | Maintenance and reboot policy | Per-group windows (time zones, reboot permission), deadlines, `reboot_policy`, per-severity `patch_deadlines`. |
@@ -33,7 +33,7 @@ The software now supports each choice; it no longer blocks on any of them. Each 
 | | Item | Status | Evidence |
 |---|---|---|---|
 | B1 | Validate the agent on real Windows | ⏳ **Blocked: needs a Windows VM.** The Windows build compiles and vets. Exit codes follow Microsoft documentation. The same agent core is validated for real on Linux (dpkg, rpm, self-upgrade) and on macOS (read-only inventory). | `platform_windows.go` |
-| B2 | IdP login, MFA, separation of duties | ✅ | `e2e/sso_test.go`, `oidc/oidc_test.go` |
+| B2 | IdP login, MFA, separation of duties | ✅ Local users: TOTP authenticator required for bank roles; static admin tokens removed (v1.9). | `e2e/sso_test.go`, `oidc/oidc_test.go`, `server/mfa_test.go`, `store/mfa_test.go` |
 | B3 | mTLS agent identity with renewal; retire endpoint | ✅ | `e2e/mtls_test.go` |
 | B4 | TLS mandatory | ✅ Plain HTTP only with an explicit `insecure_http` lab flag. | `TestTLSRequiredByDefault` |
 | B5 | HSM signing; key rotation and revocation; agent trust updates | ✅ Compromised keys auto-revoke their packages. | `e2e/keys_test.go`, `cmd/pmctl/signer_test.go` |
@@ -88,7 +88,7 @@ Owner: **You** = whoever runs this project · **Org** = security / operations / 
 | T2 | **Validate on real Windows** (B1): agent install, `.msu` and `.msi` installs, Windows service + restart after self-upgrade, build and install the **MSI** (`packaging/windows`), Authenticode check in `pmctl build`, `product_code_from_msi` | Eng | Needs a Windows 10/11 and a Windows Server test VM. Linux and macOS are already validated for real. |
 | T3 | **Upgrade to Go 1.27.2** and rerun `scripts/security-check.sh` | Eng | Clears 10 standard-library CVEs flagged by govulncheck. |
 | T4 | **Settle section A decisions** (A1–A7): transfer product, IdP + MFA, key custody (HSM), scale, maintenance/reboot policy, audit retention + scanner, security review | Org | The software already supports each choice via config. |
-| T5 | **Production install**: TLS + PKI (`pmserver init-pki`), SSO, disable static tokens or keep as break-glass, audit export to WORM storage, backups scheduled | Eng + Org | Runbooks 01, 05, 07. The demo runs in `insecure_http` lab mode. |
+| T5 | **Production install**: TLS + PKI (`pmserver init-pki`), SSO and/or local users with MFA, the built-in super admin's default password changed, audit export to WORM storage, backups scheduled | Eng + Org | Runbooks 01, 05, 07. The demo runs in `insecure_http` lab mode. |
 | T6 | **Penetration test** against the scope in `docs/security/README.md` | Org (external) | B11. |
 
 ### P2 — for production rollout

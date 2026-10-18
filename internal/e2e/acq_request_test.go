@@ -69,7 +69,7 @@ func TestAcquisitionRequestExport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("exported file does not parse: %v\n%s", err, raw)
 	}
-	if req.CreatedBy != "user:otto" || req.IntelGeneratedAt != gen || len(req.Apps) != 2 || len(req.KBs) != 2 {
+	if req.CreatedBy != "user:otto@bank.test" || req.IntelGeneratedAt != gen || len(req.Apps) != 2 || len(req.KBs) != 2 {
 		t.Fatalf("request: %+v", req)
 	}
 	apps := map[string]acqrequest.App{}
@@ -95,7 +95,7 @@ func TestAcquisitionRequestExport(t *testing.T) {
 	e.api("GET", "/api/audit", tokViewer, nil, &audit)
 	found := false
 	for _, ev := range audit {
-		if ev.Action == "acquisition.request_exported" && ev.ObjectID == req.RequestID && ev.Actor == "user:otto" &&
+		if ev.Action == "acquisition.request_exported" && ev.ObjectID == req.RequestID && ev.Actor == "user:otto@bank.test" &&
 			strings.Contains(string(ev.Details), "Google.Chrome@155.0.8059.85") && strings.Contains(string(ev.Details), "KB5044280/x64") && strings.Contains(string(ev.Details), "KB5044280/arm64") {
 			found = true
 		}

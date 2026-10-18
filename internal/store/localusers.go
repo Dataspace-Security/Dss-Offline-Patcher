@@ -90,13 +90,12 @@ func checkManage(by Manager, targetRole, newRole string) error {
 	return nil
 }
 
-// otherSuperAdmins counts super admins that can still sign in besides
-// email: enabled local super admins and static super_admin tokens.
+// otherSuperAdmins counts enabled local super admins besides email.
 func (s *Store) otherSuperAdmins(tx *sql.Tx, email string) (int, error) {
 	var n int
 	err := tx.QueryRow(`SELECT COUNT(*) FROM local_users l JOIN users u ON u.username=l.email
 		WHERE l.role=? AND u.disabled=0 AND l.email != ?`, RoleSuperAdmin, email).Scan(&n)
-	return n + s.Policy.TokenSuperAdmins, err
+	return n, err
 }
 
 // CreateLocalUser adds an email + password user. mustChange: the password
@@ -122,8 +121,7 @@ func (s *Store) createLocalUser(ctx context.Context, by Manager, n NewLocalUser,
 	if role == "" {
 		return out, Errf(ErrInvalid, "role must be one of %s", strings.Join(Roles, ", "))
 	}
-	name, err := cleanDisplayName(n.DisplayName, email)
-	if err != nil {
+	if _, err := cleanDisplayName(n.DisplayName, email); err != nil {
 		return out, err
 	}
 	if err := ValidatePassword(email, n.Password); err != nil {
@@ -132,11 +130,30 @@ func (s *Store) createLocalUser(ctx context.Context, by Manager, n NewLocalUser,
 	if err := checkManage(by, "", role); err != nil {
 		return out, err
 	}
-	if s.Policy.ReservedUsers[email] {
-		return out, Errf(ErrConflict, "%s is the name of a static admin token", email)
-	}
 	hash, err := HashPassword(n.Password) // outside the transaction: hashing is slow
 	if err != nil {
+		return out, err
+	}
+	return s.createLocalUserHash(ctx, by, n, hash, mustChange, builtin)
+}
+
+// createLocalUserHash creates a local user whose password hash is given
+// (createLocalUser hashes a new password; the built-in default is embedded).
+func (s *Store) createLocalUserHash(ctx context.Context, by Manager, n NewLocalUser, hash string, mustChange, builtin bool) (LocalUserCreated, error) {
+	var out LocalUserCreated
+	email, err := NormalizeEmail(n.Email)
+	if err != nil {
+		return out, err
+	}
+	role := CanonicalRole(n.Role)
+	if role == "" {
+		return out, Errf(ErrInvalid, "role must be one of %s", strings.Join(Roles, ", "))
+	}
+	name, err := cleanDisplayName(n.DisplayName, email)
+	if err != nil {
+		return out, err
+	}
+	if err := checkManage(by, "", role); err != nil {
 		return out, err
 	}
 	err = s.tx(ctx, func(tx *sql.Tx) error {
@@ -312,6 +329,12 @@ type PasswordLogin struct {
 	Email              string
 	Role               string
 	MustChangePassword bool
+	// MFAPending: the password was right and the user has an authenticator
+	// enrolled: no session yet (Token ""); LoginMFA completes the sign-in.
+	MFAPending bool
+	// MFAEnrollment: MFA is required but not enrolled: Token is a session
+	// limited to enrolment (and the forced password change).
+	MFAEnrollment bool
 }
 
 // auditName is what a failed sign-in records as the attempted name: only
@@ -378,11 +401,54 @@ func (s *Store) LoginPassword(ctx context.Context, email, password string, ttl t
 	if _, err := s.db.ExecContext(ctx, `UPDATE local_users SET failed_attempts=0, locked_until='' WHERE email=?`, email); err != nil {
 		return PasswordLogin{}, err
 	}
-	tok, err := s.Login(ctx, email, role, email, "password", false, ttl)
+	res := PasswordLogin{Email: email, Role: canonicalOr(role), MustChangePassword: must == 1}
+	enrolled, err := s.MFAEnrolled(ctx, email)
 	if err != nil {
 		return PasswordLogin{}, err
 	}
-	return PasswordLogin{Token: tok, Email: email, Role: role, MustChangePassword: must == 1}, nil
+	if enrolled {
+		// Disabled accounts are refused here already (no second step for them).
+		var disabled int
+		s.db.QueryRowContext(ctx, `SELECT disabled FROM users WHERE username=?`, email).Scan(&disabled)
+		if disabled == 1 {
+			s.Audit(ctx, Ev{Actor: "user:" + email, Action: "auth.login_denied", ObjectType: "user", ObjectID: email, Failure: true,
+				Details: map[string]any{"reason": "user disabled", "source": "password"}})
+			return PasswordLogin{}, ErrDisabled
+		}
+		res.MFAPending = true
+		return res, s.Audit(ctx, Ev{Actor: "user:" + email, Action: "auth.password_verified", ObjectType: "user", ObjectID: email,
+			Details: map[string]any{"next": "mfa"}})
+	}
+	res.MFAEnrollment = s.MFARequired(res.Role)
+	tok, err := s.login(ctx, email, role, email, "password", false, res.MFAEnrollment, ttl)
+	if err != nil {
+		return PasswordLogin{}, err
+	}
+	res.Token = tok
+	return res, nil
+}
+
+// recordAuthFailure counts a wrong password or MFA code towards the
+// lockout (MaxFailedLogins in a row lock the account for LockFor).
+func (s *Store) recordAuthFailure(ctx context.Context, email, what string) (bool, error) {
+	var locked bool
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		var n int
+		if err := tx.QueryRow(`UPDATE local_users SET failed_attempts=failed_attempts+1 WHERE email=? RETURNING failed_attempts`, email).Scan(&n); err != nil {
+			return err
+		}
+		if n < MaxFailedLogins {
+			return nil
+		}
+		locked = true
+		until := s.Now().Add(LockFor).UTC().Format(time.RFC3339Nano)
+		if _, err := tx.Exec(`UPDATE local_users SET failed_attempts=0, locked_until=? WHERE email=?`, until, email); err != nil {
+			return err
+		}
+		return s.audit(tx, Ev{Actor: "system:auth", Action: "auth.locked", ObjectType: "user", ObjectID: email, Failure: true,
+			Details: map[string]any{"failed_attempts": n, "locked_until": until, "last_failure": what}})
+	})
+	return locked, err
 }
 
 // ChangeOwnPassword: a signed-in local user replaces their password (also
@@ -489,8 +555,14 @@ func (s *Store) RecoverSuperAdmin(ctx context.Context, email, password string) e
 		if _, err := tx.Exec(`UPDATE sessions SET revoked=1 WHERE username=?`, email); err != nil {
 			return err
 		}
+		// Recovery also clears the authenticator (lost phone): re-enrol later.
+		res, err := tx.Exec(`DELETE FROM mfa WHERE email=?`, email)
+		if err != nil {
+			return err
+		}
+		cleared, _ := res.RowsAffected()
 		return s.audit(tx, Ev{Actor: "system:cli", Action: "user.password_reset", ObjectType: "user", ObjectID: email,
-			Details: map[string]any{"via": "pmserver reset-admin", "re_enabled": t.disabled}})
+			Details: map[string]any{"via": "pmserver reset-admin", "re_enabled": t.disabled, "mfa_cleared": cleared > 0}})
 	})
 }
 

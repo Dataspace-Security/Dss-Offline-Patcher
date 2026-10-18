@@ -54,7 +54,7 @@ Nothing is deployable when it arrives. The pipeline is:
    → extracted to <data_dir>/quarantine/…         (never served to endpoints)
    → checks run (see §8, "bundle rejected")
    → bundle "validated" → each new package is "quarantined" in the Catalog
-   → an approver approves → content is copied to <data_dir>/repository/ (read-only, by SHA-256)
+   → a bank user approves → content is copied to <data_dir>/repository/ (read-only, by SHA-256)
    → package "approved" → only now can a deployment be created
 ```
 
@@ -137,38 +137,63 @@ intelligence a machine with nothing deployed to it is `compliant`.
 ## 2. Roles and sign-in
 
 Roles are cumulative: `viewer` < `user` < `admin` < `super_admin`. The bank has Admins, Users and
-Viewers; the **super admin is the vendor** (setup and support). Older role names in the config or the
-IdP mapping still work: `operator` and `approver` both mean `user`.
+Viewers; the **super admin is the vendor** (setup and support). These are the only role names: the
+old names `operator` and `approver` were removed. pmserver refuses to start when the config or
+`oidc.role_groups` still uses one (the error names the old value); users and sessions stored with an
+old name are moved to `user` automatically.
 
 | Role | Can do (in addition to the roles below it) |
 |---|---|
 | `viewer` | Read everything: Overview, Intake (bundles and transfer reconciliation), Catalog, Deployments, Windows, Endpoints, Agent setup (and download staged agent files), Exceptions, Reports (incl. CSV), Alerts, Audit (incl. verify and lifecycle export). No action buttons. |
-| `user` (bank) | Create enrollment tokens; edit endpoint groups/site/owner/criticality; retire endpoints; export acquisition requests; approve and reject packages; create deployments and rollbacks (they wait for two approvals); **approve or reject other people's deployments and rollbacks**; pause, resume, cancel, advance and retry deployments; create and delete maintenance windows; acknowledge alerts. |
-| `admin` (bank) | Users page: create local users, disable / enable, reset passwords and change roles of Users, Viewers and Admins; create and revoke exceptions; revoke packages. |
-| `super_admin` (vendor) | Everything, including super admin accounts. Not a deployment approver. |
+| `user` (bank) | Create enrollment tokens; edit endpoint groups/site/owner/criticality; retire endpoints; export acquisition requests; approve and reject packages; create deployments and rollbacks (they wait for two approvals); **approve or reject other people's deployments and rollbacks** (not agent versions); pause, resume, cancel, advance and retry deployments; create and delete maintenance windows; acknowledge alerts. |
+| `admin` (bank) | Users page: create, disable / enable and delete local users, reset passwords and MFA, change roles of Users, Viewers and Admins; create and revoke exceptions; revoke packages; **approve or reject agent-version deployments** (only bank admins can). |
+| `super_admin` (vendor) | Everything, including super admin accounts and **agent versions** (approve, reject, revoke, deploy and roll back packages of kind `agent`). Not a deployment approver, agent-version deployments included. |
 
 The console shows each role only what it can use; the server enforces the same table (a refused call
-is HTTP 403 and audited `access.denied`).
+is HTTP 403 and audited `access.denied`). The full matrix is in
+[roles-and-permissions.md](roles-and-permissions.md).
 
 ### Email + password sign-in (local users)
 
-- The sign-in page asks for **email and password**. An Admin creates users on **Settings → Users**
-  (email, name, role, temporary password, or let the server generate one: it is shown once).
+- The sign-in page asks for **email and password**, then for the 6-digit code from an
+  **authenticator app** (TOTP, RFC 6238, 30 s; any standard app). An Admin creates users on
+  **Settings → Users** (email, name, role, temporary password, or let the server generate one: it is
+  shown once).
+- **MFA is required for `viewer`, `user` and `admin`** and optional for `super_admin` (required for
+  every local user when `require_mfa` is set). At the first sign-in without an authenticator the user
+  can only enrol: the console shows a QR code (and the secret for manual entry); the user confirms
+  with a code and gets **10 recovery codes**, shown once. Each recovery code works once in place of an
+  authenticator code; they are stored hashed only.
 - At first sign-in with a temporary password the user must choose their own (at least 12 characters,
-  not the email). Until then nothing else works.
-- Five wrong passwords in a row lock the account for 15 minutes; an Admin can unlock it with
-  **Enable** or **Reset password**. Sign-in attempts are also limited per client address. The error is
-  always "wrong email or password", so nobody can find out which emails exist.
+  not the email) first, then enrol the authenticator. Until then nothing else works.
+- Each authenticator code works once. Five wrong passwords **or codes** in a row lock the account for
+  15 minutes; an Admin can unlock it with **Enable** or **Reset password**. Sign-in attempts are also
+  limited per client address. The error is always "wrong email or password" (or "wrong or expired
+  code"), so nobody can find out which emails exist.
+- **Reset MFA** (lost phone) removes the user's authenticator and recovery codes and signs them out;
+  they enrol again at the next sign-in. Admins reset bank roles; only a super admin resets a super
+  admin. A super admin may switch its own MFA off (with a current code) unless `require_mfa` is set.
 - **Reset password** gives a new temporary password and signs the user out everywhere. **Change role**
-  signs the user out (the new role applies at the next sign-in). Nobody can disable, demote or reset
-  themselves, and the last super admin cannot be disabled or demoted.
+  signs the user out (the new role applies at the next sign-in). **Delete** removes a local user's
+  account, sessions and MFA; the audit history stays (`user.deleted`) and the email can be reused. SSO
+  users cannot be deleted: disable them. Nobody can disable, demote, reset or delete themselves, and the
+  last super admin cannot be disabled, demoted or deleted.
+- Authenticator secrets are encrypted at rest (AES-256-GCM) with the key file `mfa_key_file`
+  (default `<data_dir>/mfa.key`), created by the installer or at first start. At the default path it is part of
+  `pmserver backup`; losing it loses every enrolment (everyone must be reset).
 - The installer creates the **built-in super admin** (`--admin-email`, default
-  `superadmin@offpatch.local`) with a random password it prints once. The super admin signs in and
-  creates the bank's first Admin. Lost password: on the server, as root,
+  `superadmin@dataspacesecurity.com`) with the vendor's **default password** (in the vendor
+  handbook; only its hash is in `pmserver`). Sign in and change it at once: until then the console
+  shows a change-password banner and pmserver logs a warning at every start. The super admin then
+  creates the bank's first Admin. `pmserver create-admin -password-random` creates it with a random
+  password printed once instead.
+- **Nobody can sign in** (lost password or authenticator): on the server, as root,
   `runuser -u offpatch -- /opt/offpatch/bin/pmserver reset-admin -config /etc/offpatch/pmserver.json -email <email>`
-  prints a new one (audited `user.password_reset` by `system:cli`).
-- With `require_mfa: true`, email + password sign-in is switched off (a password is one factor):
-  use SSO.
+  prints a new random password once, re-enables the account, clears the lockout and clears its MFA
+  (audited `user.password_reset` by `system:cli`). `pmserver create-admin` creates the built-in super
+  admin when none exists.
+- `require_mfa: true` makes the authenticator step required for every local user (super admins too)
+  and refuses SSO sessions without MFA from the IdP. Email + password sign-in stays available.
 
 Nobody can change the server configuration, trusted keys or audit settings from the console. Those
 live in `pmserver.json` and need OS access to the server plus a restart.
@@ -178,34 +203,30 @@ live in `pmserver.json` and need OS access to the server plus a restart.
 - When `oidc` is configured, the login page shows **Sign in with SSO** (OIDC authorization-code flow
   with PKCE, against AD FS, Entra ID, Okta, Keycloak or any standards-based IdP reachable from the
   isolated zone).
-- Your role comes from your IdP groups (`oidc.role_groups`). If you are in several mapped groups you
-  get the highest role. If you are in none, sign-in is refused and audited as `auth.login_denied`.
-- With `require_mfa: true`, a login without MFA evidence in the ID token (`amr`, or `acr` if
-  configured) is refused.
+- Your role comes from your IdP groups (`oidc.role_groups`, keys `viewer`, `user`, `admin`,
+  `super_admin`). If you are in several mapped groups you get the highest role. If you are in none,
+  sign-in is refused and audited as `auth.login_denied`.
+- MFA for SSO users is the IdP's. With `require_mfa: true`, a login without MFA evidence in the ID
+  token (`amr`, or `acr` if configured) is refused.
 - Your role is taken at sign-in. A group change in the IdP applies at your next sign-in. Sessions
   last `session_ttl` (default 8 h).
 - An admin can **disable** a user on the Users page. That revokes their sessions at once. You cannot
   disable yourself.
 
-### Static tokens (break-glass and automation)
+### No static admin tokens (removed in v1.9)
 
-`pmserver new-token` prints a token and its SHA-256. The hash goes in `admin_tokens` in the config.
-Tokens are sent as `Authorization: Bearer <token>` and are what scripts use against the API. The
-console does not offer them on the sign-in page; break-glass sign-in with a token is at
-`/login?token=1`. New installs give the installer's token role `super_admin`; an existing config whose
-token has `"role": "admin"` keeps admin (to make it super admin, edit `pmserver.json`, set
-`"role": "super_admin"` and restart `offpatch-server`). Notes:
+Static admin tokens no longer exist. pmserver refuses to start while `pmserver.json` contains
+`admin_tokens` or `allow_static_tokens` (delete them and sign in with email + password); the
+installer removes both keys on upgrade and shreds the old token files. A request to `/api/*` with
+`Authorization: Bearer …` gets 401 `static admin tokens were removed; sign in with email and
+password`. `pmserver new-token` and the console's token sign-in are gone.
 
-- They are managed only in the config file. Adding or removing one needs a server restart.
-- `allow_static_tokens: false` disables all of them. **Default: `true`, with or without SSO**
-  (runbook 01): adding `oidc` does not switch the break-glass token off. Once SSO works, decide
-  whether to keep it (store it in a safe) or set `"allow_static_tokens": false`.
-- pmserver logs one line at startup saying how admins can sign in (`admin sign-in: ...`), and
-  whether `allow_static_tokens` was set or defaulted. It is a **warning** when `admin_tokens` are
-  configured but disabled, so a dead break-glass token is never a surprise.
-- By design, `require_mfa` is **not** applied to static tokens (they are the break-glass path for
-  when the IdP is unavailable). Keep them for break-glass and automation, store
-  them in a safe, and watch the audit log for their use (`actor` = `user:<name>` from the config).
+Scripts sign in like a person: `POST /api/auth/login`, then `POST /api/auth/mfa` with a code for
+bank roles, and send the `offpatch_session` cookie plus header `X-Offpatch-CSRF: 1` (see
+[runbooks/README.md](runbooks/README.md)). For an enrollment token without the console, run
+`pmserver enroll-token -config /etc/offpatch/pmserver.json -groups pilot -site hq -hours 1` on the
+server as the service user (one use, audited). Agents (mTLS, or a bearer device secret in lab mode)
+and the `metrics_token` for `GET /metrics` are unchanged.
 
 ---
 
@@ -244,7 +265,7 @@ token has `"role": "admin"` keeps admin (to make it super admin, edit `pmserver.
    `alert.resolved`): offline / stale endpoints back, an install that failed and later verified,
    health checks that pass after the restart, lost endpoints back, intelligence fresh again, no
    out-of-support build left, unconfirmed installs confirmed, a renewed certificate. Event alerts
-   (rejected bundle, auto-pause, key compromise, ...) stay until you acknowledge them (operator)
+   (rejected bundle, auto-pause, key compromise, ...) stay until you acknowledge them (role `user`)
    with a short note once you have acted. Acknowledging does not fix anything, and the same
    condition raises a new alert if it is still true at the next sweep (every
    `alert_sweep_interval`, default 5 min).
@@ -300,7 +321,7 @@ it"). Plan who approves and who deploys.
 | `health_checks` | Up to 20 fixed checks run after install: `service_running` (Windows service name, systemd unit, or launchd label) or `tcp_listening` (port on 127.0.0.1). No arbitrary commands. |
 | `emergency` + `justification` | Emergency deployments need a justification, are audited as `deployment.created_emergency`, flagged in the UI, and handed out before other work. |
 
-**Maintenance windows** (Windows page, operator) belong to endpoint groups, not to deployments:
+**Maintenance windows** (Windows page, role `user`) belong to endpoint groups, not to deployments:
 name, groups (or `all`), days (`mon`…`sun`), start and end `HH:MM` in an IANA time zone (may cross
 midnight), and `allow_reboot`. If an endpoint is in any group that has a window, it only receives
 installs while one of its windows is open, unless the deployment ignores windows or is past its
@@ -421,7 +442,7 @@ simply switched off after patching to show up here too; the auto-recovery handle
 
 **Rollback.** On a package (Catalog) or an install deployment, **Roll back…** opens a new
 deployment with operation *Roll back (uninstall)*. It goes through rings, windows, concurrency,
-reboot policy, health checks and auto-pause like an install, needs the operator role and a
+reboot policy, health checks and auto-pause like an install, needs role `user` and a
 **justification** (change ticket / incident), and is audited as `deployment.created_rollback`.
 
 | Kind | Uninstall | Notes |
@@ -491,13 +512,13 @@ The full commands are in [runbooks/02-acquisition-zone-setup-and-monthly-run.md]
 | 2 | Acquisition | acquisition operator | `pmctl fetch -kb KB… -product … -arch x64 -min-build … -max-build … -msrc-month 2026-Nov -out acq/downloads -spec acq/spec.json` for each KB. Third-party: `pmctl fetch-url … -sha256 <vendor hash>`. |
 | 3 | Acquisition | acquisition operator + second person | Review `acq/spec.json`. `pmctl build -key … -spec acq/spec.json -out acq/out/2026-11.pmb -state acq/state.json`. `pmctl inspect -bundle … -pub bundle.pub`. |
 | 4 | Boundary | acquisition operator | `pmctl send -bundle acq/out/2026-11.pmb -to <drop dir> -key <bundle key>` (or `-via command` for a gateway). Keep `sent.jsonl`. |
-| 5 | Isolated | operator | Intake page: bundle `validated`, every check green. Transfer reconciliation: receipt matched. |
-| 6 | Isolated | approver(s) | Catalog: review and approve each package with the change reference. Critical patches may need two approvers. |
+| 5 | Isolated | user | Intake page: bundle `validated`, every check green. Transfer reconciliation: receipt matched. |
+| 6 | Isolated | user(s) | Catalog: review and approve each package with the change reference. Critical patches may need two approvals by different people. |
 | 7 | Isolated | user (not a package approver, if SoD is on) | Create the deployment: rings `pilot` → `broad`, deadline from your policy, `max_failure_pct`, `max_retries`, reboot policy, health checks for the business services on pilot machines. |
 | 7a | Isolated | two other bank users / admins | Approve the deployment with the change reference (two-person rule; nothing installs before). |
-| 8 | Isolated | operator | Watch the pilot ring. Fix failures. Get sign-off from pilot owners. |
-| 9 | Isolated | operator | Advance to `broad` (console: **Start next stage**). Watch for auto-pause, `install_failed`, `health_check_failed`. |
-| 10 | Isolated | operator / support | Work the remainder: offline endpoints, pending reboots, failures, exceptions. |
+| 8 | Isolated | user | Watch the pilot ring. Fix failures. Get sign-off from pilot owners. |
+| 9 | Isolated | user | Advance to `broad` (console: **Start next stage**). Watch for auto-pause, `install_failed`, `health_check_failed`. |
+| 10 | Isolated | user / support | Work the remainder: offline endpoints, pending reboots, failures, exceptions. |
 | 11 | Isolated | viewer | Reports: compliance by severity, overdue targets, latency (release → received → approved → first verified → 90 % verified). Export CSV and the lifecycle JSON per package for the change record. |
 
 ---
@@ -506,7 +527,7 @@ The full commands are in [runbooks/02-acquisition-zone-setup-and-monthly-run.md]
 
 ### 5.1 Enrolling a single endpoint
 
-1. **Endpoints → Create enrollment token** (operator): groups (for example `pilot`), site, expiry
+1. **Endpoints → Create enrollment token** (role `user`): groups (for example `pilot`), site, expiry
    in hours, max uses 1. The token (`enr_…`) is shown **once**. The dialog shows ready-to-run
    commands. **Agent setup** shows the same commands and offers `bundle.pub`, `ca.pem` and any agent
    binaries staged in `<data_dir>/agent-dist/` for download.
@@ -544,7 +565,7 @@ until it expires or is used up.
 
 ### 5.3 Retiring an endpoint
 
-Endpoint detail → **Retire** (operator, reason required). Its certificate and secret stop working at
+Endpoint detail → **Retire** (role `user`, reason required). Its certificate and secret stop working at
 once, its outstanding targets become `not_applicable` ("endpoint retired: …"), history is kept, and
 it leaves the fleet totals. Retirement cannot be undone. A machine that comes back must be
 enrolled again and gets a new endpoint ID. Then uninstall the agent from the machine.
@@ -702,10 +723,13 @@ Notes:
 | Target `failed`, detail `waiting: another installation is running on this machine (try N)` | Another installer or Windows Update is running on the machine (msiexec 1618, servicing busy) | Nothing: it is retried at the next check-in without using up retries, 10 times in a row; after that it counts as a normal failure. |
 | Package `rejected`, operator clicked "Import again" | The next acquisition run sends it again | The package returns to `quarantined` for a new review (audit `package.reimported`, earlier approvals cleared). A `revoked` package is never imported again. |
 | Endpoint `awaiting_checkin` for a long time | Agent installed but not running, or cannot reach the server | As for `offline` (§3.6). After 24 h it is shown `offline`. |
-| Approve returns 409 `already approved this package; a different approver is required` | Two-person rule | A second approver approves. |
+| Approve returns 409 `already approved this package; a different approver is required` | Two-person rule | A different bank user approves. |
 | Create deployment returns 409 `separation of duties` | You approved the package | Another user creates the deployment. |
 | Approve deployment returns 409 `you created this deployment` / `you already approved` | Two-person rule for deployments | Two other bank users or admins approve it. |
-| Approve deployment returns 403 | Your role is viewer or super_admin (vendor) | A bank user or admin approves it. |
+| Approve deployment returns 403 | Your role is viewer or super_admin (vendor); or, for an agent version (`agent version deployments are approved by bank admins`), your role is `user` | A bank user or admin approves it; an agent-version deployment needs bank admins. |
+| Approve / deploy an agent version returns 403 `agent versions are managed by the vendor (super admin)` | Agent packages (`offpatch-agent-*`) are the vendor's | The super admin approves and deploys them. |
+| Every call returns 403 `mfa_enrollment_required` | First sign-in of a bank user without an authenticator | Enrol the authenticator app (the console shows the QR code). |
+| Code refused: "wrong or expired code" | Wrong code, a code already used, the phone clock is off, or the account is locked | Wait for the next code; check the phone's time; use a recovery code; or ask an admin to **Reset MFA**. |
 | Every call returns 403 `password_change_required` | Signed in with a temporary password | Change the password (the console shows the form). |
 | Sign-in says "wrong email or password" with the right password | Account locked after 5 wrong passwords (15 min), or a typo in the email | Wait, or ask an admin to **Enable** / **Reset password**. |
 
@@ -717,16 +741,16 @@ Notes:
    What status does it show, and why?**
    `offline`. Silence is never compliance: `offline` (and `stale`) take precedence over all other
    statuses.
-2. **A bundle arrives. Can an operator deploy its packages straight away?**
-   No. Packages arrive `quarantined`. An approver must approve (with a reason), which publishes the
+2. **A bundle arrives. Can a user deploy its packages straight away?**
+   No. Packages arrive `quarantined`. A bank user must approve (with a reason), which publishes the
    content to the repository. Only `approved` packages can be deployed.
 3. **`approval_policy` has `"critical": 2`. Alice approves a critical package. What is its state,
    and what happens if Alice approves again?**
    Still `quarantined` with 1 of 2 approvals. Alice approving again is refused (409); a different
-   approver must approve.
+   bank user must approve.
 4. **With `separation_of_duties` on, who may create the deployment for a package Alice and Bob
    approved?**
-   Any operator (or higher) other than Alice and Bob.
+   Any user (or higher) other than Alice and Bob.
 5. **Your deployment has `max_failure_pct: 10`, `max_retries: 2`. In a 20-endpoint pilot ring, one
    endpoint fails its first install. Does the deployment pause?**
    No. Only failures with retries exhausted (and failed health checks) count, and the threshold is

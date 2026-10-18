@@ -4,12 +4,12 @@ import type { AuthKind, Deployment, Me, Policy, Role } from "./types";
 // Roles (rank): viewer 1 · user 2 (bank) · admin 3 (bank) · super_admin 4 (vendor).
 const RANK: Record<Role, number> = { viewer: 1, user: 2, admin: 3, super_admin: 4 };
 
-/** Old role names stay accepted: operator and approver are now "user". Unknown names read as viewer. */
+/** Roles are viewer, user, admin and super_admin; unknown names read as viewer. */
 export function normalizeRole(r: string | null | undefined): Role {
   switch ((r ?? "").toLowerCase()) {
     case "super_admin": case "superadmin": return "super_admin";
     case "admin": return "admin";
-    case "user": case "operator": case "approver": return "user";
+    case "user": return "user";
     default: return "viewer";
   }
 }
@@ -37,11 +37,11 @@ export function roleRank(r: string | null | undefined): number {
   return RANK[normalizeRole(r)];
 }
 
-/** /api/me from any server version, with old role names and the old `source` field mapped. */
+/** /api/me: role normalised; `auth` is password or SSO (older servers send `source`). */
 export function normalizeMe(raw: Partial<Me> & { role?: string }): Me {
-  const auth: AuthKind = raw.auth === "password" || raw.auth === "sso" || raw.auth === "token"
+  const auth: AuthKind = raw.auth === "password" || raw.auth === "sso"
     ? raw.auth
-    : raw.source === "sso" ? "sso" : raw.source === "password" || raw.source === "local" ? "password" : "token";
+    : raw.source === "sso" ? "sso" : "password";
   return {
     ...raw,
     user: raw.user ?? "",

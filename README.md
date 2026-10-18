@@ -45,7 +45,7 @@ sudo ./install-ubuntu.sh --role server --hosts pm.corp.internal,10.20.0.5 \
 ```
 
 - `--pubkey` is required on the first install. Public keys are copied to `/etc/offpatch/keys` and never replaced on later runs (rotate keys with a signed trust document, [runbook 03](docs/runbooks/03-key-rotation.md)). The installer refuses to run if any `*.key` file is in `/etc/offpatch/keys`.
-- The break-glass admin token is **shown once** and not stored on the machine. Put it in the safe.
+- It creates the built-in super admin (vendor) `superadmin@dataspacesecurity.com` (`--admin-email` to change) with the vendor's default password (see the vendor handbook; only its hash is in `pmserver`). Sign in and change it at once; the console shows a banner and pmserver logs a warning at every start until you do. Bank users then sign in with email + password and an authenticator app (MFA). Lost password: `pmserver reset-admin` on the server ([runbook 01](docs/runbooks/01-install-management-server.md)). There are no static admin tokens.
 - `--hosts`: DNS names and IPs endpoints use to reach the server (they go into its certificate).
 - `--audit-dir`: off-box / WORM storage for audit export. It warns loudly when this is on the same filesystem as the data.
 - `--allow-from` (repeatable): ufw opens the port to these sources only.
@@ -54,7 +54,7 @@ sudo ./install-ubuntu.sh --role server --hosts pm.corp.internal,10.20.0.5 \
 
 **4. Windows endpoints.** In the console, **Endpoints → Create enrollment token** (use *max uses* for several machines) and paste the one-line command it shows into **Windows PowerShell as Administrator** on each endpoint. The command pins the server's CA by SHA-256 fingerprint, downloads and verifies `pmagent.exe`, enrolls the machine and starts the `offpatch-agent` service. Re-running it with a new token repairs the install and keeps the enrollment; a machine enrolled with another server is re-enrolled. Ubuntu endpoints: `sudo ./install-ubuntu.sh --role agent --server https://pm.corp.internal:8443 --token enr_… --ca ca.pem --pubkey bundle.pub --root-pubkey root.pub`.
 
-**Upgrades.** Re-run the same command with the same `--role` from the new release. Keys, certificates, token, `pmserver.json` and data are kept. On a server it first takes a verified backup (`/var/lib/offpatch-backup/pre-upgrade-*`; `--skip-backup` to skip) and keeps the previous binaries in `/opt/offpatch/bin.prev`. Port, TLS mode and audit directory come from the existing `pmserver.json`. A conflicting `--port`, `--insecure-lab` or `--audit-dir` is refused. A local agent that has self-upgraded past the release is not downgraded, and an upgraded local agent is restarted.
+**Upgrades.** Re-run the same command with the same `--role` from the new release. Keys, certificates, `pmserver.json` and data are kept. An upgrade from a release with static admin tokens removes `admin_tokens` / `allow_static_tokens` from `pmserver.json` and shreds `admin-token.txt` / `admin-token.sha256` (static tokens were removed in v1.9). On a server it first takes a verified backup (`/var/lib/offpatch-backup/pre-upgrade-*`; `--skip-backup` to skip) and keeps the previous binaries in `/opt/offpatch/bin.prev`. Port, TLS mode and audit directory come from the existing `pmserver.json`. A conflicting `--port`, `--insecure-lab` or `--audit-dir` is refused. A local agent that has self-upgraded past the release is not downgraded, and an upgraded local agent is restarted.
 
 Other options: `--status`; `--uninstall` (it lists the secrets left on disk; `--purge` also deletes keys and data and asks for confirmation, or needs `--yes`); `--insecure-lab` (plain HTTP, first install only).
 
@@ -64,7 +64,7 @@ Other options: `--status`; `--uninstall` (it lists the secrets left on disk; `--
 sudo ./install-ubuntu.sh --role all --hosts 192.168.88.129 [--with-agent]
 ```
 
-Server, acquisition, signing key and root key on one machine, for evaluation only. It prints a warning to that effect. Acquisition still runs as its own user `offpatch-acq`, which can only drop files into the server inbox. The break-glass token is kept in `/etc/offpatch/admin-token.txt` (root only, 0600). `--with-agent` also enrolls the machine itself. Older lab installs, where everything ran as `offpatch`, are moved to this layout when you re-run with `--role all`. The lab queues console acquisition requests straight into `/var/lib/offpatch-acq/requests` (`acquisition_requests_dir`) and `offpatch-acquire-requests.path` fetches them right away with `pmctl auto -only-requests`; production roles keep the carried file (runbook 02).
+Server, acquisition, signing key and root key on one machine, for evaluation only. It prints a warning to that effect. Acquisition still runs as its own user `offpatch-acq`, which can only drop files into the server inbox. Sign in as the built-in super admin (default password from the vendor handbook). `--with-agent` also enrolls the machine itself. Older lab installs, where everything ran as `offpatch`, are moved to this layout when you re-run with `--role all`. The lab queues console acquisition requests straight into `/var/lib/offpatch-acq/requests` (`acquisition_requests_dir`) and `offpatch-acquire-requests.path` fetches them right away with `pmctl auto -only-requests`; production roles keep the carried file (runbook 02).
 
 ## Quick start (single machine, simulated endpoints)
 
@@ -78,7 +78,7 @@ make ui        # build the console (web/dist, embedded into pmserver)
 make demo      # builds binaries, runs the full flow, leaves pmserver on :8080
 ```
 
-Open http://127.0.0.1:8080 and sign in with the admin token from `demo/tokens.txt`. Stop the server with:
+Open http://127.0.0.1:8080 and sign in with a user from `demo/users.txt` (the demo super admin, or `alice`, a `user` with an authenticator secret for MFA). Stop the server with:
 
 ```bash
 kill $(cat demo/mgmt/pmserver.pid)
@@ -93,7 +93,7 @@ make test
 `internal/e2e` drives the real HTTP server with simulated agents through the §9 acceptance criteria:
 
 - **Intake rejects:** a modified payload, a bad signature, an untrusted key, malformed JSON, a replayed sequence, tar traversal/links, and partial (`.part`) files.
-- **Approval gate:** unapproved content cannot be deployed or downloaded. A reason is required. The operator role cannot approve.
+- **Approval gate:** unapproved content cannot be deployed or downloaded. A reason is required. A viewer cannot approve.
 - **Staged rollout:** pilot ring → advance → broad ring, auto-pause on failure threshold, resume, completion.
 - **Status:** `pending_reboot` is not verified until after the reboot. Exception and not-applicable targeting work. Silent endpoints become `offline`, never compliant.
 - **Endpoint tamper check:** the endpoint detects tampered repository content and refuses to install it.
@@ -134,4 +134,4 @@ See [docs/06-roadmap.md](docs/06-roadmap.md) for item-by-item status and evidenc
 - **Go 1.27.2.** Build with it to pick up standard-library security fixes (`scripts/security-check.sh` flags 1.27.1).
 - **Organisation decisions (section A).** Identity provider, transfer product, key custody, retention, and so on. Then a penetration test and a pilot.
 
-More documentation: [admin guide](docs/07-admin-guide.md) · [runbooks](docs/runbooks/) · [acquisition](docs/08-acquisition.md) · [capacity](docs/09-capacity.md) · [security testing](docs/security/README.md) · [packaging](packaging/)
+More documentation: [admin guide](docs/07-admin-guide.md) · [runbooks](docs/runbooks/) · [acquisition](docs/08-acquisition.md) · [capacity](docs/09-capacity.md) · [auditor compliance report](docs/10-compliance-report.md) · [security testing](docs/security/README.md) · [packaging](packaging/)

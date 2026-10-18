@@ -211,9 +211,8 @@ func (p *Provider) identity(c map[string]any) Identity {
 			}
 		}
 	}
-	// Highest role granted wins. operator and approver are older names of
-	// user (the server maps them); super_admin is the vendor role.
-	rank := map[string]int{"viewer": 1, "operator": 2, "approver": 2, "user": 2, "admin": 3, "super_admin": 4}
+	// Highest role granted wins; super_admin is the vendor role.
+	rank := map[string]int{"viewer": 1, "user": 2, "admin": 3, "super_admin": 4}
 	gs := map[string]bool{}
 	for _, g := range id.Groups {
 		gs[g] = true

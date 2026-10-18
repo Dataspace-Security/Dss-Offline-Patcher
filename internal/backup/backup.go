@@ -45,7 +45,10 @@ type Layout struct {
 
 // dataSubdirs are copied from the data dir (the DB is snapshotted separately).
 var dataSubdirs = []string{"repository", "quarantine", "received", "agent-dist"}
-var dataFiles = []string{"audit-signing.key", "audit-signing.pub"}
+
+// mfa.key decrypts local users' authenticator secrets: without it a
+// restored server cannot verify MFA codes.
+var dataFiles = []string{"audit-signing.key", "audit-signing.pub", "mfa.key"}
 
 func copyFile(src, dst string, mode fs.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {

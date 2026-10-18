@@ -40,6 +40,7 @@ type Store struct {
 
 	chain        chainCache
 	enrollDenied deniedAudits
+	mfaKey       mfaCipher
 	gen          atomic.Uint64 // Generation
 }
 
@@ -190,12 +191,9 @@ type Policy struct {
 	// DeploymentApprovals: distinct approvers (bank user or admin, not the
 	// creator) a deployment or rollback needs before it starts. 0 = 2.
 	DeploymentApprovals int
-	// TokenSuperAdmins: static admin_tokens with role super_admin that
-	// can sign in; they count towards "at least one super admin remains".
-	TokenSuperAdmins int
-	// ReservedUsers: names of static admin_tokens; local users may not
-	// take them (one name, one person, in the audit trail).
-	ReservedUsers map[string]bool
+	// RequireMFA (config require_mfa): authenticator MFA is required for
+	// every local user, super admins included (bank roles always need it).
+	RequireMFA bool
 }
 
 // DefaultDeploymentApprovals is the approval count when none is configured.

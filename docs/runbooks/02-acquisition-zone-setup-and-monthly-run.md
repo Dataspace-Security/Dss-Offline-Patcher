@@ -307,7 +307,8 @@ pmctl send -bundle acq/2026-11/out/2026-11.pmb -via command -command "diodectl p
 2. **Intake → Transfer reconciliation**, or:
 
 ```bash
-curl --cacert ca.pem -H "Authorization: Bearer $TOK" https://pm.corp.internal:8443/api/transfer/reconcile
+# signed in as a viewer (cookie jar from POST /api/auth/login, see runbooks/README.md)
+curl --cacert ca.pem -b jar https://pm.corp.internal:8443/api/transfer/reconcile
 ```
 
 | Field | Expected | If not |
@@ -322,7 +323,7 @@ Receipts for **trust documents** (`*.trust.json`) are left out of `matched` and
 audit events instead. They still count in `unsigned_or_invalid_receipts` if sent without `-key`,
 so sign their receipts too.
 
-3. Hand over to the approvers (admin guide §3.2 and §4).
+3. Hand over to the bank users who approve (admin guide §3.2 and §4).
 
 ## Verification
 
@@ -336,7 +337,7 @@ so sign their receipts too.
 - Bad entry discovered before sending: fix `spec.json`, rebuild (a new sequence is used; gaps are fine).
 - Bundle rejected: fix the cause and rebuild. A rejected bundle does not consume its sequence on the
   server.
-- Wrong content already validated (still `quarantined`): an approver **rejects** the packages with a
+- Wrong content already validated (still `quarantined`): a bank user **rejects** the packages with a
   reason. Re-send corrected content under **new** `package_id`s. To import the same package
   again after a rejection, export a new acquisition request for it from the console: `pmctl auto`
   fetches and sends requested items even when `state.json` records them as sent.

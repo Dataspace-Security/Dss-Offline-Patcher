@@ -28,6 +28,10 @@ export const paths = {
   addEndpoints: "/endpoints/add",
   // Reports
   reports: "/reports",
+  /** Auditor report for a period (template sections 1–9) and its signed evidence package. */
+  complianceReport: "/reports/compliance",
+  /** Organization profile behind the auditor report (admin edits, everyone reads). */
+  reportProfile: "/reports/profile",
   audit: (filter?: Record<string, string>) => {
     const q = filter ? new URLSearchParams(filter).toString() : "";
     return q ? `/reports/audit?${q}` : "/reports/audit";

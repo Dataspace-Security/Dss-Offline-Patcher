@@ -33,7 +33,7 @@ as "already present", and `msu`/`msi` presence is by KB / product code.
 |---|---|---|
 | Unsure yet, want to investigate | **Pause** the deployment (reason) | `POST /api/deployments/{id}/pause {"reason": "INC-123 investigating"}` |
 | This deployment should not continue | **Cancel** it (reason) | `POST /api/deployments/{id}/cancel {"reason": "…"}` |
-| The package must not be installed anywhere | **Revoke** the package (approver, reason). Cancels **all** its active and paused deployments. Final. | `POST /api/packages/{id}/revoke {"reason": "…"}` |
+| The package must not be installed anywhere | **Revoke** the package (role `admin`, reason). Cancels **all** its active and paused deployments. Final. | `POST /api/packages/{id}/revoke {"reason": "…"}` |
 
 Already-paused by auto-pause: leave it paused until step 4.
 
@@ -134,7 +134,7 @@ the agent will upgrade itself again. See [runbook 08](08-agent-upgrade.md).
 | Outcome | Action |
 |---|---|
 | Problem was local / environmental, package is fine | Fix the endpoints, **resume** the paused deployment (reason). Failed targets with attempts left retry; for exhausted ones see admin guide §3.5. |
-| Package is bad for some endpoints only | Create **exceptions** (approver) for those endpoints with owner, reason, compensating controls and expiry; resume. Or cancel and create a new deployment whose rings exclude those groups. |
+| Package is bad for some endpoints only | Create **exceptions** (role `admin`) for those endpoints with owner, reason, compensating controls and expiry; resume. Or cancel and create a new deployment whose rings exclude those groups. |
 | Package is bad | **Revoke** it (if not already). If a fixed version comes from the vendor, acquire it as a **new `package_id`**. A revoked package cannot return to quarantine or be re-approved. |
 | Package was never approved | Approver **rejects** it with the reason. |
 

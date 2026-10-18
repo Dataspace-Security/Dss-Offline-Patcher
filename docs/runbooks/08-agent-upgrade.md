@@ -51,7 +51,8 @@ quarantine, approval, staged deployment, verification.
 |---|---|
 | Build environment | Go **1.27.2+**. |
 | Acquisition operator | Builds the bundle. |
-| Approver, operator | As for any patch (two-person rule and SoD apply). |
+| Super admin (vendor) | Approves the agent packages and creates the deployment (bank roles get 403 `agent versions are managed by the vendor (super admin)`). |
+| Bank admins (role `admin`) | Approve the agent-version deployment: `deployment_approvals` of them, not the creator (users get 403 `agent version deployments are approved by bank admins`; the super admin cannot approve). |
 | Endpoints running as a service | An agent started by hand with `pmagent run` exits with code 3 and is not restarted. |
 | Pilot group | Endpoints of each OS/arch you run. |
 
@@ -93,8 +94,8 @@ quarantine, approval, staged deployment, verification.
    - `pmctl build` records `vendor_signature: not_checked` for `agent` packages automatically
      (Authenticode is only run for `msu`/`msi`). Never set `valid` by hand.
 3. **Build, inspect, send** ([runbook 02](02-acquisition-zone-setup-and-monthly-run.md) B6–B8).
-4. **Approve** (Catalog) with the release reference.
-5. **Deploy in rings**: e.g. `pilot` (a few endpoints per OS) → `broad`. Suggested settings:
+4. **Approve** (Catalog, super admin) with the release reference.
+5. **Deploy in rings** (super admin; bank admins then approve the deployment): e.g. `pilot` (a few endpoints per OS) → `broad`. Suggested settings:
    `max_failure_pct` 5, `max_retries` 1, a health check is not needed (verification by version is
    built in). Use `max_concurrent` if you have many endpoints on slow links (agent binaries are small,
    but every agent restarts).

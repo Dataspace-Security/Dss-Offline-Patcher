@@ -146,11 +146,17 @@ func TestKeyRotationRevocationAndUpgrade(t *testing.T) {
 		t.Fatalf("bundle 4: %+v", b)
 	}
 	for id := range pk {
+		if id == up.PackageID { // agent versions are the vendor's (super admin)
+			if c := e.api("POST", "/api/packages/"+id+"/approve", tokSuper, map[string]string{"reason": "vendor release"}, nil); c != 200 {
+				t.Fatalf("approve agent version: %d", c)
+			}
+			continue
+		}
 		e.approve(id)
 	}
 	a3 := e.enroll("pc-k3", []string{"z"}, agent.SimConfig{}) // Enterprise edition
 	z := []store.Ring{{Name: "z", Groups: []string{"z"}}}
-	dUp := e.deploy(store.NewDeployment{PackageID: up.PackageID, Name: "agent upgrade", Rings: z})
+	dUp := e.deployAgent(t, store.NewDeployment{PackageID: up.PackageID, Name: "agent upgrade", Rings: z}, e.secondBankAdmin(t))
 	dPre := e.deploy(store.NewDeployment{PackageID: pre.PackageID, Name: "needs prereq", Rings: z})
 	dEd := e.deploy(store.NewDeployment{PackageID: ed.PackageID, Name: "pro only", Rings: z})
 	e.cycle(a3)

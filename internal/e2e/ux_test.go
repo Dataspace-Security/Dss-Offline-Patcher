@@ -205,7 +205,7 @@ func TestUXIteration(t *testing.T) {
 		return m
 	}
 	rs := reqs()
-	if len(rs) != 1 || rs[0].RequestID != req.RequestID || rs[0].CreatedBy != "user:otto" || rs[0].IntelGeneratedAt != gen || rs[0].SeenAt != "" || len(rs[0].Items) != 3 {
+	if len(rs) != 1 || rs[0].RequestID != req.RequestID || rs[0].CreatedBy != "user:otto@bank.test" || rs[0].IntelGeneratedAt != gen || rs[0].SeenAt != "" || len(rs[0].Items) != 3 {
 		t.Fatalf("requests: %+v", rs)
 	}
 	it := items(rs[0])
@@ -361,7 +361,7 @@ func TestUXIteration(t *testing.T) {
 	}
 	var audit []store.AuditEvent
 	e.api("GET", "/api/audit?action=deployment.retry_failed", tokViewer, nil, &audit)
-	if len(audit) != 1 || audit[0].Actor != "user:otto" || !strings.Contains(string(audit[0].Details), c.id) || !strings.Contains(string(audit[0].Details), "disk cleaned") {
+	if len(audit) != 1 || audit[0].Actor != "user:otto@bank.test" || !strings.Contains(string(audit[0].Details), c.id) || !strings.Contains(string(audit[0].Details), "disk cleaned") {
 		t.Errorf("retry audit: %+v", audit)
 	}
 

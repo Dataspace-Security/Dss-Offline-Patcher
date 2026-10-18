@@ -3,7 +3,7 @@
 ## Purpose
 
 Install `pmserver` in the isolated management zone with TLS, the internal CA for agent mTLS,
-an admin login (SSO and/or a break-glass token), staged agent binaries, off-box audit export and
+admin sign-in (email + password with an authenticator app, and/or SSO), staged agent binaries, off-box audit export and
 metrics.
 
 ## When to use
@@ -55,13 +55,15 @@ What it does (covers steps 1-5, 7 and 8 below, plus the daily backup of runbook 
   files are never overwritten (rotate keys with runbook 03).
 - Creates the internal CA and server certificate for `--hosts` (step 2).
 - Creates the **built-in super admin** (the vendor's console account) with `--admin-email`
-  (default `superadmin@offpatch.local`) and a random password, and **prints both once** at the end.
-  Only the PBKDF2 hash is stored (in the database); there is no password in the release or the
-  config. Sign in with it and create the bank's first Admin (Settings → Users). Lost it: step 4b.
-- Creates the break-glass admin token (role `super_admin`) and **prints it once**. Only its SHA-256
-  is stored, in `pmserver.json`. Put the token in the safe. It is for the API and automation; in the
-  console it is only accepted at `/login?token=1`. If it is lost, create a new one (step 4) and
-  replace `token_sha256`.
+  (default `superadmin@dataspacesecurity.com`) and the vendor's **default password** (in the vendor
+  handbook; only its PBKDF2 hash is embedded in `pmserver`, nothing is in the config). The summary
+  prints `super admin: superadmin@dataspacesecurity.com — default password (see vendor handbook);
+  change it after first sign-in`. Sign in, change the password at once (until then the console shows
+  a banner and pmserver logs a warning at every start), then create the bank's first Admin
+  (Settings → Users). Lost it: [recovery](#recovery-nobody-can-sign-in).
+- Creates the MFA key `/var/lib/offpatch-server/mfa.key` (64 hex characters, owner `offpatch`, mode
+  0600). It encrypts the users' authenticator secrets; it is included in the backups.
+- There are no static admin tokens: the installer creates none and prints none.
 - Writes `/etc/offpatch/pmserver.json` on the first install only and never changes it afterwards.
   Edit it for SSO, notifications, metrics and so on (steps 5, 6, 10), then
   `systemctl restart offpatch-server`.
@@ -76,9 +78,11 @@ What it does (covers steps 1-5, 7 and 8 below, plus the daily backup of runbook 
 - Warns loudly if `--audit-dir` is on the same filesystem as the data, and if NTP is not synchronized.
 
 Upgrade: run the same command from the new release. It takes a verified pre-upgrade backup, keeps
-the previous binaries in `/opt/offpatch/bin.prev`, and keeps keys, PKI, token, config and data. If no
+the previous binaries in `/opt/offpatch/bin.prev`, and keeps keys, PKI, config and data. If no
 local super admin exists yet (an install from before local users), the upgrade creates the built-in
-super admin and prints its email and password once. Port,
+super admin with the default password. An upgrade from a release with static admin tokens removes
+`admin_tokens` and `allow_static_tokens` from `pmserver.json` and shreds
+`/etc/offpatch/admin-token.txt` and `admin-token.sha256`; it creates `mfa.key` if missing. Port,
 TLS mode and audit directory come from the existing `pmserver.json`; a conflicting flag is refused.
 
 Then continue with steps 6 (SSO), 9 (audit storage), 10 (metrics) and 11 (network) below, using the
@@ -130,35 +134,42 @@ install -o offpatch -m 0644 bundle.pub root.pub /etc/offpatch-server/
 Public keys only. If a `.key` file was copied here by mistake, remove it (`shred -u`) and treat it
 as exposed (runbook 04).
 
-### 4. Create the break-glass admin token
-
-```bash
-/usr/local/bin/pmserver new-token
-# token:        adm_…            → store in the safe, never in the config
-# token_sha256: 3b1f…            → goes into admin_tokens
-```
-
-Repeat for any automation accounts (one token per user/role).
-
-### 4b. Create the built-in super admin (console sign-in)
+### 4. Create the built-in super admin (console sign-in)
 
 After step 5 (the command reads the config to find the database):
 
 ```bash
-sudo -u offpatch /usr/local/bin/pmserver create-admin -config /etc/offpatch-server/pmserver.json \
-     -email superadmin@offpatch.local
-# email:    superadmin@offpatch.local
-# password: …            → shown ONCE; only its PBKDF2 hash is stored
+sudo -u offpatch /usr/local/bin/pmserver create-admin -config /etc/offpatch-server/pmserver.json
+# created the built-in super admin with the default password (see the vendor handbook); change it after the first sign-in
+# email:    superadmin@dataspacesecurity.com
+# default_password: yes
 ```
 
-`-if-none` makes it a no-op when an enabled local super admin exists. Recovery when the password is
-lost (root on the server; also re-enables the account and clears a lockout, audited
-`user.password_reset` by `system:cli`):
+`-email` defaults to `superadmin@dataspacesecurity.com`. Without `-password-random` it sets the
+vendor's default password (only its PBKDF2 hash is embedded in `pmserver`; the password is in the
+vendor handbook). Change it at the first sign-in: until then `/api/me` shows `builtin: true` and
+`password_changed_at: ""`, the console shows a change-password banner and pmserver logs a WARN at
+every start. `-password-random` instead generates a password and prints it **once**. `-if-none`
+makes it a no-op when an enabled local super admin exists. There are no static admin tokens
+(`pmserver new-token` was removed in v1.9); scripts sign in with email + password
+([runbooks/README.md](README.md#conventions-used-in-the-runbooks)).
+
+#### Recovery: nobody can sign in
+
+Lost password or authenticator, or the account is locked or disabled. As root on the server, run as
+the service user so the database keeps its owner:
 
 ```bash
 sudo -u offpatch /usr/local/bin/pmserver reset-admin -config /etc/offpatch-server/pmserver.json \
-     -email superadmin@offpatch.local
+     -email <super admin email>
+# method A: sudo runuser -u offpatch -- /opt/offpatch/bin/pmserver reset-admin -config /etc/offpatch/pmserver.json -email <email>
 ```
+
+It prints a new random password **once**, re-enables the account, clears the lockout and **clears
+the super admin's MFA** (it may enrol again), and ends the account's other sessions (audited
+`user.password_reset` by `system:cli`). `-email` defaults to `superadmin@dataspacesecurity.com`. If
+no local super admin exists at all, create one with `pmserver create-admin` (step 4). Bank users who
+lost their authenticator are reset by an Admin in the console (**Reset MFA**).
 
 ### 5. Write the configuration
 
@@ -171,15 +182,14 @@ Start from `packaging/server/pmserver.example.json`. Minimal production config:
   "pki_dir": "/etc/offpatch-server/pki",
   "trusted_keys": [{"public_key_file": "/etc/offpatch-server/bundle.pub", "sources": ["acq-zone-1"]}],
   "root_public_key_file": "/etc/offpatch-server/root.pub",
-  "admin_tokens": [{"user": "breakglass", "role": "super_admin", "token_sha256": "<from step 4>"}],
   "audit_export_dir": "/mnt/audit-worm/offpatch",
   "metrics_token": "<random secret>"
 }
 ```
 
-Replace every placeholder: `<from step 4>` with the `token_sha256`, and `<random secret>` with the
-output of `openssl rand -hex 32`. If you started from `pmserver.example.json`, also replace
-`REPLACE_with_random_secret`, the all-zero `token_sha256` and the example host names. The server does
+Replace every placeholder: `<random secret>` with the output of `openssl rand -hex 32`. If you
+started from `pmserver.example.json`, also replace `REPLACE_with_random_secret` and the example host
+names. The server does
 not reject these placeholders at startup, so check:
 
 ```bash
@@ -195,8 +205,12 @@ Rules enforced at startup (the server refuses to start otherwise):
 
 - Unknown keys are rejected (a typo is a startup error, not silently ignored).
 - At least one `trusted_keys` entry, each with `sources`.
-- With neither `oidc` nor a usable `admin_tokens` entry, console sign-in is email + password only
-  (local users): pmserver starts and logs a warning; create the super admin (step 4b).
+- `admin_tokens` and `allow_static_tokens` are refused (static admin tokens were removed in v1.9):
+  delete them and sign in with email + password.
+- Roles in `oidc.role_groups` must be `viewer`, `user`, `admin` or `super_admin`; the old names
+  `operator` and `approver` are refused with an error naming the value (rename them to `user`).
+- Without `oidc`, console sign-in is email + password only (local users); create the super admin
+  (step 4).
 - `deployment_approvals` is 1–5.
 - **TLS is required**: set `pki_dir` (uses `pki/server.pem` and `server.key`) or `tls_cert` + `tls_key`.
   `pki_dir` is required whenever TLS is on, because it issues the endpoint client certificates.
@@ -211,20 +225,19 @@ All keys (`internal/server/config.go`, `internal/oidc/oidc.go`, `internal/server
 | Key | Default | Meaning |
 |---|---|---|
 | `listen` | `127.0.0.1:8080` | Address:port. Set e.g. `0.0.0.0:8443`. |
-| `data_dir` | `data` | inbox, received, quarantine, repository, agent-dist, `pm.db`, `audit-signing.key`. |
+| `data_dir` | `data` | inbox, received, quarantine, repository, agent-dist, `pm.db`, `audit-signing.key`, `mfa.key`. |
+| `mfa_key_file` | `<data_dir>/mfa.key` | 32-byte key (64 hex characters, mode 0600) that encrypts authenticator (TOTP) secrets at rest (AES-256-GCM). Created by the installer, and by pmserver at first start if missing. Back it up with the database (`pmserver backup` includes it): without it every MFA enrolment is lost. |
 | `pki_dir` | — | Internal CA and server certificate from `init-pki`. |
 | `tls_cert`, `tls_key` | from `pki_dir` | Override the server certificate. Both or neither. |
 | `insecure_http` | `false` | Lab only: plain HTTP, agents use bearer secrets. |
 | `trusted_keys[]` | required | `public_key_file` or `public_key` (PEM), `sources[]`. Once a signed trust document has been accepted, it replaces this list for intake (runbook 03). |
 | `root_public_key_file` | — | Enables signed trust documents (key rotation / revocation). |
-| `admin_tokens[]` | — | `user`, `role` (`viewer`/`user`/`admin`/`super_admin`; `operator` and `approver` mean `user`), `token_sha256`. A token name cannot be taken by a local user. |
 | `deployment_approvals` | `2` | Different bank users/admins (not the creator) who approve each deployment and rollback before it starts (1–5; an isolated single-person lab may use 1). |
-| `allow_static_tokens` | `true` (also with `oidc`) | `false` disables all bearer admin tokens. Configuring `oidc` does not change the default. At startup pmserver logs `admin sign-in: ...` saying which methods work; a warning if `admin_tokens` are configured but disabled. |
 | `oidc` | — | See step 6. |
 | `session_ttl` | `8h` | Console session lifetime (SSO and email + password). |
-| `require_mfa` | `false` | Refuse SSO logins and sessions without MFA, and switch email + password sign-in off. By design it does not apply to static (break-glass) tokens. |
+| `require_mfa` | `false` | Make the authenticator step required for **every** local user (also super admins; bank roles always need it), and refuse SSO logins and sessions without MFA from the IdP. Email + password sign-in stays on. |
 | `approval_policy` | 1 per severity | e.g. `{"critical": 2, "important": 2}`. |
-| `separation_of_duties` | `false` | An approver of a package cannot deploy it. |
+| `separation_of_duties` | `false` | Whoever approved a package cannot deploy it. |
 | `patch_deadlines` | critical `168h`, important `720h`, moderate `1440h`, low `2160h` | Release-to-install deadlines used in reports and the `overdue` metric. |
 | `offline_after` | `30m` | Endpoint becomes `offline`. |
 | `stale_inventory_after` | `24h` | Endpoint becomes `stale`. |
@@ -260,7 +273,7 @@ Add to the config:
   "client_secret": "",
   "redirect_url": "https://pm.corp.internal:8443/auth/callback",
   "groups_claim": "groups",
-  "role_groups": {"admin": ["PM-Admins"], "approver": ["PM-Approvers"], "operator": ["PM-Operators"], "viewer": ["PM-Viewers"]},
+  "role_groups": {"admin": ["PM-Admins"], "user": ["PM-Operators", "PM-Approvers"], "viewer": ["PM-Viewers"]},
   "ca_cert_file": "/etc/offpatch-server/corp-ca.pem"
 },
 "require_mfa": true,
@@ -275,15 +288,15 @@ Add to the config:
 | `scopes` | `openid profile email` | |
 | `username_claim` | `preferred_username` | Falls back to `email`, then `sub`. |
 | `groups_claim` | `groups` | |
-| `role_groups` | — | role → list of IdP group names. Highest role wins. No match = login refused. |
+| `role_groups` | — | role (`viewer`, `user`, `admin`, `super_admin`) → list of IdP group names. Highest role wins. No match = login refused. `operator` / `approver` are refused at startup. |
 | `require_mfa` | — | Also set by top-level `require_mfa`. |
 | `mfa_amr_values` | `mfa otp hwk swk fpt face sms pop fido` | An `amr` value from this list counts as MFA. |
 | `mfa_acr_values` | — | `acr` values that count as MFA. |
 | `ca_cert_file` | system roots | CA for the IdP's TLS certificate. |
 
 Discovery happens at the first login, not at startup. If the IdP is unreachable, the login page
-shows "Single sign-on is unavailable" and the break-glass token still works. Once SSO works, decide
-whether to keep `admin_tokens` (break-glass) or set `allow_static_tokens: false`.
+shows "Single sign-on is unavailable"; local users (email + password + authenticator) can still
+sign in.
 
 ### 7. Install the systemd unit and start
 
@@ -361,16 +374,20 @@ Commands use method B paths; with method A, the CA is `/etc/offpatch/pki/ca.pem`
 
 ```bash
 curl --cacert /etc/offpatch-server/pki/ca.pem https://pm.corp.internal:8443/auth/config
-# {"require_mfa":true,"sso":true,"static_tokens":true}
-TOK=adm_…   # break-glass token
-curl --cacert /etc/offpatch-server/pki/ca.pem -H "Authorization: Bearer $TOK" https://pm.corp.internal:8443/api/me
-curl --cacert /etc/offpatch-server/pki/ca.pem -H "Authorization: Bearer $TOK" https://pm.corp.internal:8443/api/audit/verify
+# {"password_login":true,"require_mfa":true,"sso":true}
+# sign in once as the super admin into the cookie jar `jar` (runbooks/README.md conventions), then:
+curl --cacert /etc/offpatch-server/pki/ca.pem -b jar https://pm.corp.internal:8443/api/me
+curl --cacert /etc/offpatch-server/pki/ca.pem -b jar https://pm.corp.internal:8443/api/audit/verify
 curl --cacert /etc/offpatch-server/pki/ca.pem -H "Authorization: Bearer <metrics_token>" https://pm.corp.internal:8443/metrics | head
 ```
 
 - Sign in to the console with the built-in super admin (email + password); `GET /api/me` shows
-  `auth: "password"`, `role: "super_admin"`, `builtin: true`. Create a bank Admin and two bank Users;
-  check that a deployment needs two of them to approve.
+  `auth: "password"`, `role: "super_admin"`, `builtin: true`. Change the default password
+  (`password_changed_at` is then set and the start-up warning stops). Create a bank Admin and two bank
+  Users; each must enrol an authenticator at the first sign-in (QR code, 10 recovery codes). Check
+  that a deployment needs two of them to approve.
+- A request with `Authorization: Bearer x` to `/api/me` answers 401 `static admin tokens were
+  removed; sign in with email and password`.
 - Sign in to the console with SSO as a member of each role group; `GET /api/me` shows
   `source: "sso"` and `mfa: true`. A user in no role group is refused (`auth.login_denied`).
 - Agent setup page lists the trusted key, `ca.pem` and the staged files.
@@ -388,21 +405,29 @@ curl --cacert /etc/offpatch-server/pki/ca.pem -H "Authorization: Bearer <metrics
   bank Users/Admins other than its creator. In a single-person lab set `"deployment_approvals": 1` in
   `pmserver.json` and restart; there you still need one bank User or Admin who did not create it (the
   super admin does not approve).
-- Roles: `operator` and `approver` are now both `user`. Users gain package approval; package revoke
-  and exceptions now need `admin`. Check `oidc.role_groups` and `admin_tokens` against
-  docs/07-admin-guide.md §2.
-- An existing break-glass token with `"role": "admin"` stays admin (it can manage bank users but not
-  super admins). To make it the vendor super admin, set `"role": "super_admin"` on that entry in
-  `/etc/offpatch/pmserver.json` and restart (owner and mode of the file are kept):
+- Roles: users gain package approval; package revoke and exceptions now need `admin`. Check
+  `oidc.role_groups` against docs/07-admin-guide.md §2.
+- The installer upgrade creates the built-in super admin when no local super admin exists. Without
+  the installer: step 4.
 
-  ```bash
-  sudo python3 -c 'import json; p="/etc/offpatch/pmserver.json"; c=json.load(open(p)); [t.update(role="super_admin") for t in c["admin_tokens"] if t["user"]=="admin"]; json.dump(c, open(p,"w"), indent=2)'
-  sudo systemctl restart offpatch-server
-  ```
-- The installer upgrade creates the built-in super admin (`--admin-email`, default
-  `superadmin@offpatch.local`) when no local super admin exists, and prints its password once. Without
-  the installer: step 4b.
-- The console now signs in with email + password; tokens only at `/login?token=1`.
+### Upgrading to v1.9 (MFA, static admin tokens removed)
+
+- **Static admin tokens are gone.** pmserver refuses to start while `pmserver.json` has
+  `admin_tokens` or `allow_static_tokens`. The installer removes both keys and shreds
+  `/etc/offpatch/admin-token.txt` / `admin-token.sha256`; with method B delete them by hand. Scripts
+  that used `Authorization: Bearer` must sign in with email + password instead
+  ([conventions](README.md#conventions-used-in-the-runbooks)); enrollment tokens from the server
+  shell: `pmserver enroll-token`.
+- **Old role names are refused**: rename `operator` / `approver` in `oidc.role_groups` to `user`
+  (e.g. `"user": ["PM-Operators", "PM-Approvers"]`). Stored users and sessions are migrated to
+  `user` automatically.
+- **MFA**: every bank user (viewer, user, admin) must enrol an authenticator app at the next sign-in.
+  Tell them before the upgrade. `mfa.key` is created by the installer (or at the first start); include
+  it in the backup copies.
+- The default email of a newly created built-in super admin is now `superadmin@dataspacesecurity.com`
+  with the vendor's default password; an existing super admin is kept unchanged.
+- Agent versions are now approved and deployed by the super admin only; their deployments are
+  approved by bank admins only.
 
 ### Upgrading to the P2 release (Library, evidence, alerts that close themselves)
 
@@ -424,7 +449,8 @@ curl --cacert /etc/offpatch-server/pki/ca.pem -H "Authorization: Bearer <metrics
 - Method A upgrade went wrong: `systemctl stop offpatch-server`,
   `cp -a /opt/offpatch/bin.prev/. /opt/offpatch/bin/`, start again. If the new version has already
   changed the database, restore the `pre-upgrade-*` backup as well (runbook 05).
-- SSO broken: sign in with the break-glass token (Bearer) and fix `oidc`.
+- SSO broken: sign in as a local user (email + password + authenticator) and fix `oidc`.
+- Nobody can sign in: `pmserver reset-admin` on the server ([recovery](#recovery-nobody-can-sign-in)).
 - Abandon an install: `systemctl disable --now pmserver` (method A: `sudo ./install-ubuntu.sh
   --uninstall`, which lists the secrets left on disk). The data and PKI directories hold all
   state. Do not reuse a CA you have discarded: endpoints pin it.
@@ -434,6 +460,5 @@ curl --cacert /etc/offpatch-server/pki/ca.pem -H "Authorization: Bearer <metrics
 - Release `SHA256SUMS` and the verified hashes of the installed binaries.
 - Final `pmserver.json` (without secrets) and its hash, in the change record.
 - CA fingerprint printed by `init-pki`.
-- Who holds the break-glass token and where it is stored.
 - Who holds the built-in super admin password (vendor) and when it was last changed or reset.
 - First successful `GET /api/audit/verify` and first backup `verify-backup` output.

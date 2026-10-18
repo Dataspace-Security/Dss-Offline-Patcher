@@ -49,6 +49,8 @@ var columnMigrations = []struct{ table, column, ddl string }{
 	{"deployments", "rejected_by", "TEXT NOT NULL DEFAULT ''"},
 	{"deployments", "rejected_at", "TEXT NOT NULL DEFAULT ''"},
 	{"deployments", "activated_at", "TEXT NOT NULL DEFAULT ''"},
+	// Sessions limited to MFA enrolment (MFA required, not enrolled yet).
+	{"sessions", "mfa_enroll_only", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 func hasColumn(db *sql.DB, table, column string) (bool, error) {
@@ -84,6 +86,18 @@ var tableMigrations = []string{
 	`CREATE TABLE IF NOT EXISTS deployment_approvals(
 	  deployment_id TEXT NOT NULL, approver TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL,
 	  PRIMARY KEY(deployment_id, approver))`,
+	// Auditor compliance report profile, one row per saved version.
+	reportProfileSchema,
+	// Authenticator-app (TOTP) MFA of local users.
+	mfaSchema,
+}
+
+// The role names operator and approver were removed: stored users and
+// sessions of earlier versions become user (the role they meant).
+var roleRenames = []string{
+	`UPDATE users SET role='user' WHERE role IN ('operator','approver')`,
+	`UPDATE sessions SET role='user' WHERE role IN ('operator','approver')`,
+	`UPDATE local_users SET role='user' WHERE role IN ('operator','approver')`,
 }
 
 func migrate(db *sql.DB) error {
@@ -101,6 +115,11 @@ func migrate(db *sql.DB) error {
 			if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", m.table, m.column, m.ddl)); err != nil {
 				return fmt.Errorf("%s.%s: %w", m.table, m.column, err)
 			}
+		}
+	}
+	for _, q := range roleRenames {
+		if _, err := db.Exec(q); err != nil {
+			return fmt.Errorf("role rename: %w", err)
 		}
 	}
 	return nil

@@ -41,8 +41,14 @@ Date: 2026-10-16
 | D1 | Windows only | Windows, plus Linux (`deb`/`rpm`) and macOS (`pkg`) agents. Package kinds: `msu`, `msi`, `deb`, `rpm`, `pkg`, `agent`. |
 | D2 | Drop directory only | Adapter interface: `dropdir`, plus `command` (vendor upload CLI). Signed sender receipts are reconciled on the receiver. |
 | D5 | Single bundle key in a file | Bundle keys may live in an HSM (`exec:` signer). An **offline root key** signs trust documents for rotation and revocation, which agents verify. |
-| D8 | Static admin tokens | **OIDC SSO** with MFA enforcement, role mapping from IdP groups, sessions, user disable. Static tokens remain as break-glass and can be switched off (`allow_static_tokens: false`). Two-person approval per severity; separation of duties. |
+| D8 | Static admin tokens | **OIDC SSO** with MFA enforcement, role mapping from IdP groups, sessions, user disable. Static tokens were kept as break-glass at the time; they were removed in v1.9 (below). Two-person approval per severity; separation of duties. |
 | D9 | Bearer device secret | **mTLS client certificates** from the internal CA (`pmserver init-pki`), renewed automatically. The bearer secret is used only in `insecure_http` lab mode. |
 | D10 | TLS optional | **TLS mandatory.** Plain HTTP requires the explicit `insecure_http` flag. |
 | D11 | Never reboot | Default is still `never`. Deployments may choose `in_window` or `at_deadline`, governed by per-group maintenance windows that allow reboots. |
 | D14 | Hash chain only | Plus Ed25519-signed checkpoints exported off-box (WORM), and retention pruning anchored to them. |
+
+## Revisions (v1.9)
+
+| # | Was | Now |
+|---|---|---|
+| D8 | SSO, local email + password users, static bearer tokens as break-glass and for scripts | **Static admin tokens removed.** Admins sign in only with email + password (local users) or SSO. Local users with role `viewer`, `user` or `admin` must use an authenticator app (TOTP, RFC 6238); for `super_admin` it is optional unless `require_mfa` is set. Recovery when nobody can sign in is `pmserver reset-admin` on the server (root). The built-in super admin is `superadmin@dataspacesecurity.com` with the vendor's default password (handbook) until it is changed. Role names `operator` / `approver` are gone; the roles are `viewer` < `user` < `admin` < `super_admin`. |

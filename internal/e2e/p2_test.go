@@ -321,7 +321,7 @@ func TestUBRVerificationAndEvidenceCSV(t *testing.T) {
 		t.Fatalf("target: %s", st)
 	}
 	hreq, _ := http.NewRequest("GET", e.srv.URL+"/api/reports/targets.csv", nil)
-	hreq.Header.Set("Authorization", "Bearer "+tokViewer)
+	e.authorize(hreq, tokViewer)
 	resp, err := http.DefaultClient.Do(hreq)
 	if err != nil {
 		t.Fatal(err)
@@ -336,7 +336,7 @@ func TestUBRVerificationAndEvidenceCSV(t *testing.T) {
 		t.Errorf("header: %v", rows[0])
 	}
 	r := rows[1]
-	if r[0] != a.id || r[1] != "pc-ubr" || r[2] != "KB5099999-x64" || r[4] != "verified" || r[5] == "" || r[6] != "os_version build 19045.9711" || r[7] != "user:alice" || r[8] != d.DeploymentID {
+	if r[0] != a.id || r[1] != "pc-ubr" || r[2] != "KB5099999-x64" || r[4] != "verified" || r[5] == "" || r[6] != "os_version build 19045.9711" || r[7] != "user:alice@bank.test" || r[8] != d.DeploymentID {
 		t.Errorf("row: %v", r)
 	}
 }

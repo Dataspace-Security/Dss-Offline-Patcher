@@ -15,34 +15,66 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"offpatch/internal/manifest"
 	"offpatch/internal/repo"
 	"offpatch/internal/store"
+	"offpatch/internal/totp"
 )
 
 func init() { store.PasswordIterations = 1000 } // fast tests
 
-// Static tokens per role (aliases included: operator and approver are user).
-var roleTokens = map[string]string{
-	"viewer": "t-viewer", "operator": "t-operator", "approver": "t-approver", "user": "t-user",
-	"admin": "t-admin", "super_admin": "t-super",
+// roleTokens: one signed-in local user per role. The values are keys: do
+// sends the session of that user (testSessions, filled by
+// newRolesServer); any other token value goes out as a bearer token
+// (refused: static admin tokens were removed).
+var roleTokens = map[string]string{"viewer": "t-viewer", "user": "t-user", "admin": "t-admin", "super_admin": "t-super"}
+
+// testSessions maps a roleTokens value to the session of its user on the
+// newest test server (server tests do not run in parallel).
+var testSessions = map[string]string{}
+
+// testSecrets: authenticator secrets of users enrolled by the helpers.
+var testSecrets = map[string][]byte{}
+
+// signIn signs a local user in through the store and, when MFA is required
+// and not enrolled yet, enrols an authenticator: a full session.
+func signIn(t *testing.T, st *store.Store, email, pw string) string {
+	t.Helper()
+	ctx := context.Background()
+	l, err := st.LoginPassword(ctx, email, pw, time.Hour)
+	if err != nil {
+		t.Fatalf("sign in %s: %v", email, err)
+	}
+	if l.MFAPending {
+		sec := testSecrets[email]
+		if l, err = st.LoginMFA(ctx, email, totp.Code(sec, st.Now().Add(totp.Period*time.Second)), "", time.Hour); err != nil {
+			t.Fatalf("mfa %s: %v", email, err)
+		}
+	}
+	if l.MFAEnrollment {
+		en, err := st.MFAEnrollStart(ctx, email)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sec, _ := totp.DecodeSecret(en.SecretBase32)
+		testSecrets[email] = sec
+		if _, err := st.MFAEnrollConfirm(ctx, email, totp.Code(sec, st.Now()), l.Token); err != nil {
+			t.Fatalf("enrol %s: %v", email, err)
+		}
+	}
+	return l.Token
 }
 
-// newRolesServer: a lab server with one static token per role in roleTokens
-// (unless noTokens), extra spliced into the config.
-func newRolesServer(t *testing.T, extra string, noTokens bool) *Server {
+// newRolesServer: a lab server with one signed-in local user per role in
+// roleTokens (unless noUsers), extra spliced into the config.
+func newRolesServer(t *testing.T, extra string, noUsers bool) *Server {
 	t.Helper()
 	dir := t.TempDir()
 	pub, _, _ := manifest.GenerateKey()
-	var toks []string
-	if !noTokens {
-		for role, tok := range roleTokens {
-			toks = append(toks, fmt.Sprintf(`{"user":"tok-%s","role":%q,"token_sha256":%q}`, role, role, store.HashSecret(tok)))
-		}
-	}
-	cfg := fmt.Sprintf(`{"insecure_http": true, %s "data_dir": "data", "trusted_keys":[{"public_key": %q, "sources":["s"]}], "admin_tokens":[%s]}`,
-		extra, manifest.EncodePublic(pub), strings.Join(toks, ","))
+	cfg := fmt.Sprintf(`{"insecure_http": true, %s "data_dir": "data", "trusted_keys":[{"public_key": %q, "sources":["s"]}]}`,
+		extra, manifest.EncodePublic(pub))
 	p := filepath.Join(dir, "pmserver.json")
 	if err := os.WriteFile(p, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
@@ -62,6 +94,14 @@ func newRolesServer(t *testing.T, extra string, noTokens bool) *Server {
 	s, err := New(c, st, rp, ui, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
+	}
+	testSessions = map[string]string{}
+	if !noUsers {
+		for role, tok := range roleTokens {
+			email := strings.ReplaceAll(role, "_", "-") + "@roles.test"
+			mkLocal(t, s, email, role, false)
+			testSessions[tok] = signIn(t, st, email, testPW)
+		}
 	}
 	return s
 }
@@ -83,7 +123,12 @@ func do(h http.Handler, q req) *httptest.ResponseRecorder {
 		rd = bytes.NewReader(b)
 	}
 	r := httptest.NewRequest(q.method, q.path, rd)
-	if q.token != "" {
+	if sess, ok := testSessions[q.token]; ok {
+		r.AddCookie(&http.Cookie{Name: sessionCookie, Value: sess})
+		if q.method != "GET" && q.method != "HEAD" {
+			r.Header.Set(csrfHeader, "1")
+		}
+	} else if q.token != "" {
 		r.Header.Set("Authorization", "Bearer "+q.token)
 	}
 	if q.cookie != nil {
@@ -143,6 +188,13 @@ func TestPermissionTable(t *testing.T) {
 		{"GET", "/api/users", "admin"},
 		{"POST", "/api/users", "admin"},
 		{"POST", "/api/users/someone@bank.example/disable", "admin"},
+		{"POST", "/api/users/someone@bank.example/reset_mfa", "admin"},
+		{"POST", "/api/users/someone@bank.example/delete", "admin"},
+		{"GET", "/api/reports/profile", "viewer"},
+		{"GET", "/api/reports/profile/history", "viewer"},
+		{"PUT", "/api/reports/profile", "admin"},
+		{"GET", "/api/reports/compliance-pack", "viewer"},
+		{"POST", "/api/auth/mfa/disable", "super_admin"},
 	}
 	for _, rt := range routes {
 		for role, tok := range roleTokens {
@@ -168,32 +220,34 @@ func TestPermissionTable(t *testing.T) {
 func TestMeAndPolicy(t *testing.T) {
 	s := newRolesServer(t, `"deployment_approvals": 3,`, false)
 	h := s.Handler()
-	w := do(h, req{method: "GET", path: "/api/me", token: roleTokens["approver"]})
+	w := do(h, req{method: "GET", path: "/api/me", token: roleTokens["user"]})
 	var me map[string]any
 	json.Unmarshal(w.Body.Bytes(), &me)
-	if w.Code != 200 || me["role"] != "user" || me["auth"] != "token" || me["user"] != "tok-approver" || me["must_change_password"] != false {
+	if w.Code != 200 || me["role"] != "user" || me["auth"] != "password" || me["user"] != "user@roles.test" || me["must_change_password"] != false ||
+		me["mfa_enrolled"] != true || me["mfa_required"] != true || me["mfa"] != true {
 		t.Fatalf("me: %d %s", w.Code, w.Body)
+	}
+	json.Unmarshal(do(h, req{method: "GET", path: "/api/me", token: roleTokens["super_admin"]}).Body.Bytes(), &me)
+	if me["mfa_required"] != false || me["mfa_enrolled"] != false {
+		t.Fatalf("super admin me: %v", me)
 	}
 	var pol map[string]any
 	json.Unmarshal(do(h, req{method: "GET", path: "/api/policy", token: roleTokens["viewer"]}).Body.Bytes(), &pol)
 	if pol["deployment_approvals"] != float64(3) {
 		t.Fatalf("policy: %v", pol)
 	}
-	if s.store.Policy.TokenSuperAdmins != 1 || !s.store.Policy.ReservedUsers["tok-admin"] {
-		t.Fatalf("policy from tokens: %+v", s.store.Policy)
-	}
-	// The console's /login (and /login?token=1) is the SPA.
-	if w := do(h, req{method: "GET", path: "/login?token=1"}); w.Code != 200 || !strings.Contains(w.Body.String(), "console") {
+	// The console's /login is the SPA.
+	if w := do(h, req{method: "GET", path: "/login"}); w.Code != 200 || !strings.Contains(w.Body.String(), "console") {
 		t.Fatalf("/login: %d", w.Code)
 	}
 	var ac map[string]any
 	json.Unmarshal(do(h, req{method: "GET", path: "/auth/config"}).Body.Bytes(), &ac)
-	if ac["password_login"] != true {
+	if _, has := ac["static_tokens"]; ac["password_login"] != true || has {
 		t.Fatalf("auth config: %v", ac)
 	}
-	// Token "logout": nothing to end, still 200.
-	if w := do(h, req{method: "POST", path: "/api/auth/logout", token: roleTokens["viewer"], csrf: true}); w.Code != 200 {
-		t.Fatalf("token logout: %d", w.Code)
+	// Logout without a session: nothing to end, still 200.
+	if w := do(h, req{method: "POST", path: "/api/auth/logout", csrf: true}); w.Code != 200 {
+		t.Fatalf("logout without a session: %d", w.Code)
 	}
 }
 
@@ -208,17 +262,6 @@ func TestDeploymentApprovalsConfig(t *testing.T) {
 			t.Errorf("%q: %v", c.extra, err)
 		}
 	}
-	dir := t.TempDir()
-	p := writeConfig(t, dir, "")
-	b, _ := os.ReadFile(p)
-	os.WriteFile(p, bytes.Replace(b, []byte(`"role":"viewer"`), []byte(`"role":"root"`), 1), 0o600)
-	if _, err := LoadConfig(p); err == nil || !strings.Contains(err.Error(), "super_admin") {
-		t.Fatalf("unknown token role: %v", err)
-	}
-	os.WriteFile(p, bytes.Replace(b, []byte(`"role":"viewer"`), []byte(`"role":"operator"`), 1), 0o600)
-	if c, err := LoadConfig(p); err != nil || c.AdminTokens[0].Role != "user" {
-		t.Fatalf("operator alias: %v %+v", err, c)
-	}
 }
 
 const testPW = "a long enough password"
@@ -231,19 +274,66 @@ func mkLocal(t *testing.T, s *Server, email, role string, mustChange bool) {
 	}
 }
 
+// login signs in over HTTP (email + password, then the authenticator code
+// when one is enrolled; enrols one when MFA is required and the password
+// is not temporary) and returns the session cookie.
 func login(t *testing.T, h http.Handler, email, pw string) *http.Cookie {
 	t.Helper()
-	w := do(h, req{method: "POST", path: "/api/auth/login", body: map[string]string{"email": email, "password": pw}, csrf: true, ip: "198.51.100.7"})
+	ip := fmt.Sprintf("198.51.100.%d", len(email)%200+1)
+	w := do(h, req{method: "POST", path: "/api/auth/login", body: map[string]string{"email": email, "password": pw}, csrf: true, ip: ip})
 	if w.Code != 200 {
 		t.Fatalf("login %s: %d %s", email, w.Code, w.Body)
 	}
+	var res map[string]any
+	json.Unmarshal(w.Body.Bytes(), &res)
+	if res["mfa_required"] == true {
+		pre := cookieNamed(w, mfaCookie)
+		code := totp.Code(testSecrets[email], time.Now().Add(totp.Period*time.Second))
+		w = do(h, req{method: "POST", path: "/api/auth/mfa", body: map[string]string{"code": code}, cookie: pre, csrf: true, ip: ip})
+		if w.Code != 200 {
+			t.Fatalf("mfa %s: %d %s", email, w.Code, w.Body)
+		}
+	}
+	ck := cookieNamed(w, sessionCookie)
+	if ck == nil {
+		t.Fatal("no session cookie")
+	}
+	if res["mfa_enrollment_required"] == true && res["must_change_password"] != true {
+		enrolHTTP(t, h, email, ck, ip)
+	}
+	return ck
+}
+
+func cookieNamed(w *httptest.ResponseRecorder, name string) *http.Cookie {
 	for _, c := range w.Result().Cookies() {
-		if c.Name == sessionCookie {
+		if c.Name == name && c.MaxAge >= 0 {
 			return c
 		}
 	}
-	t.Fatal("no session cookie")
 	return nil
+}
+
+// enrolHTTP enrols an authenticator with the session cookie ck and returns
+// the recovery codes.
+func enrolHTTP(t *testing.T, h http.Handler, email string, ck *http.Cookie, ip string) []string {
+	t.Helper()
+	w := do(h, req{method: "POST", path: "/api/auth/mfa/enroll/start", body: map[string]any{}, cookie: ck, csrf: true, ip: ip})
+	var en store.MFAEnrollment
+	json.Unmarshal(w.Body.Bytes(), &en)
+	if w.Code != 200 || en.SecretBase32 == "" || !strings.HasPrefix(en.OTPAuthURI, "otpauth://totp/DSS%20Patcher:") {
+		t.Fatalf("enroll start %s: %d %s", email, w.Code, w.Body)
+	}
+	sec, _ := totp.DecodeSecret(en.SecretBase32)
+	testSecrets[email] = sec
+	w = do(h, req{method: "POST", path: "/api/auth/mfa/enroll/confirm", body: map[string]string{"code": totp.Code(sec, time.Now())}, cookie: ck, csrf: true, ip: ip})
+	var res struct {
+		RecoveryCodes []string `json:"recovery_codes"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &res)
+	if w.Code != 200 || len(res.RecoveryCodes) != store.RecoveryCodes {
+		t.Fatalf("enroll confirm %s: %d %s", email, w.Code, w.Body)
+	}
+	return res.RecoveryCodes
 }
 
 func TestPasswordLoginFlow(t *testing.T) {
@@ -299,11 +389,13 @@ func TestPasswordLoginFlow(t *testing.T) {
 	if w := do(h, req{method: "POST", path: "/api/auth/password", body: chg, cookie: ck, csrf: true}); w.Code != 200 {
 		t.Fatalf("change: %d %s", w.Code, w.Body)
 	}
-	if w := do(h, req{method: "GET", path: "/api/summary", cookie: ck}); w.Code != 200 {
-		t.Fatalf("after change: %d %s", w.Code, w.Body)
+	// Bank role, no authenticator yet: enrolment only.
+	if w := do(h, req{method: "GET", path: "/api/summary", cookie: ck}); w.Code != 403 || errBody(w) != "mfa_enrollment_required" {
+		t.Fatalf("after change, before MFA enrolment: %d %s", w.Code, w.Body)
 	}
-	if w := do(h, req{method: "POST", path: "/api/auth/password", body: chg, token: roleTokens["admin"]}); w.Code != 409 {
-		t.Fatalf("token principal changing password: %d", w.Code)
+	enrolHTTP(t, h, "uma@bank.example", ck, "192.0.2.1")
+	if w := do(h, req{method: "GET", path: "/api/summary", cookie: ck}); w.Code != 200 {
+		t.Fatalf("after change and enrolment: %d %s", w.Code, w.Body)
 	}
 	// Logout ends the session (and needs the CSRF header: no forced logout).
 	if w := do(h, req{method: "POST", path: "/api/auth/logout", cookie: ck}); w.Code != 403 {
@@ -354,34 +446,46 @@ func TestLoginKey(t *testing.T) {
 	}
 }
 
-func TestPasswordLoginRefusedWhenMFARequired(t *testing.T) {
+// require_mfa (SSO setting) also makes the authenticator required for
+// local super admins; password sign-in itself stays available.
+func TestRequireMFAIncludesSuperAdmins(t *testing.T) {
 	oidcCfg := `"oidc": {"issuer": "https://idp.corp", "client_id": "pm", "redirect_url": "https://pm/auth/callback"}, "require_mfa": true,`
-	s := newRolesServer(t, oidcCfg, false)
-	mkLocal(t, s, "uma@bank.example", "user", false)
-	w := do(s.Handler(), req{method: "POST", path: "/api/auth/login", body: map[string]string{"email": "uma@bank.example", "password": testPW}, csrf: true})
-	if w.Code != 403 || !strings.Contains(errBody(w), "multi-factor") {
+	s := newRolesServer(t, oidcCfg, true)
+	mkLocal(t, s, "vendor@dataspacesecurity.test", "super_admin", false)
+	w := do(s.Handler(), req{method: "POST", path: "/api/auth/login", body: map[string]string{"email": "vendor@dataspacesecurity.test", "password": testPW}, csrf: true})
+	var res map[string]any
+	json.Unmarshal(w.Body.Bytes(), &res)
+	if w.Code != 200 || res["mfa_enrollment_required"] != true {
 		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	ck := cookieNamed(w, sessionCookie)
+	if w := do(s.Handler(), req{method: "GET", path: "/api/summary", cookie: ck}); w.Code != 403 || errBody(w) != "mfa_enrollment_required" {
+		t.Fatalf("before enrolment: %d %s", w.Code, w.Body)
+	}
+	enrolHTTP(t, s.Handler(), "vendor@dataspacesecurity.test", ck, "192.0.2.1")
+	if w := do(s.Handler(), req{method: "GET", path: "/api/summary", cookie: ck}); w.Code != 200 {
+		t.Fatalf("after enrolment: %d %s", w.Code, w.Body)
 	}
 }
 
 func TestUserManagementAPI(t *testing.T) {
 	s := newRolesServer(t, "", true) // no tokens: local users only
 	h := s.Handler()
-	mkLocal(t, s, "vendor@offpatch.local", "super_admin", false)
+	mkLocal(t, s, "vendor@dataspacesecurity.test", "super_admin", false)
 	mkLocal(t, s, "adam@bank.example", "admin", false)
-	sup := login(t, h, "vendor@offpatch.local", testPW)
+	sup := login(t, h, "vendor@dataspacesecurity.test", testPW)
 	adm := login(t, h, "adam@bank.example", testPW)
 	post := func(ck *http.Cookie, path string, body any) *httptest.ResponseRecorder {
 		return do(h, req{method: "POST", path: path, body: body, cookie: ck, csrf: true})
 	}
 	// Admin: bank roles only.
-	if w := post(adm, "/api/users", map[string]string{"email": "v2@offpatch.local", "role": "super_admin", "password": "temporary password 1"}); w.Code != 403 {
+	if w := post(adm, "/api/users", map[string]string{"email": "v2@dataspacesecurity.test", "role": "super_admin", "password": "temporary password 1"}); w.Code != 403 {
 		t.Fatalf("admin creates super admin: %d %s", w.Code, w.Body)
 	}
-	if w := post(adm, "/api/users/vendor@offpatch.local/disable", map[string]string{"reason": "x"}); w.Code != 403 {
+	if w := post(adm, "/api/users/vendor@dataspacesecurity.test/disable", map[string]string{"reason": "x"}); w.Code != 403 {
 		t.Fatalf("admin disables super admin: %d %s", w.Code, w.Body)
 	}
-	if w := post(adm, "/api/users/vendor@offpatch.local/reset_password", map[string]string{}); w.Code != 403 {
+	if w := post(adm, "/api/users/vendor@dataspacesecurity.test/reset_password", map[string]string{}); w.Code != 403 {
 		t.Fatalf("admin resets super admin: %d %s", w.Code, w.Body)
 	}
 	evs, _ := s.store.ListAudit(context.Background(), store.AuditQuery{Action: "access.denied"})
@@ -430,30 +534,30 @@ func TestUserManagementAPI(t *testing.T) {
 		t.Fatalf("users: %+v", us)
 	}
 	// Last super admin: the only one cannot be disabled (and not by themselves).
-	if w := post(sup, "/api/users/vendor@offpatch.local/disable", map[string]string{"reason": "x"}); w.Code != 409 {
+	if w := post(sup, "/api/users/vendor@dataspacesecurity.test/disable", map[string]string{"reason": "x"}); w.Code != 409 {
 		t.Fatalf("super admin disables self: %d", w.Code)
 	}
-	if w := post(sup, "/api/users", map[string]string{"email": "v2@offpatch.local", "role": "super_admin", "password": "temporary password 1"}); w.Code != 201 {
+	if w := post(sup, "/api/users", map[string]string{"email": "v2@dataspacesecurity.test", "role": "super_admin", "password": "temporary password 1"}); w.Code != 201 {
 		t.Fatalf("super admin creates super admin: %d %s", w.Code, w.Body)
 	}
-	if w := post(sup, "/api/users/v2@offpatch.local/set_role", map[string]string{"role": "admin"}); w.Code != 200 {
+	if w := post(sup, "/api/users/v2@dataspacesecurity.test/set_role", map[string]string{"role": "admin"}); w.Code != 200 {
 		t.Fatalf("demote second super admin: %d %s", w.Code, w.Body)
 	}
-	mkLocal(t, s, "v3@offpatch.local", "super_admin", false)
-	v3 := login(t, h, "v3@offpatch.local", testPW)
-	if w := post(v3, "/api/users/vendor@offpatch.local/disable", map[string]string{"reason": "rotate"}); w.Code != 200 {
+	mkLocal(t, s, "v3@dataspacesecurity.test", "super_admin", false)
+	v3 := login(t, h, "v3@dataspacesecurity.test", testPW)
+	if w := post(v3, "/api/users/vendor@dataspacesecurity.test/disable", map[string]string{"reason": "rotate"}); w.Code != 200 {
 		t.Fatalf("disable one of two: %d %s", w.Code, w.Body)
 	}
 	if w := do(h, req{method: "GET", path: "/api/me", cookie: sup}); w.Code != 401 {
 		t.Fatalf("disabled super admin still signed in: %d", w.Code)
 	}
-	mkLocal(t, s, "v4@offpatch.local", "super_admin", false)
-	v4 := login(t, h, "v4@offpatch.local", testPW)
-	post(v3, "/api/users/v4@offpatch.local/disable", map[string]string{"reason": "x"})
-	if w := post(v4, "/api/users/v3@offpatch.local/disable", map[string]string{"reason": "x"}); w.Code != 401 {
+	mkLocal(t, s, "v4@dataspacesecurity.test", "super_admin", false)
+	v4 := login(t, h, "v4@dataspacesecurity.test", testPW)
+	post(v3, "/api/users/v4@dataspacesecurity.test/disable", map[string]string{"reason": "x"})
+	if w := post(v4, "/api/users/v3@dataspacesecurity.test/disable", map[string]string{"reason": "x"}); w.Code != 401 {
 		t.Fatalf("disabled v4 still acting: %d", w.Code)
 	}
-	if w := post(v3, "/api/users/v3@offpatch.local/set_role", map[string]string{"role": "admin"}); w.Code != 409 {
+	if w := post(v3, "/api/users/v3@dataspacesecurity.test/set_role", map[string]string{"role": "admin"}); w.Code != 409 {
 		t.Fatalf("last super admin demotes self: %d", w.Code)
 	}
 	// User management audit: never passwords.

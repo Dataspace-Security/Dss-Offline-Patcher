@@ -63,10 +63,6 @@ func (s *Server) passwordLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "missing "+csrfHeader+" header")
 		return
 	}
-	if s.cfg.RequireMFA {
-		writeErr(w, http.StatusForbidden, "multi-factor authentication is required: sign in with SSO")
-		return
-	}
 	r.Body = http.MaxBytesReader(w, r.Body, loginMaxBody)
 	var body struct {
 		Email    string `json:"email"`
@@ -87,9 +83,15 @@ func (s *Server) passwordLogin(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	if res.MFAPending {
+		// Second step: POST /api/auth/mfa with a code within 5 minutes.
+		s.setMFAPreAuth(w, r, res.Email)
+		writeJSON(w, 200, map[string]any{"mfa_required": true, "email": res.Email})
+		return
+	}
 	s.setSessionCookie(w, r, res.Token)
 	writeJSON(w, 200, map[string]any{"user": res.Email, "email": res.Email, "role": res.Role, "auth": "password",
-		"must_change_password": res.MustChangePassword})
+		"must_change_password": res.MustChangePassword, "mfa_required": false, "mfa_enrollment_required": res.MFAEnrollment})
 }
 
 // changePassword: POST /api/auth/password {current, new} (local users).
@@ -197,6 +199,10 @@ func (s *Server) userAction(w http.ResponseWriter, r *http.Request) {
 		err = s.store.ResetLocalPassword(ctx, by, name, pw, body.Reason)
 	case "set_role":
 		err = s.store.SetLocalUserRole(ctx, by, name, body.Role, body.Reason)
+	case "reset_mfa":
+		err = s.store.ResetMFA(ctx, by, name, body.Reason)
+	case "delete":
+		err = s.store.DeleteLocalUser(ctx, by, name, body.Reason)
 	default:
 		writeErr(w, 404, "unknown action")
 		return

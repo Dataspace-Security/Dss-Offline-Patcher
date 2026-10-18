@@ -15,26 +15,20 @@ const (
 
 var roleRanks = map[string]int{RoleViewer: 1, RoleUser: 2, RoleAdmin: 3, RoleSuperAdmin: 4}
 
-// roleAliases: names used by earlier versions (config admin_tokens, SSO
-// role_groups, stored sessions) keep working.
-var roleAliases = map[string]string{"operator": RoleUser, "approver": RoleUser}
-
 // Roles lists the canonical roles, lowest first.
 var Roles = []string{RoleViewer, RoleUser, RoleAdmin, RoleSuperAdmin}
 
-// CanonicalRole maps a role or alias to its canonical name ("" if unknown).
+// CanonicalRole returns the canonical role name ("" if unknown; the old
+// names operator and approver were removed).
 func CanonicalRole(r string) string {
 	r = strings.ToLower(strings.TrimSpace(r))
-	if a, ok := roleAliases[r]; ok {
-		return a
-	}
 	if roleRanks[r] > 0 {
 		return r
 	}
 	return ""
 }
 
-// RoleRank is the rank of a role or alias (0 = unknown, no access).
+// RoleRank is the rank of a role (0 = unknown, no access).
 func RoleRank(r string) int { return roleRanks[CanonicalRole(r)] }
 
 // CanApproveDeployments: bank users and admins approve deployments and

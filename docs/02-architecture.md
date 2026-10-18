@@ -31,6 +31,7 @@
 <data_dir>/agent-dist/   agent binaries/packages staged for download from the console
 <data_dir>/pm.db         SQLite: catalog, endpoints, deployments, results, exceptions, audit
 <data_dir>/audit-signing.key|.pub   signs audit export checkpoints (when audit_export_dir is set)
+<data_dir>/mfa.key       encrypts authenticator (TOTP) secrets at rest (AES-256-GCM; mfa_key_file)
 ```
 
 The internal CA and server certificate live in `pki_dir` (`pmserver init-pki`).
@@ -38,7 +39,7 @@ The internal CA and server certificate live in `pki_dir` (`pmserver init-pki`).
 ## Trust model
 
 - **Bundle signing key** (Ed25519 private) lives only in the acquisition zone (HSM in production). The server and every agent pin the public key(s) by `key_id`. A key is only trusted for the `sources` listed against it.
-- **Server** trusts nothing from the inbox until validation passes, and nothing from validation is deployable until a human with the `approver` role approves it.
+- **Server** trusts nothing from the inbox until validation passes, and nothing from validation is deployable until a signed-in bank user (role `user` or higher) approves it.
 - **Agent** trusts the server for *what* to install and *when*. It does not trust it for *content*: it re-verifies the original manifest signature with its pinned key and checks the payload SHA-256 before installing. A compromised repository therefore cannot push modified binaries.
 - **Agent commands are scoped.** The only command is "install package X from deployment Y". There is no arbitrary remote execution.
 
@@ -50,8 +51,8 @@ The internal CA and server certificate live in `pki_dir` (`pmserver init-pki`).
 | Forged manifest | Ed25519 signature check against a pinned key that is allowed for that `source`. |
 | Replayed old bundle | `sequence` must be greater than the last accepted sequence for the source; `bundle_id` must be unique; `expires_at` is enforced. |
 | Malformed or oversized bundle / tar bomb / path traversal | Max bundle size, max file count, max total extracted size, rejection of absolute paths, `..`, links and device entries, and of files not in the manifest. |
-| Auto-deploy on receipt | Intake only creates packages in `quarantined`. Only `approve` (approver role, mandatory reason) copies into the repository. |
-| Unauthorised approval | Role check plus mandatory reason, and the approval is audited. OIDC sign-in with optional `require_mfa`, per-severity multi-person approval (`approval_policy`) and `separation_of_duties`. |
+| Auto-deploy on receipt | Intake only creates packages in `quarantined`. Only `approve` (role `user` or higher, mandatory reason) copies into the repository. |
+| Unauthorised approval | Role check plus mandatory reason, and the approval is audited. Sign-in is email + password with a mandatory authenticator app (TOTP) for bank roles, or OIDC with optional `require_mfa`; there are no static admin tokens. Agent versions are managed by the vendor (super admin) and their deployments are approved by bank admins only; per-severity multi-person approval (`approval_policy`) and `separation_of_duties`. |
 | Compromised agent | A per-device mTLS client certificate (bearer secret in lab mode) limits it to its own identity. It can only report about itself and download approved content. |
 | Repository tampering | Content-addressed storage. The agent hash check catches modification. Audit records approval and the hash. |
 | Audit tampering | Hash chain. `GET /api/audit/verify` reports the first broken link. Optional off-box export with signed checkpoints (`audit_export_dir`, `pmserver verify-audit`) detects a fully rewritten chain. |

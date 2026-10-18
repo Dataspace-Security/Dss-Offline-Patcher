@@ -17,7 +17,7 @@ const MAX_DETAILS = 20; // live deployments inspected for stage / failure state
 type Item = { key: string; count: number; label: ReactNode; to: string; tone: "red" | "amber" | "blue" | "green" | "grey"; detail?: ReactNode };
 
 /** P2.5: what is waiting on the signed-in user, by role, from existing APIs. */
-export function YourWork({ summary, endpoints }: { summary: Summary; endpoints: Endpoint[] | null }) {
+export function YourWork({ summary, endpoints, className = "" }: { summary: Summary; endpoints: Endpoint[] | null; className?: string }) {
   const me = useMe();
   // Users and Admins approve packages and deployments; the vendor's super admin sees the operational items only.
   const isApprover = hasRole(me, "user");
@@ -127,11 +127,15 @@ export function YourWork({ summary, endpoints }: { summary: Summary; endpoints: 
   const role = roleLabel(me?.role);
 
   return (
-    <section className="card your-work">
-      <div className="section-head">
-        <h2>Your work <span className="muted">· {role}</span></h2>
-        {open.length > 0 && <span className="muted small">{open.length} thing{open.length === 1 ? "" : "s"} need attention</span>}
-      </div>
+    <section className={`dash-card your-work ${className}`} aria-labelledby="your-work-title">
+      <header className="dash-card-head">
+        <div>
+          <h2 id="your-work-title" className="dash-card-title">Your work</h2>
+          <div className="dash-card-sub">
+            {role}{open.length > 0 && <> · {open.length} thing{open.length === 1 ? "" : "s"} need{open.length === 1 ? "s" : ""} attention</>}
+          </div>
+        </div>
+      </header>
       {loadErrors.length > 0 && (
         <div className="banner banner-warn">
           Some of your work could not be checked, so this list may be incomplete:{" "}
@@ -148,16 +152,23 @@ export function YourWork({ summary, endpoints }: { summary: Summary; endpoints: 
         <div className="banner banner-info">{firstRun.map((f, i) => <div key={i}>{f}</div>)}</div>
       )}
       {open.length === 0
-        ? <div className="muted">Nothing is waiting on you. {isOperator ? "New needs show up on Patches → Needed." : ""}</div>
+        ? (
+          <div className="dash-empty dash-empty-ok">
+            <div className="dash-empty-title">Nothing is waiting on you</div>
+            {isOperator && <div className="dash-empty-body">New needs show up on <Link to={paths.needed()}>Patches → Needed</Link>.</div>}
+          </div>
+        )
         : (
-          <ul className="work-list">
+          <ul className="dash-tasks">
             {open.map((i) => (
-              <li key={i.key}>
-                <Link to={i.to} className={`work-count work-${i.tone}`}>{i.count}</Link>
-                <div>
-                  <Link to={i.to}>{i.label}</Link>
-                  {i.detail && <div className="work-detail">{i.detail}</div>}
+              <li key={i.key} className={`dash-task dash-task-${i.tone}`}>
+                <span className="dash-task-mark" aria-hidden="true" />
+                <Link to={i.to} className="dash-task-count num" tabIndex={-1} aria-hidden="true">{i.count}</Link>
+                <div className="dash-task-body">
+                  <Link to={i.to} className="dash-task-label"><span className="dash-sr">{i.count} </span>{i.label}</Link>
+                  {i.detail && <div className="dash-task-detail">{i.detail}</div>}
                 </div>
+                <span className="dash-task-go" aria-hidden="true">→</span>
               </li>
             ))}
           </ul>

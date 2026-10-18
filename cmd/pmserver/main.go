@@ -4,11 +4,10 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -23,6 +22,7 @@ import (
 
 	"offpatch/internal/auditexport"
 	"offpatch/internal/backup"
+	"offpatch/internal/compliance"
 	"offpatch/internal/intake"
 	"offpatch/internal/manifest"
 	"offpatch/internal/pki"
@@ -35,11 +35,20 @@ import (
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
-		case "new-token":
-			newToken()
+		case "enroll-token":
+			if err := enrollTokenCmd(os.Args[2:], os.Stdout); err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+				os.Exit(1)
+			}
 			return
 		case "backup", "restore", "verify-backup":
 			if err := backupCmd(os.Args[1], os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+				os.Exit(1)
+			}
+			return
+		case "verify-report":
+			if err := verifyReport(os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, "error:", err)
 				os.Exit(1)
 			}
@@ -77,14 +86,6 @@ func main() {
 		log.Error("fatal", "err", err)
 		os.Exit(1)
 	}
-}
-
-// newToken prints a random admin token and the hash to put in the config.
-func newToken() {
-	b := make([]byte, 24)
-	rand.Read(b)
-	tok := "adm_" + hex.EncodeToString(b)
-	fmt.Printf("token:        %s\ntoken_sha256: %s\n", tok, store.HashSecret(tok))
 }
 
 func run(cfgPath string, log *slog.Logger) error {
@@ -125,6 +126,11 @@ func run(cfgPath string, log *slog.Logger) error {
 		return err
 	}
 	h.SetIntelKeys(in.ActiveKeys)
+	if who, err := st.DefaultSuperAdminPasswordInUse(context.Background()); err != nil {
+		return err
+	} else if len(who) > 0 {
+		log.Warn("the built-in super admin still uses the vendor's default password: sign in to the console and change it", "users", strings.Join(who, ","))
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	// Background work (intake, alerts, audit export) and in-flight requests
@@ -200,18 +206,25 @@ func run(cfgPath string, log *slog.Logger) error {
 	return err
 }
 
-// adminCmd: create-admin creates the built-in super admin (the vendor)
-// with a generated password; reset-admin gives an existing local super
-// admin a new generated password (recovery, as root on the server). The
-// password is printed once and only its PBKDF2 hash is stored. Run as the
+// adminCmd: create-admin creates the built-in super admin (the vendor),
+// by default DefaultSuperAdminEmail with the vendor's default password
+// (only its PBKDF2 hash is embedded; the console asks for a new one at the
+// first sign-in), or with -password-random a generated password printed
+// once. reset-admin gives an existing local super admin a new generated
+// password (recovery, as root on the server; printed once). Run as the
 // service user so the database keeps its owner.
-func adminCmd(cmd string, args []string) error {
-	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
+func adminCmd(cmd string, args []string) error { return runAdminCmd(cmd, args, os.Stdout) }
+
+func runAdminCmd(cmd string, args []string, out io.Writer) error {
+	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	cfgPath := fs.String("config", "pmserver.json", "server config")
-	email := fs.String("email", "", "sign-in email of the super admin")
+	email := fs.String("email", store.DefaultSuperAdminEmail, "sign-in email of the super admin")
 	name := fs.String("name", "Vendor support", "create-admin: display name")
 	ifNone := fs.Bool("if-none", false, "create-admin: do nothing when an enabled local super admin already exists (installer upgrades)")
-	fs.Parse(args)
+	random := fs.Bool("password-random", false, "create-admin: a generated password (shown once) instead of the vendor's default password")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 	if *email == "" {
 		return fmt.Errorf("-email is required")
 	}
@@ -227,18 +240,14 @@ func adminCmd(cmd string, args []string) error {
 		return err
 	}
 	defer st.Close()
-	st.Policy.ReservedUsers = map[string]bool{}
-	for _, t := range cfg.AdminTokens {
-		st.Policy.ReservedUsers[strings.ToLower(t.User)] = true
-	}
 	ctx := context.Background()
-	pw := store.GeneratePassword()
 	if cmd == "reset-admin" {
+		pw := store.GeneratePassword()
 		if err := st.RecoverSuperAdmin(ctx, *email, pw); err != nil {
 			return err
 		}
 		e, _ := store.NormalizeEmail(*email)
-		fmt.Printf("super admin password reset (shown ONCE; other sessions of this account ended)\nemail:    %s\npassword: %s\n", e, pw)
+		fmt.Fprintf(out, "super admin password reset, MFA cleared (password shown ONCE; other sessions of this account ended)\nemail:    %s\npassword: %s\n", e, pw)
 		return nil
 	}
 	if *ifNone {
@@ -247,15 +256,58 @@ func adminCmd(cmd string, args []string) error {
 			return err
 		}
 		if has {
-			fmt.Println("a local super admin already exists; nothing to do (lost the password? pmserver reset-admin -email ...)")
+			fmt.Fprintln(out, "a local super admin already exists; nothing to do (lost the password? pmserver reset-admin -email ...)")
 			return nil
 		}
 	}
+	if !*random {
+		u, err := st.CreateBuiltinSuperAdminDefault(ctx, *email, *name)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "created the built-in super admin with the default password (see the vendor handbook); change it after the first sign-in\nemail:    %s\ndefault_password: yes\n", u.Email)
+		return nil
+	}
+	pw := store.GeneratePassword()
 	u, err := st.CreateBuiltinSuperAdmin(ctx, *email, *name, pw)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("created the built-in super admin (password shown ONCE; only its hash is stored)\nemail:    %s\npassword: %s\n", u.Email, pw)
+	fmt.Fprintf(out, "created the built-in super admin (password shown ONCE; only its hash is stored)\nemail:    %s\npassword: %s\n", u.Email, pw)
+	return nil
+}
+
+// enrollTokenCmd: pmserver enroll-token prints a one-use enrollment token
+// (the installer's --with-agent; audited as created by system:cli).
+func enrollTokenCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("enroll-token", flag.ContinueOnError)
+	cfgPath := fs.String("config", "pmserver.json", "server config")
+	groups := fs.String("groups", "", "comma-separated endpoint groups")
+	site := fs.String("site", "", "site")
+	hours := fs.Int("hours", 1, "valid for this many hours")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := server.LoadConfig(*cfgPath)
+	if err != nil {
+		return err
+	}
+	st, err := store.Open(filepath.Join(cfg.DataDir, "pm.db"))
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	var gs []string
+	for _, g := range strings.Split(*groups, ",") {
+		if g = strings.TrimSpace(g); g != "" {
+			gs = append(gs, g)
+		}
+	}
+	t, err := st.CreateEnrollmentToken(context.Background(), "system:cli", gs, *site, *hours, 1)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "token: %s\nexpires_at: %s\n", t.Token, t.ExpiresAt)
 	return nil
 }
 
@@ -314,6 +366,34 @@ func verifyAudit(args []string) error {
 	return nil
 }
 
+// verifyReport checks a compliance evidence package offline: the manifest
+// signature (with the server's audit-signing.pub, obtained independently)
+// and every file's SHA-256.
+func verifyReport(args []string) error {
+	fs := flag.NewFlagSet("verify-report", flag.ExitOnError)
+	zipPath := fs.String("zip", "", "compliance-*.zip downloaded from Reports")
+	pubPath := fs.String("pub", "", "audit-signing.pub of the server")
+	fs.Parse(args)
+	if *zipPath == "" || *pubPath == "" {
+		return fmt.Errorf("-zip and -pub are required")
+	}
+	pub, err := manifest.LoadPublic(*pubPath)
+	if err != nil {
+		return err
+	}
+	b, err := os.ReadFile(*zipPath)
+	if err != nil {
+		return err
+	}
+	m, err := compliance.VerifyZip(b, pub)
+	if err != nil {
+		return fmt.Errorf("compliance package verification FAILED: %w", err)
+	}
+	fmt.Printf("compliance package OK: report %s, period %s to %s, generated %s by %s, %d files, key %s\n",
+		m.ReportID, m.Period.From, m.Period.To, m.GeneratedAt, m.GeneratedBy.User, len(m.Files), m.PublicKeyFingerprint)
+	return nil
+}
+
 // backupCmd implements backup / restore / verify-backup.
 func backupCmd(cmd string, args []string) error {
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
@@ -345,6 +425,12 @@ func backupCmd(cmd string, args []string) error {
 			return err
 		}
 		fmt.Printf("restored %d files into %s; audit chain verified to seq %d; approved content verified\n", len(m.Files), cfg.DataDir, m.AuditSeq)
+		// Restore evidence for the compliance report (PM-16), in the restored database.
+		if st, err := store.Open(filepath.Join(cfg.DataDir, "pm.db")); err == nil {
+			st.Audit(ctx, store.Ev{Actor: "system:backup", Action: "backup.restored", ObjectType: "backup", ObjectID: *dir,
+				Details: map[string]any{"files": len(m.Files), "backup_created_at": m.CreatedAt, "audit_seq": m.AuditSeq}})
+			st.Close()
+		}
 		return nil
 	}
 	st, err := store.Open(filepath.Join(cfg.DataDir, "pm.db"))
@@ -354,6 +440,11 @@ func backupCmd(cmd string, args []string) error {
 	defer st.Close()
 	m, err := backup.Create(ctx, st, l, *dir, !*noPKI)
 	if err != nil {
+		return err
+	}
+	// Backup evidence for the compliance report (PM-12 / PM-16).
+	if err := st.Audit(ctx, store.Ev{Actor: "system:backup", Action: "backup.created", ObjectType: "backup", ObjectID: *dir,
+		Details: map[string]any{"files": len(m.Files), "audit_seq": m.AuditSeq, "include_pki": m.IncludePKI, "created_at": m.CreatedAt}}); err != nil {
 		return err
 	}
 	if !*noPKI && cfg.PKIDir != "" {

@@ -2,9 +2,11 @@
 
 All bodies are JSON and all times are RFC 3339 UTC. Errors return `{"error": "message"}` with status 400/401/403/404/409/500.
 
-## Admin API — `Authorization: Bearer <admin token>`
+## Admin API — session cookie (`offpatch_session`)
 
-Roles are cumulative: `viewer` < `user` < `admin` < `super_admin` (v1.8; `operator` and `approver` are accepted as `user`). The Role column below is the v1.8 minimum; see "v1.8 additions" for what changed.
+Admins authenticate with the `offpatch_session` cookie: from `POST /api/auth/login` (email + password, then `POST /api/auth/mfa` with an authenticator code when the account has one) or from SSO (`GET /auth/login`). Cookie-authenticated requests that change state must send header `X-Offpatch-CSRF: 1`. There are no static admin tokens (removed in v1.9): a request to `/api/*` with `Authorization: Bearer …` gets **401** `static admin tokens were removed; sign in with email and password`. See "v1.8 additions" and "v1.9 additions".
+
+Roles are cumulative: `viewer` < `user` < `admin` < `super_admin` (v1.8; the old names `operator` and `approver` were removed in v1.9). The Role column below is the v1.8 minimum; see "v1.8 additions" for what changed and "v1.9 additions" for agent versions.
 
 | Method & path | Role | Body → Response |
 |---|---|---|
@@ -155,12 +157,12 @@ type LifecycleExport = {
 ### Authentication (B2)
 | Method & path | Auth | Notes |
 |---|---|---|
-| `GET /auth/config` | none | → `{sso: bool, static_tokens: bool, require_mfa: bool}` — the login page shows "Sign in with SSO" when `sso` |
+| `GET /auth/config` | none | → `{sso: bool, require_mfa: bool, password_login: true}` — the login page shows "Sign in with SSO" when `sso` (`static_tokens` was removed in v1.9) |
 | `GET /auth/login?return=/path` | none | redirects to the IdP (OIDC + PKCE); on return sets the `offpatch_session` cookie (HttpOnly, SameSite=Strict) and redirects to `return`. On failure redirects to `/?login_error=<message>` |
 | `POST /auth/logout` | session | → `{end_session_url?}` |
-| `GET /api/me` | any | → `{user, role, source: "sso"|"token", mfa: bool}` |
+| `GET /api/me` | any | → `{user, role, source, mfa: bool}` (full v1.9 shape below) |
 
-Cookie-authenticated (SSO) requests that change state MUST send header `X-Offpatch-CSRF: 1`. The console should send it on every request and use `credentials: "same-origin"`. Bearer-token requests do not need it.
+Cookie-authenticated requests (SSO and email + password) that change state MUST send header `X-Offpatch-CSRF: 1`. The console should send it on every request and use `credentials: "same-origin"`.
 
 | Method & path | Role | Body → Response |
 |---|---|---|
@@ -180,7 +182,7 @@ Cookie-authenticated (SSO) requests that change state MUST send header `X-Offpat
 Agent API additions: `POST /api/agent/renew {csr}` → `{certificate, ca_certificate}` (mTLS). The check-in response adds `reboot_now`, `download_rate_kbps`, `trust` (signed trust document) and, per assignment, `reboot_allowed` and `health_checks`.
 
 ```ts
-type Me = { user: string; role: Role; source: "sso" | "token"; mfa: boolean };
+type Me = { user: string; role: Role; source: "sso" | "password"; mfa: boolean };  // v1.8 and v1.9 fields below
 type User = { username: string; role: Role; source: string; email: string; mfa: boolean; first_login: string;
   last_login: string; disabled: boolean; disabled_reason: string; active_sessions: number };
 
@@ -352,7 +354,7 @@ Server behaviour without new endpoints (details in [03-state-model.md](03-state-
 - **Import again**: a `rejected` package delivered again in a validated bundle returns to `quarantined` (`package.reimported`); a `revoked` one stays revoked and is listed as a skipped duplicate.
 - **Restart needed**: a `pending_reboot` target whose `reboot_policy` can never restart it (no maintenance window allows reboots; for `at_deadline`, before the deadline) has detail `installed; waiting for a restart: no maintenance window allows automatic restarts (restart the machine or add a window)`.
 - **Installer busy**: `failed` reports with detail prefix `retry later: installer busy` are not counted as attempts for the first 10 in a row per target (detail `waiting: another installation is running on this machine (try N)`).
-- **Static tokens**: `allow_static_tokens` defaults to `true` with or without `oidc`; pmserver logs one line at startup saying which sign-in methods work (a warning when `admin_tokens` are configured but disabled).
+- **Static tokens** (v1.6 behaviour, removed in v1.9): `allow_static_tokens` and `admin_tokens` are no longer accepted; see "v1.9 additions".
 
 ## v1.7 additions — P2 (Library, imports tracking, alerts that close themselves, evidence)
 
@@ -403,20 +405,21 @@ Server behaviour without new endpoints (details in [03-state-model.md](03-state-
 ### Roles
 
 Roles are cumulative: `viewer` (1) < `user` (2, bank) < `admin` (3, bank) < `super_admin` (4, vendor).
-Older names stay accepted everywhere a role is configured (`admin_tokens`, `oidc.role_groups`, stored
-sessions): `operator` and `approver` mean `user`. API responses always use the new names.
+In v1.8 the older names `operator` and `approver` were still accepted as `user`; v1.9 removed them
+(pmserver refuses to start when `oidc.role_groups` uses one; stored users and sessions were moved to
+`user`). API responses always use the new names.
 
 | Role | Can do (in addition to the roles below it) |
 |---|---|
 | `viewer` | Every `GET` above except `/api/users` (no secrets). |
 | `user` | Acquisition requests; create deployments and rollbacks (they start `pending_approval`); approve / reject deployments and rollbacks (not their own); approve / reject packages; acknowledge alerts; maintenance windows; enrollment tokens; edit and retire endpoints; pause / resume / cancel / advance / retry deployments. |
 | `admin` | Users: create, disable / enable, reset password, change role for `viewer`, `user` and `admin` (never `super_admin`); create and revoke exceptions; revoke packages. |
-| `super_admin` | Everything, including managing `super_admin` accounts. **Not** a deployment approver (the vendor does not approve bank changes). |
+| `super_admin` | Everything, including managing `super_admin` accounts and (v1.9) agent versions. **Not** a deployment approver (the vendor does not approve bank changes). |
 
 The route table is the security boundary: the console hides what a role cannot do, the API refuses
 it with **403** `requires role <role>` (audited `access.denied`). Role changes in the table above
-compared with v1.7: package approve / reject `approver` → `user`; package revoke and exceptions
-`approver` → `admin`.
+compared with v1.7: package approve / reject moved from the old approver role to `user`; package
+revoke and exceptions to `admin`.
 
 ### Deployment and rollback approval
 
@@ -446,23 +449,23 @@ deployment is `active`.
 
 | Method & path | Auth / role | Body → Response |
 |---|---|---|
-| `GET /auth/config` | none | Gains `password_login: bool` (false when `require_mfa` is set: a password alone is one factor). |
-| `POST /api/auth/login` | none | `{email, password}` → `{user, email, role, auth: "password", must_change_password}` and the `offpatch_session` cookie (same session as SSO: `session_ttl`, `HttpOnly`, `SameSite=Strict`, `Secure` over TLS). Needs header `X-Offpatch-CSRF: 1`. **401** `wrong email or password` for an unknown email, a wrong password **and** a locked account (no enumeration; the same work is done in every case). 403 for a disabled account (only after the right password) or when `require_mfa` is set. **429** with `Retry-After` past 10 attempts per client IP (IPv6: per /64; then one per 6 s; loopback is not exempt; no proxy headers are trusted). 5 wrong passwords in a row lock the account for 15 minutes (audited `auth.locked`). Every failure is audited `auth.login_failed` with the reason; the attempted name only when it is a well-formed email, never the password. |
-| `POST /api/auth/logout` | session or token | → `{end_session_url?}`. Ends the cookie session (needs `X-Offpatch-CSRF: 1`, also on `POST /auth/logout`, which still works); with a static token there is nothing to end (200). |
-| `POST /api/auth/password` | local user session | `{current, new}` → `{ok}`. New password: at least 12 characters, not the email (or the part before the @), not the current one (400). A wrong `current` counts towards the lockout. Clears `must_change_password` and ends the user's other sessions. 409 for SSO and token callers. |
-| `GET /api/me` | any | → `{user, email, display_name, role, auth: "password" \| "sso" \| "token", source (= auth), mfa, must_change_password, password_changed_at ("" until the user changed it), builtin (the installer-created super admin)}` |
+| `GET /auth/config` | none | Gains `password_login: bool` (v1.9: always `true`; `require_mfa` now makes the authenticator step required instead). |
+| `POST /api/auth/login` | none | `{email, password}` → `{user, email, role, auth: "password", must_change_password}` and the `offpatch_session` cookie (same session as SSO: `session_ttl`, `HttpOnly`, `SameSite=Strict`, `Secure` over TLS). Needs header `X-Offpatch-CSRF: 1`. **401** `wrong email or password` for an unknown email, a wrong password **and** a locked account (no enumeration; the same work is done in every case). 403 for a disabled account (only after the right password). v1.9: the 200 answer may ask for the authenticator step (see "v1.9 additions"). **429** with `Retry-After` past 10 attempts per client IP (IPv6: per /64; then one per 6 s; loopback is not exempt; no proxy headers are trusted). 5 wrong passwords in a row lock the account for 15 minutes (audited `auth.locked`). Every failure is audited `auth.login_failed` with the reason; the attempted name only when it is a well-formed email, never the password. |
+| `POST /api/auth/logout` | session | → `{end_session_url?}`. Ends the cookie session (needs `X-Offpatch-CSRF: 1`, also on `POST /auth/logout`, which still works). |
+| `POST /api/auth/password` | local user session | `{current, new}` → `{ok}`. New password: at least 12 characters, not the email (or the part before the @), not the current one (400). A wrong `current` counts towards the lockout. Clears `must_change_password` and ends the user's other sessions. 409 for SSO callers. |
+| `GET /api/me` | any | → `{user, email, display_name, role, auth: "password" \| "sso", source (= auth), mfa, must_change_password, password_changed_at ("" until the user changed it), builtin (the installer-created super admin)}`; v1.9 adds `mfa_enrolled`, `mfa_required` |
 | `GET /api/users` | admin | → `User[]`: SSO users (seen at sign-in) and local users. Never a password hash. |
-| `POST /api/users` | admin | `{email, display_name?, role, password?}` → **201** `{email, username, display_name, role, must_change_password: true, source: "local", auth: "password", temp_password?}`. The password is temporary: the user must change it at first sign-in. Without `password` one is generated and returned **once** as `temp_password`. 400 invalid email / role / password; 403 for `role: super_admin` unless the caller is a super admin; 409 if the name exists (also as an SSO user or a static token name). Audited `user.created`. |
+| `POST /api/users` | admin | `{email, display_name?, role, password?}` → **201** `{email, username, display_name, role, must_change_password: true, source: "local", auth: "password", temp_password?}`. The password is temporary: the user must change it at first sign-in. Without `password` one is generated and returned **once** as `temp_password`. 400 invalid email / role / password; 403 for `role: super_admin` unless the caller is a super admin; 409 if the name exists (also as an SSO user). Audited `user.created`. |
 | `POST /api/users/{email}/disable` · `/enable` | admin | `{reason?}` → `{ok}`. Disable ends the user's sessions; enable also clears a lockout. Works for SSO and local users. |
 | `POST /api/users/{email}/reset_password` | admin | `{password?, reason?}` → `{ok, temp_password?}`. Local users only (409 for SSO). New temporary password (generated and returned once when `password` is empty), `must_change_password`, lockout cleared, sessions ended. Audited `user.password_reset`. |
 | `POST /api/users/{email}/set_role` | admin | `{role, reason?}` → `{ok}`. Local users only (SSO roles come from `oidc.role_groups`). Ends the user's sessions. Audited `user.role_changed` (`from`, `to`). |
 
 Limits (403 / 409, refusals by role audited `access.denied`): only a `super_admin` creates, changes or
 disables a `super_admin` or grants that role; nobody disables, demotes or resets themselves (409); the
-last enabled super admin cannot be disabled or demoted (409; enabled `super_admin` static tokens count).
+last enabled super admin cannot be disabled or demoted (409).
 A user with `must_change_password` gets **403** `password_change_required` from every call except
 `GET /api/me`, `POST /api/auth/password` and `POST /api/auth/logout`. An SSO sign-in whose name is a local
-user or a static token name is refused. Audit events never contain passwords or hashes.
+user is refused. Audit events never contain passwords or hashes.
 
 Passwords are stored as `pbkdf2-sha256$<iterations>$<salt>$<hash>` (PBKDF2-SHA256 from the Go standard
 library, 600 000 iterations, 16-byte random salt) in table `local_users` (email, display_name, role,
@@ -474,7 +477,168 @@ password_changed_at, builtin). The disable switch is `users.disabled`, shared wi
 //   created_by?; created_at?; password_changed_at?.  Local users: source "local", username = email = the email.
 ```
 
-Static admin tokens keep working for the API and automation (`Authorization: Bearer`), and in the
-console only as a hidden break-glass at `/login?token=1`. `pmserver create-admin -config … -email …
-[-name …] [-if-none]` creates the built-in super admin and prints a generated password once;
-`pmserver reset-admin -config … -email …` (root on the server) prints a new one (recovery).
+In v1.8 static admin tokens still worked for the API and as a hidden console break-glass; v1.9
+removed them (see "v1.9 additions"). `pmserver create-admin -config … [-email …] [-name …]
+[-if-none] [-password-random]` creates the built-in super admin; `pmserver reset-admin -config …
+[-email …]` (root on the server) prints a new password once (recovery).
+
+## v1.9 additions — sign-in and MFA, static tokens removed, agent versions
+
+### Removed
+
+| What | Now |
+|---|---|
+| Static admin tokens (`admin_tokens`, `allow_static_tokens` in `pmserver.json`) | pmserver **refuses to start** while either key is present; the message says to delete both and sign in with email + password. The installer removes them on upgrade and shreds `admin-token.txt` / `admin-token.sha256`. |
+| `Authorization: Bearer <admin token>` on `/api/*` | **401** `static admin tokens were removed; sign in with email and password`. Agent bearer device secrets (lab mode) and `metrics_token` on `GET /metrics` are unchanged. |
+| `pmserver new-token` | Removed. Enrollment tokens from scripts: `pmserver enroll-token` (below). |
+| Console token sign-in (`/login?token=1`) | Removed. |
+| `GET /auth/config` → `static_tokens` | Removed; `password_login` is always `true`. |
+| Role names `operator`, `approver` | Removed everywhere. `oidc.role_groups` (and any configured role) must use `viewer`, `user`, `admin` or `super_admin`; pmserver refuses to start naming the old value. Stored users and sessions with an old name are migrated to `user`. |
+| `require_mfa` switching email + password sign-in off | `require_mfa` now makes the authenticator step required for **every** local user (super admins too) and still refuses SSO sessions without IdP MFA. |
+
+Admins authenticate only with email + password sessions (local users) and SSO (when `oidc` is
+configured). Scripts sign in with `POST /api/auth/login` (+ `POST /api/auth/mfa`), keep the
+`offpatch_session` cookie and send `X-Offpatch-CSRF: 1` on writes.
+
+### MFA (authenticator app)
+
+TOTP (RFC 6238), 6 digits, 30 s. **Required** for local users with role `viewer`, `user`, `admin`;
+**optional** for `super_admin` unless `require_mfa` is set (then required for every local user). SSO
+users: the IdP's MFA (`require_mfa` checks `amr` / `acr`); the endpoints below answer 409 for SSO
+users. Each code works once; wrong codes count towards the same lockout as wrong passwords (5 in a
+row → 15 min). 10 recovery codes are shown once at enrolment, stored hashed, each single-use.
+Secrets are encrypted at rest (AES-256-GCM) with the key in `mfa_key_file` (default
+`<data_dir>/mfa.key`, 64 hex characters, mode 0600; created by the installer and at first start if
+missing; included in `pmserver backup` at the default path only). The secret is never returned after enrolment.
+
+`POST /api/auth/login` `{email, password}` has three 200 answers (errors unchanged: 401 `wrong email
+or password`, 403 disabled, 429 rate limit):
+
+- Authenticator enrolled → `{"mfa_required": true, "email"}`. **No** session cookie; a short-lived
+  (5 min) HttpOnly cookie `offpatch_mfa` (Path `/api/auth/mfa`) is set. Continue with `POST /api/auth/mfa`.
+- MFA required but not enrolled → `{user, email, role, auth: "password", must_change_password,
+  mfa_required: false, mfa_enrollment_required: true}` and the session cookie. This session is
+  **limited**: every call except `GET /api/me`, `POST /api/auth/mfa/enroll/start`,
+  `POST /api/auth/mfa/enroll/confirm`, `POST /api/auth/password` and `POST /api/auth/logout` answers
+  **403** `mfa_enrollment_required`. With `must_change_password` the password change comes first
+  (403 `password_change_required`, the enrolment endpoints included), then enrolment.
+- No MFA needed (super admin not enrolled) → as in v1.8 plus `mfa_required: false,
+  mfa_enrollment_required: false`.
+
+| Method & path | Auth / role | Body → Response |
+|---|---|---|
+| `POST /api/auth/mfa` | `offpatch_mfa` cookie from login | `{code: "123456"}` or `{recovery_code: "abcde-fghij"}` → 200 `{user, email, role, auth: "password", must_change_password, mfa: true}` + session cookie; the pre-auth cookie is cleared. **401** `wrong or expired code` (wrong code, code already used, used recovery code, or the account is locked); **401** `sign-in expired; enter your email and password again` (no / invalid / expired pre-auth cookie: restart at login); 403 disabled; 429 rate limit (same per-IP limit as login). |
+| `POST /api/auth/mfa/enroll/start` | local user session (also the limited one) | `{}` → `{secret_base32, otpauth_uri}`; `otpauth_uri` = `otpauth://totp/DSS%20Patcher:<email>?secret=<secret_base32>&issuer=DSS%20Patcher&digits=6&period=30` (render as QR code, show the secret for manual entry). Calling again replaces the unconfirmed secret; the pending secret expires after 15 minutes. 409 if already enrolled ("ask an administrator to reset MFA"); 409 for SSO users. |
+| `POST /api/auth/mfa/enroll/confirm` | local user session (also the limited one) | `{code}` → `{ok: true, recovery_codes: [10 × "abcde-fghij"]}` (shown **once**). The current session becomes a full, MFA-verified session at once (no new sign-in). 400 `wrong or expired code`; 409 `no enrolment in progress: start it first` / `the enrolment expired: start it again`. |
+| `POST /api/auth/mfa/disable` | super_admin (own account only) | `{code}` → `{ok: true}`. 403 for other roles; 400 wrong code (counts towards the lockout); 409 not enrolled or `require_mfa` is set. |
+
+Audit actions: `user.mfa_enrollment_started`, `user.mfa_enrolled`, `auth.password_verified` (password
+right, MFA step next), `auth.mfa_failed` (`details.reason` / `stage`), `auth.mfa_recovery_used`,
+`auth.locked`, `user.mfa_reset`, `user.mfa_disabled`, `user.deleted`, `auth.login`
+(`details.mfa`, `details.mfa_enrollment_required`).
+
+### `/api/me` and `/api/users`
+
+- `GET /api/me` gains `mfa_enrolled: bool` (local users) and `mfa_required: bool` (local users: true
+  for bank roles, for super admins only with `require_mfa`; SSO: the `require_mfa` setting). `mfa` is
+  still "this session was MFA-verified". `auth` / `source` are `"password"` or `"sso"`.
+- `builtin: true` with `password_changed_at: ""` means the built-in super admin still has the
+  vendor's default password: the console shows a change-password banner.
+- `GET /api/users` items gain `mfa_enrolled: bool`.
+
+### User actions
+
+`POST /api/users/{email}/{action}`, body `{reason?}`:
+
+| Action | Role | Response and rules |
+|---|---|---|
+| `reset_mfa` | admin for bank roles, super_admin for super admins (403 otherwise) | `{ok: true}`. Removes the user's authenticator and recovery codes and ends their sessions; they enrol again at the next sign-in. 409 for SSO users. Audited `user.mfa_reset`. |
+| `delete` | admin for bank roles, super_admin for any | `{ok: true}`. Deletes a **local** user: account, sessions and MFA. The audit history is kept (`user.deleted`) and the email can be reused. 409 for yourself, the last super admin and SSO users (disable them instead); 404 unknown user. |
+
+### Built-in super admin
+
+`pmserver create-admin` (and the installer, `--admin-email`) defaults to
+`superadmin@dataspacesecurity.com` and sets the vendor's **default password** (only its PBKDF2 hash is
+embedded in `pmserver`; the password is in the vendor handbook). The installer summary prints
+"super admin: superadmin@dataspacesecurity.com — default password (see vendor handbook); change it
+after first sign-in". While the default password is in use, `/api/me` returns `builtin: true` and
+`password_changed_at: ""`, and pmserver logs a WARN at every start. `-password-random` creates it
+with a random password printed once instead.
+
+### Agent versions
+
+Packages of kind `agent` (`offpatch-agent-*`) are managed by the vendor:
+
+| Action | Who | Refused with |
+|---|---|---|
+| `POST /api/packages/{id}/approve` · `/reject` · `/revoke` | super_admin only | 403 `agent versions are managed by the vendor (super admin)` |
+| `POST /api/deployments` (install or rollback of an agent version) | super_admin only | 403 `agent versions are managed by the vendor (super admin)` |
+| `POST /api/deployments/{id}/approve` · `/reject` for an agent-version deployment | role `admin` only (bank admins), not the creator; `deployment_approvals` of them | 403 `agent version deployments are approved by bank admins` (role `user`); the super admin cannot approve either |
+
+### CLI changes
+
+| Command | Change |
+|---|---|
+| `pmserver enroll-token -config pmserver.json -groups g1,g2 -site s -hours 1` | New. Prints `token: enr_…` and `expires_at` (one use; audited as created by `system:cli`). Run on the server as the service user. |
+| `pmserver create-admin -config … [-email …] [-name …] [-if-none] [-password-random]` | Default `-email` `superadmin@dataspacesecurity.com`; without `-password-random` it sets the vendor's default password. |
+| `pmserver reset-admin -config … [-email …]` | New random password printed once, account re-enabled, lockout cleared, and the super admin's MFA cleared. Run as root (as the service user). |
+| `pmserver verify-report -zip compliance-….zip -pub audit-signing.pub` | New. Verifies a compliance evidence package offline (manifest signature and every file's SHA-256). |
+| `pmserver new-token` | Removed. |
+| `pmserver backup` | Also includes `<data_dir>/mfa.key` (a `mfa_key_file` elsewhere is not copied); writes the audit event `backup.created` (a restore writes `backup.restored` into the restored database). |
+
+## v1.9 additions — auditor compliance report
+
+The owner's "Patch Management Compliance Report" template, generated from product data and a
+versioned report profile (docs/10-compliance-report.md explains what is computed and how). Exact
+JSON shapes: `internal/compliance/types.go` (`Pack`) and `internal/store/report_profile.go`
+(`ReportProfile`).
+
+| Method & path | Role | Body → Response |
+|---|---|---|
+| `GET /api/reports/profile` | viewer | → `ReportProfileRecord` `{version, edited_by, edited_at, sha256, is_default, profile}`: the latest saved version, or version 0 with `is_default: true` (deadlines from `patch_deadlines`, the template's seven §4 rows with `applicable: "unknown"`, the four sign-off roles). `?version=N` → that version (404 if never saved). |
+| `PUT /api/reports/profile` | admin | `ReportProfile` (strict JSON) → `ReportProfileRecord` of the new version. `?base_version=N`: 409 when another version was saved since N. 400 lists every problem: `regulators` ∈ RBI, SEBI, IRDAI, PFRDA, MeitY, CERT-In, other; `deadlines[].priority` ∈ emergency, critical, high, moderate, low (once each; missing ones are filled from the policy), `max_days` 1–3650, `clock_start` ∈ release, acquired, approved; `regulatory_mappings[].applicable` ∈ yes, no, unknown, `result` and `manual_controls.*.status` ∈ the status values; `manual_controls` keys PM-01…PM-17; dates `YYYY-MM-DD` (or RFC 3339); strings ≤ 8000 characters, lists ≤ 200. Audited `report.profile_updated` (`version`, `sha256`, `previous_version`, `changed`: top-level field names). |
+| `GET /api/reports/profile/history` | viewer | → `[{version, edited_by, edited_at, sha256}]`, newest first. |
+| `GET /api/reports/compliance-pack?from=YYYY-MM-DD&to=YYYY-MM-DD[&redact=1][&tz=Asia/Kolkata]` | viewer | → `Pack` (below). `to` is inclusive; defaults: this month so far, the server's time zone. 400 for bad dates, `from` after `to`, more than 3660 days, a period starting in the future, an unknown `tz`. Audited `report.compliance_generated` (`report_id`, `period_from`, `period_to`, `format: "json"`, `redacted`, `profile_version`, `overall_suggested`, `generated_at`). |
+| `GET /api/reports/compliance-pack.zip?…` | viewer | Same parameters → `application/zip` (`compliance-<report_id>[-redacted].zip`), streamed: `report.md`, `summary.json` (= `Pack`), `evidence/E-001…E-010-*.csv`, `manifest.json`, `manifest.sig`, `signing-key.pub`. Audited like the JSON with `format: "zip"` and `manifest_sha256`, before the ZIP is finished (an audit failure leaves the download incomplete). |
+
+Status values (controls, mappings, overall): `Compliant`, `Partially compliant`, `Non-compliant`,
+`Not applicable`, `Not assessed`.
+
+```ts
+Pack = {
+  meta: {report_id: "CR-…", title, product: "DSS Patcher", product_version, generated_at /* RFC 3339 with offset */,
+         generated_by: {user, role}, period: {from, to /* inclusive */, as_of, timezone}, filters, redacted,
+         report_type, control_domain, coverage_model, document_status, regulatory_review_date, prepared_for},
+  disclaimer,                                  // the template's "Important" note, verbatim
+  profile: ReportProfile, profile_version: {version, edited_by, edited_at, sha256, is_default},
+  executive_summary: {in_scope_endpoints, current_inventory: {count, pct}, compliant_with_policy: {count, pct},
+                      overdue: {count, pct}, stale_inventory: {count, pct}, pending_restart, active_exceptions,
+                      emergency_open_past_target, findings_by_severity: {critical, high, medium, low}, evidence_completeness_pct},
+  overall_assessment: {status, rationale, source: "computed" | "profile", suggested, suggested_rationale},
+  key_findings: Finding[],                     // the three most severe
+  scope: {endpoints_total, retired_excluded, os_families, application_vendors, sites, groups},
+  controls: {id, objective, auditor_evidence, suggested_test, evidence, evidence_ids, test_performed,
+             status, source: "automatic" | "manual" | "none", rationale, manual?: {status, evidence_ref, note}}[],  // PM-01…PM-17
+  regulatory_mappings: (RegulatoryMapping & {conclusion, needs_review})[],   // "Not assessed — needs compliance review" until reviewed
+  timeliness: {as_of, by_priority: {priority, max_days, source, clock_start, exception_process, pairs, compliant, verified_late,
+               overdue, pending, failed, offline, exception, not_applicable, past_deadline_open, pct_on_time}[],
+               outcome_counts, pairs_total, pairs: Pair[] /* worst first, ≤ pairs_limit (1000) */, pairs_limit, pairs_truncated},
+  evidence_register: {id, item, source_system, period, scope, sha256, records, confidentiality, included, complete, note}[],  // E-001…E-010
+  findings: {id: "F-001", title, control, source, observation, evidence_ids, risk, severity: "Critical" | "High" | "Medium" | "Low",
+             root_cause, corrective_action, owner, due_date, status: "Open", affected_count, affected}[],
+  exceptions: {exception_id, endpoint_id, scope, package_id, patch, reason, compensating_controls, owner, approver, opened, expires,
+               status: "Active" | "Expired" | "Revoked"}[],
+  signoff: {role, name, comments, date}[], scope_limitations: {auto: string[], profile}, management_response,
+  references: {n, label, title, url, note?}[], audit_chain: {ok, events, first_bad_seq, error, head_seq}
+}
+Pair = {endpoint_id, hostname, package_id, title, kb, severity, priority /* emergency|critical|high|moderate|low */, release_date,
+        acquired_at, approved_at, clock_start, deadline, deadline_source, installed_at, verified_at,
+        outcome: "compliant" | "verified_late" | "overdue" | "pending" | "failed" | "offline" | "exception" | "not_applicable",
+        past_deadline, deployment_id, evidence, exception_id, basis: "targeted" | "needed" | "exception"}
+```
+
+`manifest.json` = `{format: 1, product, product_version, report_id, generated_at, generated_by, period, filters, redacted,
+files: [{path, sha256, size}], key_id, public_key (base64), public_key_fingerprint (SHA-256 hex), signature_algorithm: "ed25519"}`;
+`manifest.sig` is the base64 Ed25519 signature of the `manifest.json` bytes with the server's audit-signing key
+(`<data_dir>/audit-signing.key`, created on first use). Verify offline: `pmserver verify-report -zip … -pub audit-signing.pub`.
+`redact=1` replaces hostnames, endpoint IDs, IP addresses and user IDs with stable pseudonyms (HMAC-SHA-256 with a per-server salt).

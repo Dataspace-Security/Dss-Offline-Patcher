@@ -6,10 +6,12 @@ import (
 	"net/http/cookiejar"
 	"strings"
 	"testing"
+	"time"
 
 	"offpatch/internal/agent"
 	"offpatch/internal/manifest"
 	"offpatch/internal/store"
+	"offpatch/internal/totp"
 )
 
 func init() { store.PasswordIterations = 1000 } // fast tests
@@ -32,6 +34,23 @@ func (e *env) passwordUser(t *testing.T, email, pw, newPW string) *http.Client {
 		}
 		if code, b := call(t, c, "POST", e.srv.URL+"/api/auth/password", map[string]string{"current": pw, "new": newPW}, true); code != 200 {
 			t.Fatalf("change password %s: %d %s", email, code, b)
+		}
+	}
+	if res["mfa_enrollment_required"] == true {
+		// Bank roles enrol an authenticator before anything else.
+		if code, b := call(t, c, "GET", e.srv.URL+"/api/summary", nil, false); code != 403 || !strings.Contains(string(b), "mfa_enrollment_required") {
+			t.Fatalf("MFA enrolment not enforced: %d %s", code, b)
+		}
+		code, b := call(t, c, "POST", e.srv.URL+"/api/auth/mfa/enroll/start", map[string]any{}, true)
+		var en store.MFAEnrollment
+		json.Unmarshal(b, &en)
+		if code != 200 {
+			t.Fatalf("enrol %s: %d %s", email, code, b)
+		}
+		sec, _ := totp.DecodeSecret(en.SecretBase32)
+		e.mfa[email] = sec
+		if code, b := call(t, c, "POST", e.srv.URL+"/api/auth/mfa/enroll/confirm", map[string]string{"code": totp.Code(sec, time.Now())}, true); code != 200 {
+			t.Fatalf("confirm enrolment %s: %d %s", email, code, b)
 		}
 	}
 	return c

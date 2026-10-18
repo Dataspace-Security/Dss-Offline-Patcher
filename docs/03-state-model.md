@@ -12,8 +12,8 @@ received ──validate ok──► validated
 ## Package (catalog entry)
 
 ```
-quarantined ──approve (R, approver)──► approved ──revoke (R, approver)──► revoked
-     └────────reject (R, approver)───► rejected
+quarantined ──approve (R, user)──► approved ──revoke (R, admin)──► revoked
+     └────────reject (R, user)───► rejected
 ```
 - `quarantined`: in the catalog and visible, but not in the repository and not deployable.
 - `approved`: copied to the immutable repository and deployable.
@@ -29,7 +29,7 @@ pending_approval ──cancel (R)──► cancelled
 active ◄──resume (R)── paused
   │ ──pause (R)──────────► paused
   │ ──auto-pause (failure threshold exceeded in current ring)──► paused
-  │ ──advance (operator; only when current ring has no in-flight targets)──► active (next ring)
+  │ ──advance (user; only when current ring has no in-flight targets)──► active (next ring)
   │ ──auto-advance (auto_advance: current ring finished within the failure threshold)──► active (next ring)
   │ ──cancel (R)─────────► cancelled   (from active or paused)
   └──last ring done──────► completed   (also: current ring done and no endpoint in any later ring)

@@ -136,8 +136,8 @@ func call(t *testing.T, c *http.Client, method, u string, body any, csrf bool) (
 func TestSSOAndTwoPersonApproval(t *testing.T) {
 	idp := newIdP(t)
 	extra := fmt.Sprintf(`"oidc": {"issuer": %q, "client_id": "offpatch-console", "redirect_url": "http://placeholder/auth/callback",
-	  "role_groups": {"admin": ["pm-admins"], "approver": ["pm-approvers"], "operator": ["pm-operators"], "viewer": ["pm-viewers"]}},
-	  "require_mfa": true, "approval_policy": {"critical": 2}, "separation_of_duties": true, "allow_static_tokens": true,`, idp.srv.URL)
+	  "role_groups": {"admin": ["pm-admins"], "user": ["pm-approvers", "pm-operators"], "viewer": ["pm-viewers"]}},
+	  "require_mfa": true, "approval_policy": {"critical": 2}, "separation_of_duties": true,`, idp.srv.URL)
 	e := newEnvOpts(t, false, extra)
 	e.cfg.OIDC.RedirectURL = e.srv.URL + "/auth/callback"
 
@@ -209,7 +209,13 @@ func TestSSOAndTwoPersonApproval(t *testing.T) {
 	admin, _ := e.browser(t, idp, "erin", []string{"pm-admins"}, true)
 	c, b = call(t, admin, "GET", e.srv.URL+"/api/users", nil, false)
 	json.Unmarshal(b, &users)
-	if c != 200 || len(users) != 2 {
+	sso := 0
+	for _, u := range users {
+		if u.Auth == "sso" {
+			sso++
+		}
+	}
+	if c != 200 || sso != 2 {
 		t.Fatalf("users: %d %s", c, b)
 	}
 	if c, b := call(t, admin, "POST", e.srv.URL+"/api/users/carol/disable", map[string]string{"reason": "left the company"}, true); c != 200 {

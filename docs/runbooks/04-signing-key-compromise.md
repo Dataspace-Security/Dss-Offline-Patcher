@@ -56,8 +56,8 @@ What it does **not** do:
    waiting: Catalog → `quarantined`.
 2. **Identify the key.** Note the `key_id` (`ed25519:…`). On the Intake page, list every bundle with
    that `key_id`, and every package from those bundles.
-3. **Pause deployments** of packages from those bundles (operator, reason `INC-… key compromise`):
-   `POST /api/deployments/{id}/pause`. If you already know content is malicious, an approver
+3. **Pause deployments** of packages from those bundles (role `user`, reason `INC-… key compromise`):
+   `POST /api/deployments/{id}/pause`. If you already know content is malicious, an admin
    **revokes** the package (`POST /api/packages/{id}/revoke`), which cancels its deployments.
 4. **Issue the revocation** (offline root machine). Generate a replacement key first
    (`pmctl keygen -out bundle-new`, on a clean host or in the HSM), then, with `-seq` = current
@@ -88,7 +88,7 @@ Trust documents cannot be used. Then:
 1. Remove the key from `trusted_keys` in `pmserver.json` (add the new key) and restart the server
    (`systemctl restart offpatch-server`; manual install: `pmserver`). With the installer layout, the
    new public key goes into `/etc/offpatch/keys/` by hand; re-runs never replace trusted keys.
-2. An approver revokes each approved package and rejects each quarantined package from the affected
+2. An admin revokes each approved package and rejects each quarantined package from the affected
    bundles, with the incident reference as reason. Revocation cancels their deployments.
 3. Re-enroll **every agent** with the new `bundle.pub` and `-root-pubkey root.pub` (runbook 09), and
    retire the old endpoint records. Until then those agents still accept manifests signed by the

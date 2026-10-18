@@ -62,7 +62,9 @@ export function EndpointsArea() {
 export function ReportsArea() {
   return (
     <TabbedArea title="Reports" tabs={[
-      { to: paths.reports, label: "Compliance", end: true },
+      { to: paths.reports, label: "Patch compliance", end: true },
+      { to: paths.complianceReport, label: "Compliance report" },
+      { to: paths.reportProfile, label: "Report profile" },
       { to: paths.exceptions, label: "Exceptions" },
       { to: paths.audit(), label: "Audit" },
     ]} />

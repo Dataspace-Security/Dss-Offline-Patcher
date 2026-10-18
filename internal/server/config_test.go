@@ -57,8 +57,7 @@ func TestAcquisitionRequestsDirConfig(t *testing.T) {
 	write := func(extra string) (*Config, error) {
 		dir := t.TempDir()
 		p := filepath.Join(dir, "pmserver.json")
-		cfg := `{"insecure_http": true, ` + extra + `"trusted_keys":[{"public_key":"x","sources":["a"]}],
-			"admin_tokens":[{"user":"u","role":"admin","token_sha256":"` + strings.Repeat("a", 64) + `"}]}`
+		cfg := `{"insecure_http": true, ` + extra + `"trusted_keys":[{"public_key":"x","sources":["a"]}]}`
 		if err := os.WriteFile(p, []byte(cfg), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -83,14 +82,12 @@ func TestAcquisitionRequestsDirConfig(t *testing.T) {
 	}
 }
 
-// The startup line says whether static tokens work, and warns when
-// configured tokens are switched off.
+// The startup line names the sign-in methods.
 func TestLogAuthMode(t *testing.T) {
 	oidcCfg := `"oidc": {"issuer": "https://idp.corp", "client_id": "pm", "redirect_url": "https://pm/auth/callback"},`
 	for _, c := range []struct{ extra, want string }{
-		{"", "static admin tokens only"},
-		{oidcCfg, "ENABLED as break-glass"},
-		{oidcCfg + ` "allow_static_tokens": false,`, "level=WARN"},
+		{"", "local users (email + password)"},
+		{oidcCfg, "SSO and local users"},
 	} {
 		cfg, err := LoadConfig(writeConfig(t, t.TempDir(), c.extra))
 		if err != nil {

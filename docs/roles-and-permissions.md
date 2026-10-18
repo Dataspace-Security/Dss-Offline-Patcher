@@ -12,9 +12,9 @@ accepts it from. Hiding a button is a convenience, not the protection.
 | **Viewer** | Bank staff who only need to look | Sees everything (no secrets). Has no action buttons at all. |
 | **User** | Bank operators | Imports patches, approves packages, plans deployments and rollbacks, approves other people's deployments. |
 | **Admin** | Bank administrators | Everything a User can do, plus the bank's users, exceptions and revoking packages. |
-| **Super admin** | The vendor (setup and support) | Everything, including server settings, agent versions and all users. **Does not approve deployments** (that is the bank's two-person rule). |
+| **Super admin** | The vendor (setup and support) | Everything, including server settings, agent versions and all users. **Does not approve deployments**, agent-version deployments included (that is the bank's two-person rule). |
 
-Old role names still work: `operator` and `approver` mean User.
+These four are the only roles (the old names `operator` and `approver` were removed; the server refuses to start if the config or SSO `role_groups` still use them, and stored users are moved to User). Sign-in is e-mail + password with an authenticator-app code (required for Viewer, User and Admin; optional for the Super admin unless the server sets `require_mfa`) or single sign-on. There is no token sign-in: static admin tokens were removed.
 
 ## Two rules that are not just "higher role can do more"
 
@@ -22,11 +22,17 @@ Old role names still work: `operator` and `approver` mean User.
    rollback waits for approval (default: 2 approvals). Only a **User or Admin**
    can approve or reject it, and only if they **did not create it** and **have
    not approved it already**. The Super admin and Viewers cannot approve.
+   **Agent versions** (packages of kind `agent`, `offpatch-agent-*`) are the
+   vendor's: only the Super admin approves, rejects, revokes and deploys or
+   rolls them back, and only bank **Admins** (not Users, not the Super admin,
+   not the creator) approve or reject such a deployment.
    The creator sees "You created this — 2 other people must approve".
 2. **Admins manage bank roles only.** An Admin can create users and give them
    Viewer, User or Admin. Only the Super admin can see, create, change or
    disable a Super admin account, or give someone that role. Nobody can disable
-   or demote themselves.
+   or demote themselves. Delete works only for e-mail + password users (SSO
+   users: disable), never on yourself and never on the last Super admin; the
+   audit history of a deleted user is kept.
 
 ## Pages and navigation
 
@@ -38,7 +44,7 @@ Old role names still work: `operator` and `approver` mean User.
 | Deployments → New deployment form | — | ✓ | ✓ | ✓ |
 | Endpoints → list, endpoint detail | ✓ | ✓ | ✓ | ✓ |
 | Endpoints → Add endpoints (agent setup guide) | — | ✓ | ✓ | ✓ |
-| Reports → Compliance, Exceptions, Audit | ✓ | ✓ | ✓ | ✓ |
+| Reports → Patch compliance, Compliance report, Report profile (read), Exceptions, Audit | ✓ | ✓ | ✓ | ✓ |
 | Settings (sidebar item) | — | — | ✓ (opens Users) | ✓ (opens Server) |
 | Settings → Users | — | — | ✓ (bank roles only) | ✓ (all users) |
 | Settings → Server | — | — | — | ✓ |
@@ -74,6 +80,8 @@ Old role names still work: `operator` and `approver` mean User.
 |---|:-:|:-:|:-:|:-:|
 | New deployment / rollback (starts "waiting for approval") | — | ✓ | ✓ | ✓ |
 | Approve / reject a waiting deployment or rollback | — | ✓ not the creator, not already approved | ✓ not the creator, not already approved | — |
+| New deployment / rollback of an **agent version** (`kind` agent, `offpatch-agent-*`) | — | — | — | ✓ (server: 403 "agent versions are managed by the vendor (super admin)" for bank roles) |
+| Approve / reject a waiting **agent-version** deployment or rollback | — | — (403 "agent version deployments are approved by bank admins") | ✓ not the creator, not already approved; `deployment_approvals` bank admins needed | — |
 | Pause, resume, start next stage, retry failed, cancel (incl. a waiting one) | — | ✓ | ✓ | ✓ |
 | Raise an exception for a failed target | — | "Ask an Admin…" (copyable text, no change) | ✓ | ✓ |
 | Create / delete a maintenance window | — | ✓ | ✓ | ✓ |
@@ -101,6 +109,8 @@ Old role names still work: `operator` and `approver` mean User.
 | Add a user | — | — | ✓ Viewer / User / Admin | ✓ any role |
 | Change role, reset password (e-mail + password users) | — | — | ✓ bank roles, not self | ✓ any, not self |
 | Disable / enable a user (incl. SSO users) | — | — | ✓ bank roles, not self | ✓ any, not self |
+| Delete an e-mail + password user (confirm, reason optional; Disable is the gentler option; SSO users: disable) | — | — | ✓ bank roles, not self | ✓ any, not self |
+| See MFA status (On / Not set up); Reset MFA (e-mail + password users) | — | — | ✓ bank roles, not self | ✓ any, not self |
 
 ### Everyone
 
@@ -108,6 +118,15 @@ Old role names still work: `operator` and `approver` mean User.
 |---|:-:|:-:|:-:|:-:|
 | Change own password (e-mail + password sign-in) | ✓ | ✓ | ✓ | ✓ |
 | Theme, sign out | ✓ | ✓ | ✓ | ✓ |
+| Two-step sign-in (authenticator app) for e-mail + password users | required | required | required | optional (turn on / off own; required if the server sets `require_mfa`) |
+
+### Reports → Compliance report / Report profile
+
+| Action | Viewer | User | Admin | Super admin |
+|---|:-:|:-:|:-:|:-:|
+| Generate the auditor report, Download PDF, Download evidence package (ZIP) | ✓ | ✓ | ✓ | ✓ |
+| Read the report profile and its version history | ✓ | ✓ | ✓ | ✓ |
+| Edit and save the report profile | — | — | ✓ | ✓ |
 
 ## Server routes behind the actions
 
@@ -118,17 +137,22 @@ Old role names still work: `operator` and `approver` mean User.
 | `POST /api/packages/{id}/approve`, `/reject` | User |
 | `POST /api/packages/{id}/revoke` | Admin |
 | `POST /api/deployments`, `/{id}/pause\|resume\|cancel\|advance`, `/{id}/retry_failed` | User |
-| `POST /api/deployments/{id}/approve`, `/reject` | User or Admin only (`CanApproveDeployments`), never the creator |
+| `POST /api/deployments/{id}/approve`, `/reject` | User or Admin only (`CanApproveDeployments`), never the creator; for an agent-version deployment Admin only |
+| `POST /api/packages/{id}/approve\|reject\|revoke`, `POST /api/deployments` (install or rollback) for an agent version | Super admin only |
 | `PATCH /api/endpoints/{id}`, `POST /api/endpoints/{id}/retire`, `POST /api/enrollment-tokens` | User |
 | `POST /api/maintenance-windows`, `/{id}/delete` | User |
 | `POST /api/exceptions`, `/{id}/revoke` | Admin |
-| `GET/POST /api/users`, `POST /api/users/{name}/disable\|enable\|reset_password\|set_role` | Admin (Super admin accounts and role: Super admin only) |
+| `GET/POST /api/users`, `POST /api/users/{name}/disable\|enable\|reset_password\|set_role\|delete\|reset_mfa` | Admin (Super admin accounts and role: Super admin only; never yourself) |
+| `POST /api/auth/login`, `POST /api/auth/mfa` | none (sign-in) |
+| `POST /api/auth/mfa/enroll/start`, `/enroll/confirm` | any signed-in e-mail + password user (also the limited first sign-in session) |
+| `POST /api/auth/mfa/disable` | Super admin (own authenticator only) |
+| `GET /api/reports/compliance-pack`, `GET /api/reports/compliance-pack.zip`, `GET /api/reports/profile` | Viewer |
+| `PUT /api/reports/profile` | Admin |
 
 ### Known gaps between console and server
 
-- **Agent versions** are a Super admin task in the console, but the server
-  checks only the generic package and deployment routes (User for
-  approve/reject/deploy, Admin for revoke). A User calling the API directly
-  could approve or deploy an agent package.
+- None for agent versions any more: the server enforces the Super admin and
+  bank-Admin rules above (403 "agent versions are managed by the vendor
+  (super admin)" / "agent version deployments are approved by bank admins").
 - **Settings → Server** reads `GET /api/system`, which any Viewer may call; the
   page is hidden from everyone but the Super admin, but the data is not secret.

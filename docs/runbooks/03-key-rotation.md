@@ -73,7 +73,8 @@ If the old key may be **compromised**, use [runbook 04](04-signing-key-compromis
 5. **Verify on the server** (within one `intake_interval`):
 
    ```bash
-   curl --cacert ca.pem -H "Authorization: Bearer $TOK" \
+   # signed in as a viewer (cookie jar from POST /api/auth/login, see runbooks/README.md)
+   curl --cacert ca.pem -b jar \
      "https://pm.corp.internal:8443/api/audit?action=trust.&limit=5"
    ```
 

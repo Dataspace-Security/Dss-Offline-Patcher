@@ -10,13 +10,11 @@
     "client_id": "offpatch-console",
     "redirect_url": "https://pm.corp.internal:8443/auth/callback",
     "groups_claim": "groups",
-    "role_groups": {"admin": ["PM-Admins"], "approver": ["PM-Approvers"], "operator": ["PM-Operators"], "viewer": ["PM-Viewers"]},
+    "role_groups": {"admin": ["PM-Admins"], "user": ["PM-Operators", "PM-Approvers"], "viewer": ["PM-Viewers"]},
     "ca_cert_file": "/etc/offpatch-server/corp-ca.pem"
   },
   "require_mfa": true,
   "session_ttl": "8h",
-  "allow_static_tokens": true,
-  "admin_tokens": [{"user": "breakglass", "role": "admin", "token_sha256": "0000000000000000000000000000000000000000000000000000000000000000"}],
 
   "approval_policy": {"critical": 2, "important": 2},
   "separation_of_duties": true,

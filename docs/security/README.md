@@ -127,7 +127,7 @@ The product is an **offline** patch manager. Bundles cross a one-way transfer bo
 - pmserver (Windows Server and Linux builds) with a fresh `-data` dir, TLS enabled, and the console at `/`.
 - At least two Windows endpoints running pmagent: one enrolled, one spare for enrollment testing.
 - A `pmctl` workstation with a **test** signing key, used to build valid bundles. The tester may also receive a second, untrusted key.
-- Admin accounts for each role: `viewer`, `operator` and `approver`. OIDC login and mTLS agent auth are tested if they are enabled in the build under test.
+- Admin accounts (email + password, each with an enrolled authenticator app) for each role: `viewer`, `user`, `admin`, plus the built-in `super_admin`. OIDC login and mTLS agent auth are tested if they are enabled in the build under test.
 - Write access to the pmserver inbox directory, which simulates the transfer adapter or diode output.
 - Source code access (grey-box) is recommended.
 
@@ -136,7 +136,7 @@ The product is an **offline** patch manager. Bundles cross a one-way transfer bo
 | # | Asset / interface | Trust boundary crossed | Who the attacker is |
 |---|---|---|---|
 | A1 | **Bundle intake** (`<data>/inbox/*.pmb` → received → quarantine) | Transfer boundary: connected zone → isolated zone | Anyone who can place a file on the transfer media or diode |
-| A2 | **Admin API** `/api/*` (Bearer admin token / OIDC session) | Admin network → pmserver | Low-privilege admin (viewer/operator), stolen token, malicious insider |
+| A2 | **Admin API** `/api/*` (`offpatch_session` cookie from email + password + TOTP, or OIDC) | Admin network → pmserver | Low-privilege admin (viewer/user), stolen password or session, malicious insider |
 | A3 | **Agent API** `/api/agent/*` (enroll token, device secret / mTLS) | Endpoint network → pmserver | Compromised endpoint, rogue host on the endpoint network |
 | A4 | **Console** (React SPA served by pmserver) | Admin browser | Attacker-controlled data shown in the UI: bundle fields, hostnames, inventory, report details |
 | A5 | **pmagent** on endpoints | pmserver → endpoint (and local users) | Compromised pmserver or repository, MITM on the endpoint network, local non-admin user |
@@ -158,12 +158,12 @@ Lower priority: `pmctl` in the connected zone (catalog download, `acquire`). Tre
 7. Check that nothing in `quarantine/` is ever served, and that a `vendor_signature.status: invalid` package is rejected.
 
 **Admin API and console (A2, A4)**
-8. Authorization: viewer → operator/approver actions; operator → approve, reject, revoke or exceptions; IDOR on `/api/bundles/{id}`, `/api/deployments/{id}` and `/api/endpoints/{id}`; mandatory `reason` bypass.
-9. Authentication: token brute force or timing, token in URLs or logs, session fixation and CSRF (if cookies or OIDC are used), OIDC `state`/`nonce`/redirect handling, logout and expiry.
+8. Authorization: viewer → any write; user → revoke, exceptions, user management; admin → super admin accounts; bank roles → agent-version approve / reject / revoke / deploy; user or super admin → approving an agent-version deployment; the limited first-sign-in session (403 `mfa_enrollment_required`) → anything but enrolment; IDOR on `/api/bundles/{id}`, `/api/deployments/{id}` and `/api/endpoints/{id}`; mandatory `reason` bypass.
+9. Authentication: password and TOTP brute force or timing (shared lockout: 5 failures → 15 min; per-IP rate limit), TOTP code replay (each code works once), recovery-code reuse, skipping the MFA step (the `offpatch_mfa` pre-auth cookie, 5 min), user enumeration, session fixation and CSRF (`X-Offpatch-CSRF`), OIDC `state`/`nonce`/redirect handling, logout and expiry. Static admin tokens were removed: `Authorization: Bearer` on `/api/*` must get 401. MFA secrets must be unreadable without `mfa.key` (AES-256-GCM at rest).
 10. Path traversal in `/api/agent-setup/files/{name}` and in any other name parameter.
 11. Approval integrity: approve a package, then try to change what is served for it, either through the API or by modifying the repository on disk, and check that the agent refuses it.
 12. Audit: try to create, change or delete audit events through the API. Verify that `GET /api/audit/verify` detects direct DB edits. Check the export for injection (CSV/JSON).
-13. Console: XSS through every field that comes from a bundle or an agent; clickjacking; CSP and security headers; open redirect in client routing (react-router was upgraded to 7.18.4 for GHSA-wrjc-x8rr-h8h6); where the admin token is stored (session storage).
+13. Console: XSS through every field that comes from a bundle or an agent; clickjacking; CSP and security headers; open redirect in client routing (react-router was upgraded to 7.18.4 for GHSA-wrjc-x8rr-h8h6); that no credential or session token is kept in web storage (the session is an HttpOnly cookie).
 14. Enrollment tokens: reuse, expiry, scope (groups and site) and visibility after creation.
 
 **Agent API and agent (A3, A5)**

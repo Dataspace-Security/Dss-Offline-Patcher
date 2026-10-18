@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"strings"
 	"time"
 )
 
@@ -40,12 +39,14 @@ type User struct {
 	DisabledReason string `json:"disabled_reason"`
 	ActiveSessions int    `json:"active_sessions"`
 	// Local (password) users only.
-	MustChangePassword bool   `json:"must_change_password"`
-	Locked             bool   `json:"locked"`
-	LockedUntil        string `json:"locked_until,omitempty"`
-	CreatedBy          string `json:"created_by,omitempty"`
-	CreatedAt          string `json:"created_at,omitempty"`
-	PasswordChangedAt  string `json:"password_changed_at,omitempty"`
+	MustChangePassword bool `json:"must_change_password"`
+	// MFAEnrolled: a local user with an authenticator app enrolled.
+	MFAEnrolled       bool   `json:"mfa_enrolled"`
+	Locked            bool   `json:"locked"`
+	LockedUntil       string `json:"locked_until,omitempty"`
+	CreatedBy         string `json:"created_by,omitempty"`
+	CreatedAt         string `json:"created_at,omitempty"`
+	PasswordChangedAt string `json:"password_changed_at,omitempty"`
 }
 
 var ErrDisabled = errors.New("user disabled")
@@ -55,6 +56,12 @@ var ErrDisabled = errors.New("user disabled")
 // (and the attempt audited). An SSO identity with the name of a local user
 // is refused: it would act as that user.
 func (s *Store) Login(ctx context.Context, username, role, email, source string, mfa bool, ttl time.Duration) (string, error) {
+	return s.login(ctx, username, role, email, source, mfa, false, ttl)
+}
+
+// login opens a session; enrollOnly limits it to MFA enrolment (a local
+// user who must enrol an authenticator before anything else).
+func (s *Store) login(ctx context.Context, username, role, email, source string, mfa, enrollOnly bool, ttl time.Duration) (string, error) {
 	token := "ses_" + RandomSecret()
 	role = canonicalOr(role)
 	err := s.tx(ctx, func(tx *sql.Tx) error {
@@ -63,8 +70,8 @@ func (s *Store) Login(ctx context.Context, username, role, email, source string,
 			if err := tx.QueryRow(`SELECT COUNT(*) FROM local_users WHERE email=lower(?)`, username).Scan(&n); err != nil {
 				return err
 			}
-			if n > 0 || s.Policy.ReservedUsers[strings.ToLower(username)] {
-				return Errf(ErrConflict, "%s is a local (password) user or a static token name; SSO sign-in with that name is refused", username)
+			if n > 0 {
+				return Errf(ErrConflict, "%s is a local (password) user; SSO sign-in with that name is refused", username)
 			}
 		}
 		var disabled int
@@ -87,12 +94,15 @@ func (s *Store) Login(ctx context.Context, username, role, email, source string,
 			return err
 		}
 		exp := s.Now().Add(ttl).UTC().Format(time.RFC3339Nano)
-		if _, err := tx.Exec(`INSERT INTO sessions(id_hash,username,role,mfa,created_at,expires_at,source) VALUES(?,?,?,?,?,?,?)`,
-			HashSecret(token), username, role, m, now, exp, source); err != nil {
+		if _, err := tx.Exec(`INSERT INTO sessions(id_hash,username,role,mfa,created_at,expires_at,source,mfa_enroll_only) VALUES(?,?,?,?,?,?,?,?)`,
+			HashSecret(token), username, role, m, now, exp, source, boolInt(enrollOnly)); err != nil {
 			return err
 		}
-		return s.audit(tx, Ev{Actor: "user:" + username, Action: "auth.login", ObjectType: "user", ObjectID: username,
-			Details: map[string]any{"role": role, "source": source, "mfa": mfa, "session_expires": exp}})
+		d := map[string]any{"role": role, "source": source, "mfa": mfa, "session_expires": exp}
+		if enrollOnly {
+			d["mfa_enrollment_required"] = true
+		}
+		return s.audit(tx, Ev{Actor: "user:" + username, Action: "auth.login", ObjectType: "user", ObjectID: username, Details: d})
 	})
 	if errors.Is(err, ErrDisabled) || errors.Is(err, ErrConflict) {
 		reason := "user disabled"
@@ -123,15 +133,18 @@ type Session struct {
 	// MustChangePassword: a local user signed in with a temporary
 	// password; only /api/me, password change and logout are allowed.
 	MustChangePassword bool
+	// MFAEnrollOnly: MFA is required and not enrolled yet; only /api/me,
+	// enrolment, password change and logout are allowed.
+	MFAEnrollOnly bool
 }
 
 func (s *Store) LookupSession(ctx context.Context, token string) (Session, error) {
 	var ss Session
 	var exp string
-	var m, revoked, disabled, must int
-	err := s.db.QueryRowContext(ctx, `SELECT s.username, s.role, s.mfa, s.expires_at, s.revoked, COALESCE(u.disabled,0), s.source, COALESCE(l.must_change_password,0)
+	var m, revoked, disabled, must, enroll int
+	err := s.db.QueryRowContext(ctx, `SELECT s.username, s.role, s.mfa, s.expires_at, s.revoked, COALESCE(u.disabled,0), s.source, COALESCE(l.must_change_password,0), s.mfa_enroll_only
 		FROM sessions s LEFT JOIN users u ON u.username=s.username LEFT JOIN local_users l ON l.email=s.username AND s.source='password'
-		WHERE s.id_hash=?`, HashSecret(token)).Scan(&ss.Username, &ss.Role, &m, &exp, &revoked, &disabled, &ss.Source, &must)
+		WHERE s.id_hash=?`, HashSecret(token)).Scan(&ss.Username, &ss.Role, &m, &exp, &revoked, &disabled, &ss.Source, &must, &enroll)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ss, ErrNotFound
 	}
@@ -141,7 +154,7 @@ func (s *Store) LookupSession(ctx context.Context, token string) (Session, error
 	if revoked == 1 || disabled == 1 || s.Now().After(parseTime(exp)) {
 		return ss, ErrNotFound
 	}
-	ss.MFA, ss.MustChangePassword = m == 1, must == 1
+	ss.MFA, ss.MustChangePassword, ss.MFAEnrollOnly = m == 1, must == 1, enroll == 1
 	ss.Role = canonicalOr(ss.Role)
 	return ss, nil
 }
@@ -166,8 +179,8 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT u.username,u.role,u.source,u.email,u.mfa,u.first_login,u.last_login,u.disabled,u.disabled_reason,
 		(SELECT COUNT(*) FROM sessions s WHERE s.username=u.username AND s.revoked=0 AND s.expires_at > ?),
 		l.email IS NOT NULL, COALESCE(l.display_name,''), COALESCE(l.role,''), COALESCE(l.must_change_password,0), COALESCE(l.locked_until,''),
-		COALESCE(l.created_by,''), COALESCE(l.created_at,''), COALESCE(l.password_changed_at,'')
-		FROM users u LEFT JOIN local_users l ON l.email=u.username ORDER BY u.username`, now)
+		COALESCE(l.created_by,''), COALESCE(l.created_at,''), COALESCE(l.password_changed_at,''), COALESCE(f.enrolled_at,'')
+		FROM users u LEFT JOIN local_users l ON l.email=u.username LEFT JOIN mfa f ON f.email=u.username ORDER BY u.username`, now)
 	if err != nil {
 		return nil, err
 	}
@@ -177,11 +190,12 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 		var u User
 		var m, d, must int
 		var local bool
-		var lrole string
+		var lrole, mfaAt string
 		if err := rows.Scan(&u.Username, &u.Role, &u.Source, &u.Email, &m, &u.FirstLogin, &u.LastLogin, &d, &u.DisabledReason, &u.ActiveSessions,
-			&local, &u.DisplayName, &lrole, &must, &u.LockedUntil, &u.CreatedBy, &u.CreatedAt, &u.PasswordChangedAt); err != nil {
+			&local, &u.DisplayName, &lrole, &must, &u.LockedUntil, &u.CreatedBy, &u.CreatedAt, &u.PasswordChangedAt, &mfaAt); err != nil {
 			return nil, err
 		}
+		u.MFAEnrolled = mfaAt != ""
 		u.MFA, u.Disabled, u.MustChangePassword = m == 1, d == 1, must == 1
 		u.Auth = "sso"
 		if local {

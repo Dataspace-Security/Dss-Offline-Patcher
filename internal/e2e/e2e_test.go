@@ -30,20 +30,42 @@ import (
 	"offpatch/internal/repo"
 	"offpatch/internal/server"
 	"offpatch/internal/store"
+	"offpatch/internal/totp"
 	"offpatch/internal/transfer"
 
 	_ "modernc.org/sqlite"
 )
 
+// The env's signed-in local users. The tok* values are keys: e.api and
+// e.authorize send that user's session cookie (and the CSRF header).
+// Static admin tokens no longer exist.
 const (
-	tokViewer   = "viewer-token"
-	tokOperator = "operator-token"
-	tokApprover = "approver-token" // alice: role approver (= user)
-	tokUser2    = "user2-token"    // bob: role user, the second deployment approver
-	tokAdmin    = "admin-token"    // adam: bank admin
-	tokSuper    = "super-token"    // sam: super_admin (vendor)
+	tokViewer   = "viewer"   // vera: viewer
+	tokOperator = "operator" // otto: user, creates deployments
+	tokApprover = "approver" // alice: user, approves packages and deployments
+	tokUser2    = "user2"    // bob: user, the second deployment approver
+	tokAdmin    = "admin"    // adam: bank admin
+	tokSuper    = "super"    // sam: super_admin (vendor)
 	msiGUID     = "{11111111-2222-3333-4444-555555555555}"
+	envPW       = "env user passphrase"
 )
+
+// envUsers: who is behind each tok* key.
+var envUsers = []struct{ tok, email, role string }{
+	{tokViewer, "vera@bank.test", store.RoleViewer}, {tokOperator, "otto@bank.test", store.RoleUser},
+	{tokApprover, "alice@bank.test", store.RoleUser}, {tokUser2, "bob@bank.test", store.RoleUser},
+	{tokAdmin, "adam@bank.test", store.RoleAdmin}, {tokSuper, "sam@bank.test", store.RoleSuperAdmin},
+}
+
+// envEmail is the sign-in email (and audit name after "user:") behind tok.
+func envEmail(tok string) string {
+	for _, u := range envUsers {
+		if u.tok == tok {
+			return u.email
+		}
+	}
+	return ""
+}
 
 type env struct {
 	t          *testing.T
@@ -62,6 +84,8 @@ type env struct {
 	rootPEM    string // pinned by agents when set (trust tests)
 	rootKey    ed25519.PrivateKey
 	srvHandler *server.Server
+	sess       map[string]string // tok* key -> session token
+	mfa        map[string][]byte // email -> authenticator secret
 }
 
 func newEnv(t *testing.T) *env { return newEnvOpts(t, false, "") }
@@ -81,10 +105,7 @@ func newEnvOpts(t *testing.T, tlsMode bool, extra string) *env {
 		mode = `"pki_dir": "pki",`
 	}
 	cfgJSON := fmt.Sprintf(`{`+mode+extra+`"data_dir": %q, "trusted_keys":[{"public_key": %q, "sources":["acq-zone-1"]}],
-	  "admin_tokens":[{"user":"vera","role":"viewer","token_sha256":%q},{"user":"otto","role":"operator","token_sha256":%q},{"user":"alice","role":"approver","token_sha256":%q},
-	    {"user":"bob","role":"user","token_sha256":%q},{"user":"adam","role":"admin","token_sha256":%q},{"user":"sam","role":"super_admin","token_sha256":%q}],
-	  "intake_interval":"1h"}`, filepath.Join(dir, "data"), e.pubPEM, store.HashSecret(tokViewer), store.HashSecret(tokOperator), store.HashSecret(tokApprover),
-		store.HashSecret(tokUser2), store.HashSecret(tokAdmin), store.HashSecret(tokSuper))
+	  "intake_interval":"1h"}`, filepath.Join(dir, "data"), e.pubPEM)
 	cfgPath := filepath.Join(dir, "pmserver.json")
 	os.WriteFile(cfgPath, []byte(cfgJSON), 0o600)
 	cfg, err := server.LoadConfig(cfgPath)
@@ -116,6 +137,14 @@ func newEnvOpts(t *testing.T, tlsMode bool, extra string) *env {
 	h.SetIntelKeys(e.intake.ActiveKeys)
 	e.cfg = cfg
 	e.srvHandler = h
+	e.sess, e.mfa = map[string]string{}, map[string][]byte{}
+	for _, u := range envUsers {
+		if _, err := e.st.CreateLocalUser(context.Background(), store.Manager{Actor: "system:test", Role: store.RoleSuperAdmin},
+			store.NewLocalUser{Email: u.email, Role: u.role, Password: envPW}, false); err != nil {
+			t.Fatal(err)
+		}
+		e.sess[u.tok] = e.signIn(u.email, envPW)
+	}
 	e.hc = http.DefaultClient
 	if tlsMode {
 		e.srv = httptest.NewUnstartedServer(h.Handler())
@@ -215,9 +244,7 @@ func (e *env) api(method, path, token string, body any, out any) int {
 		rd = bytes.NewReader(b)
 	}
 	req, _ := http.NewRequest(method, e.srv.URL+path, rd)
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
+	e.authorize(req, token)
 	resp, err := e.hc.Do(req)
 	if err != nil {
 		e.t.Fatal(err)
@@ -264,7 +291,7 @@ func (e *env) approveDep(id, createdBy string) {
 	e.t.Helper()
 	n := 0
 	for _, a := range []struct{ user, tok string }{{"alice", tokApprover}, {"bob", tokUser2}, {"adam", tokAdmin}} {
-		if n == 2 || "user:"+a.user == createdBy {
+		if n == 2 || "user:"+envEmail(a.tok) == createdBy {
 			continue
 		}
 		if c := e.api("POST", "/api/deployments/"+id+"/approve", a.tok, map[string]string{"reason": "change approved"}, nil); c != 200 {
@@ -642,5 +669,50 @@ func TestEndToEnd(t *testing.T) {
 	}
 	if c := e.api("GET", "/api/summary", "", nil, nil); c != 401 {
 		t.Fatalf("unauthenticated: %d", c)
+	}
+}
+
+// signIn signs a local user in through the store (no per-IP sign-in limit
+// in the way) and, when MFA is required and not enrolled, enrols an
+// authenticator; returns the full session token.
+func (e *env) signIn(email, pw string) string {
+	e.t.Helper()
+	ctx := context.Background()
+	// Long sessions: tests move the store clock forward by hours.
+	const ttl = 10 * 365 * 24 * time.Hour
+	l, err := e.st.LoginPassword(ctx, email, pw, ttl)
+	if err != nil {
+		e.t.Fatalf("sign in %s: %v", email, err)
+	}
+	if l.MFAPending {
+		if l, err = e.st.LoginMFA(ctx, email, totp.Code(e.mfa[email], e.st.Now().Add(totp.Period*time.Second)), "", ttl); err != nil {
+			e.t.Fatalf("mfa %s: %v", email, err)
+		}
+	}
+	if l.MFAEnrollment {
+		en, err := e.st.MFAEnrollStart(ctx, email)
+		if err != nil {
+			e.t.Fatal(err)
+		}
+		sec, _ := totp.DecodeSecret(en.SecretBase32)
+		e.mfa[email] = sec
+		if _, err := e.st.MFAEnrollConfirm(ctx, email, totp.Code(sec, e.st.Now()), l.Token); err != nil {
+			e.t.Fatalf("enrol %s: %v", email, err)
+		}
+	}
+	return l.Token
+}
+
+// authorize adds the credentials behind tok: an env user's session cookie
+// and the CSRF header, or else a bearer token (agent device secrets in
+// insecure_http mode, metrics tokens).
+func (e *env) authorize(req *http.Request, tok string) {
+	if sess, ok := e.sess[tok]; ok {
+		req.AddCookie(&http.Cookie{Name: "offpatch_session", Value: sess})
+		req.Header.Set("X-Offpatch-CSRF", "1")
+		return
+	}
+	if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 }

@@ -15,6 +15,11 @@ export function isLocalUser(u: User): boolean {
   return s === "local" || s === "password";
 }
 
+/** Authenticator-app MFA set up (`mfa_enrolled`; older servers: `mfa`). */
+export function mfaEnrolled(u: User): boolean {
+  return u.mfa_enrolled ?? !!u.mfa;
+}
+
 /** Roles the signed-in person may give: Admins never see or give Super admin. */
 export function assignableRoles(isSuper: boolean): Role[] {
   return isSuper ? ["viewer", "user", "admin", "super_admin"] : ["viewer", "user", "admin"];

@@ -35,12 +35,6 @@ type KeyConfig struct {
 	Sources       []string `json:"sources"`
 }
 
-type AdminToken struct {
-	User        string `json:"user"`
-	Role        string `json:"role"`
-	TokenSHA256 string `json:"token_sha256"`
-}
-
 type Config struct {
 	Listen                 string         `json:"listen"`
 	DataDir                string         `json:"data_dir"`
@@ -50,10 +44,8 @@ type Config struct {
 	InsecureHTTP           bool           `json:"insecure_http"`
 	TrustedKeys            []KeyConfig    `json:"trusted_keys"`
 	RootPublicKeyFile      string         `json:"root_public_key_file"`
-	AdminTokens            []AdminToken   `json:"admin_tokens"`
 	OIDC                   *oidc.Config   `json:"oidc"`
 	SessionTTL             Duration       `json:"session_ttl"`
-	AllowStaticTokens      *bool          `json:"allow_static_tokens"`
 	RequireMFA             bool           `json:"require_mfa"`
 	ApprovalPolicy         map[string]int `json:"approval_policy"`
 	SeparationOfDuties     bool           `json:"separation_of_duties"`
@@ -88,40 +80,43 @@ type Config struct {
 	// creator) who must approve each deployment and rollback before it
 	// starts. Default 2, 1-5 (an isolated lab may use 1).
 	DeploymentApprovals *int `json:"deployment_approvals"`
+	// MFAKeyFile: 32-byte key (64 hex characters) that encrypts local
+	// users' authenticator secrets (AES-256-GCM). Default
+	// <data_dir>/mfa.key; created (0600) on first start when missing.
+	MFAKeyFile string `json:"mfa_key_file"`
 
 	dir string // directory of the config file; relative paths resolve from here
-	// staticTokensDefaulted: allow_static_tokens was not in the file.
-	staticTokensDefaulted bool
+	// fromFile: loaded by LoadConfig (LogAuthMode logs only then).
+	fromFile bool
 }
 
-// LogAuthMode logs, once at startup, how admins sign in: SSO and / or the
-// static admin_tokens, and whether allow_static_tokens was set or defaulted,
-// so a disabled break-glass token is never a surprise.
+// LogAuthMode logs, once at startup, how admins sign in: local users
+// (email + password, MFA for bank roles) and SSO when configured. Static
+// admin tokens no longer exist.
 func (c *Config) LogAuthMode(log *slog.Logger) {
-	if log == nil || c.AllowStaticTokens == nil { // not from LoadConfig
+	if log == nil || !c.fromFile {
 		return
 	}
-	how := "set in the config"
-	if c.staticTokensDefaulted {
-		how = "default (not set in the config)"
+	if c.OIDC != nil {
+		log.Info("admin sign-in: SSO and local users (email + password)", "require_mfa", c.RequireMFA)
+		return
 	}
-	sso := c.OIDC != nil
-	switch {
-	case *c.AllowStaticTokens && len(c.AdminTokens) > 0 && sso:
-		log.Info("admin sign-in: SSO, and static admin tokens are ENABLED as break-glass (allow_static_tokens=true); set \"allow_static_tokens\": false to switch them off",
-			"tokens", len(c.AdminTokens), "allow_static_tokens", how)
-	case *c.AllowStaticTokens && len(c.AdminTokens) > 0:
-		log.Info("admin sign-in: static admin tokens only (no SSO configured)", "tokens", len(c.AdminTokens), "allow_static_tokens", how)
-	case !sso && (len(c.AdminTokens) == 0 || !*c.AllowStaticTokens):
-		log.Warn("admin sign-in: local users (email + password) only: no SSO and no static admin token. If no super admin exists yet, run `pmserver create-admin`")
-	case *c.AllowStaticTokens:
-		log.Info("admin sign-in: SSO only (no admin_tokens configured, so there is no break-glass token)", "allow_static_tokens", how)
-	case len(c.AdminTokens) > 0:
-		log.Warn("admin sign-in: SSO only; static admin tokens are DISABLED by \"allow_static_tokens\": false, so the configured admin_tokens (including break-glass) do not work",
-			"tokens_ignored", len(c.AdminTokens))
-	default:
-		log.Info("admin sign-in: SSO only; static admin tokens disabled (allow_static_tokens=false)")
+	log.Info("admin sign-in: local users (email + password). If no super admin exists yet, run `pmserver create-admin`")
+}
+
+// removedKeys refuses configuration keys of removed features with what to
+// do instead (DisallowUnknownFields would only say "unknown field").
+func removedKeys(path string, b []byte) error {
+	var top map[string]json.RawMessage
+	if json.Unmarshal(b, &top) != nil {
+		return nil // the strict decode reports the syntax error
 	}
+	for _, k := range []string{"admin_tokens", "allow_static_tokens"} {
+		if _, ok := top[k]; ok {
+			return fmt.Errorf("config %s: %q is no longer supported: static admin tokens were removed. Delete \"admin_tokens\" and \"allow_static_tokens\" from the file and sign in to the console with email + password (first super admin: pmserver create-admin; lost password: pmserver reset-admin)", path, k)
+		}
+	}
+	return nil
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -129,7 +124,10 @@ func LoadConfig(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &Config{}
+	if err := removedKeys(path, b); err != nil {
+		return nil, err
+	}
+	c := &Config{fromFile: true}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(c); err != nil {
@@ -143,6 +141,10 @@ func LoadConfig(path string) (*Config, error) {
 		c.DataDir = "data"
 	}
 	c.DataDir = c.abs(c.DataDir)
+	if c.MFAKeyFile == "" {
+		c.MFAKeyFile = filepath.Join(c.DataDir, "mfa.key")
+	}
+	c.MFAKeyFile = c.abs(c.MFAKeyFile)
 	if c.OfflineAfter.Duration == 0 {
 		c.OfflineAfter.Duration = 30 * time.Minute
 	}
@@ -173,15 +175,6 @@ func LoadConfig(path string) (*Config, error) {
 	if len(c.TrustedKeys) == 0 {
 		return nil, fmt.Errorf("config: at least one trusted_keys entry is required")
 	}
-	if c.AllowStaticTokens == nil {
-		// Default true, with or without SSO (runbook 01): the admin_tokens
-		// entries are the break-glass path when the IdP is unreachable, so
-		// adding "oidc" must not silently switch them off. Only an explicit
-		// "allow_static_tokens": false does. LogAuthMode says which applies.
-		t := true
-		c.AllowStaticTokens = &t
-		c.staticTokensDefaulted = true
-	}
 	if c.SessionTTL.Duration == 0 {
 		c.SessionTTL.Duration = 8 * time.Hour
 	}
@@ -193,6 +186,11 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: deployment_approvals must be 1-5 (got %d)", n)
 	}
 	if c.OIDC != nil {
+		for role := range c.OIDC.RoleGroups {
+			if store.CanonicalRole(role) != role {
+				return nil, fmt.Errorf("config: oidc.role_groups: role %q is not supported; use viewer, user, admin or super_admin (the old names operator and approver were removed: rename them to user)", role)
+			}
+		}
 		c.OIDC.CACertFile = c.abs(c.OIDC.CACertFile)
 		if c.RequireMFA {
 			c.OIDC.RequireMFA = true
@@ -226,13 +224,6 @@ func LoadConfig(path string) (*Config, error) {
 		if n < 1 || n > 5 {
 			return nil, fmt.Errorf("config: approval_policy[%s] must be 1-5", sev)
 		}
-	}
-	for i, t := range c.AdminTokens {
-		role := store.CanonicalRole(t.Role)
-		if role == "" || t.User == "" || len(t.TokenSHA256) != 64 {
-			return nil, fmt.Errorf("config: admin token for %q needs user, role (viewer|user|admin|super_admin; operator and approver mean user) and token_sha256", t.User)
-		}
-		c.AdminTokens[i].Role = role
 	}
 	if c.PKIDir != "" {
 		c.PKIDir = c.abs(c.PKIDir)

@@ -33,8 +33,7 @@ import (
 func writeConfig(t *testing.T, dir, extra string) string {
 	t.Helper()
 	pub, _, _ := manifest.GenerateKey()
-	cfg := fmt.Sprintf(`{"insecure_http": true, %s "data_dir": "data", "trusted_keys":[{"public_key": %q, "sources":["s"]}],
-	  "admin_tokens":[{"user":"vera","role":"viewer","token_sha256":%q}]}`, extra, manifest.EncodePublic(pub), store.HashSecret("tok"))
+	cfg := fmt.Sprintf(`{"insecure_http": true, %s "data_dir": "data", "trusted_keys":[{"public_key": %q, "sources":["s"]}]}`, extra, manifest.EncodePublic(pub))
 	p := filepath.Join(dir, "pmserver.json")
 	if err := os.WriteFile(p, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
@@ -216,26 +215,26 @@ func TestServerCertExpiryAlert(t *testing.T) {
 	}
 }
 
-// Static admin tokens stay on (break-glass) unless allow_static_tokens is
-// false, with or without SSO (runbook 01; P1 item 6: configuring SSO must not
-// silently disable the break-glass token).
-func TestStaticTokensDefault(t *testing.T) {
-	oidcCfg := `"oidc": {"issuer": "https://idp.corp", "client_id": "pm", "redirect_url": "https://pm/auth/callback"},`
-	for _, c := range []struct {
-		extra string
-		want  bool
-	}{
-		{"", true},
-		{oidcCfg, true}, // runbook 01: SSO must not silently disable break-glass
-		{oidcCfg + ` "allow_static_tokens": false,`, false},
-		{oidcCfg + ` "allow_static_tokens": true,`, true},
-	} {
-		cfg, err := LoadConfig(writeConfig(t, t.TempDir(), c.extra))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if *cfg.AllowStaticTokens != c.want {
-			t.Errorf("%q: allow_static_tokens=%v want %v", c.extra, *cfg.AllowStaticTokens, c.want)
+// Static admin tokens were removed: a config that still has them is
+// refused with what to do, and so are the removed role names in SSO
+// group mappings; a bearer token is not accepted as a sign-in.
+func TestStaticTokensRemoved(t *testing.T) {
+	for _, extra := range []string{`"admin_tokens": [],`, `"allow_static_tokens": true,`} {
+		_, err := LoadConfig(writeConfig(t, t.TempDir(), extra))
+		if err == nil || !strings.Contains(err.Error(), "static admin tokens were removed") || !strings.Contains(err.Error(), "email + password") {
+			t.Errorf("%s: %v", extra, err)
 		}
 	}
+	for _, role := range []string{"operator", "approver", "root"} {
+		extra := `"oidc": {"issuer": "https://idp.corp", "client_id": "pm", "redirect_url": "https://pm/auth/callback", "role_groups": {"` + role + `": ["g"]}},`
+		if _, err := LoadConfig(writeConfig(t, t.TempDir(), extra)); err == nil || !strings.Contains(err.Error(), `"`+role+`"`) {
+			t.Errorf("role_groups %s: %v", role, err)
+		}
+	}
+	s := newTestServer(t)
+	w := do(s.Handler(), req{method: "GET", path: "/api/summary", token: "adm_0123456789abcdef"})
+	if w.Code != 401 || !strings.Contains(errBody(w), "static admin tokens were removed") {
+		t.Fatalf("bearer token: %d %s", w.Code, w.Body)
+	}
+
 }

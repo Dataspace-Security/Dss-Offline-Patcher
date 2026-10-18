@@ -35,7 +35,8 @@ audit export independently of the server.
 Audit page → **Verify**, or:
 
 ```bash
-curl --cacert ca.pem -H "Authorization: Bearer $TOK" https://pm.corp.internal:8443/api/audit/verify
+# signed in as a viewer (cookie jar from POST /api/auth/login, see runbooks/README.md)
+curl --cacert ca.pem -b jar https://pm.corp.internal:8443/api/audit/verify
 # {"ok":true,"count":48211,"first_bad_seq":0,"error":""}
 ```
 
@@ -89,7 +90,7 @@ copies (hash them) and escalate.
 Audit page → **Export lifecycle** → enter the `package_id`, or:
 
 ```bash
-curl --cacert ca.pem -H "Authorization: Bearer $TOK" -o lifecycle-KB5046613-x64.json \
+curl --cacert ca.pem -b jar -o lifecycle-KB5046613-x64.json \
   "https://pm.corp.internal:8443/api/audit/export?package_id=KB5046613-x64"
 sha256sum lifecycle-KB5046613-x64.json
 ```
@@ -103,6 +104,27 @@ itself audited (`audit.exported`).
 
 Limits: events pruned by retention are not in the export (use the off-box export files for them);
 transfer receipts are separate (`GET /api/transfer/reconcile`, `transfer.receipt` events).
+
+### 4a. Auditor compliance report and evidence package
+
+Reports → Compliance report generates the owner's compliance report template for a period
+(docs/10-compliance-report.md); "Download evidence package (ZIP)" gives the signed package an
+auditor receives. API: `GET /api/reports/compliance-pack.zip?from=2026-10-01&to=2026-10-31`
+(viewer; `&redact=1` replaces hostnames, IP addresses and user IDs with stable pseudonyms).
+
+The auditor verifies it offline with the server's audit-signing public key, obtained independently
+of the package (`<data_dir>/audit-signing.pub`, or compare its fingerprint with the one recorded
+at installation):
+
+```bash
+pmserver verify-report -zip compliance-CR-1A2B3C4D5E6F.zip -pub audit-signing.pub
+# compliance package OK: report CR-1A2B3C4D5E6F, period 2026-10-01 to 2026-10-31, generated … by …, 12 files, key <fingerprint>
+```
+
+The manifest lists the SHA-256 of every file; the evidence register in `report.md` and
+`summary.json` carries the same hashes. Each generation is in the audit trail as
+`report.compliance_generated` with the report ID and the manifest hash, so a package can be
+matched to the generation that produced it.
 
 ### 5. Searching
 

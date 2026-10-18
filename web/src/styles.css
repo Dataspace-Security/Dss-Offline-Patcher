@@ -681,7 +681,6 @@ a.tile:hover, button.tile:hover { text-decoration: none; color: var(--text); box
 /* Auth source badge in the top bar */
 .auth-src { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--grey-bd); background: var(--grey-bg); color: var(--grey); font-weight: 600; line-height: 17px; }
 .auth-src-mfa { background: var(--green-bg); color: var(--green); border-color: var(--green-bd); }
-.auth-src-token { background: var(--amber-bg); color: var(--amber); border-color: var(--amber-bd); }
 
 /* Login */
 .login-token { display: flex; flex-direction: column; gap: 14px; }

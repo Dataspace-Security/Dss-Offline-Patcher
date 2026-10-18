@@ -50,6 +50,7 @@ type Server struct {
 
 	enrollLimit *ipLimiter
 	loginLimit  *ipLimiter // email + password sign-in, per client IP
+	repKey      reportKey  // audit-signing key, for compliance packages
 }
 
 func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger) (*Server, error) {
@@ -65,14 +66,18 @@ func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger
 		dl[k] = v.Duration
 	}
 	st.Policy = store.Policy{ApprovalsRequired: cfg.ApprovalPolicy, SeparationOfDuties: cfg.SeparationOfDuties, Deadlines: dl,
-		DeploymentApprovals: store.DefaultDeploymentApprovals, ReservedUsers: map[string]bool{}}
+		DeploymentApprovals: store.DefaultDeploymentApprovals}
 	if cfg.DeploymentApprovals != nil {
 		st.Policy.DeploymentApprovals = *cfg.DeploymentApprovals
 	}
-	for _, t := range cfg.AdminTokens {
-		st.Policy.ReservedUsers[strings.ToLower(t.User)] = true
-		if t.Role == store.RoleSuperAdmin && cfg.AllowStaticTokens != nil && *cfg.AllowStaticTokens {
-			st.Policy.TokenSuperAdmins++
+	st.Policy.RequireMFA = cfg.RequireMFA
+	if cfg.MFAKeyFile != "" {
+		key, err := loadMFAKey(cfg.MFAKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		if err := st.SetMFAKey(key); err != nil {
+			return nil, err
 		}
 	}
 	if cfg.PKIDir != "" {
@@ -137,6 +142,9 @@ type principal struct {
 	// call except /api/me, password change and logout gets 403
 	// password_change_required.
 	MustChangePassword bool
+	// MFAEnrollOnly: a local user who must enrol an authenticator first;
+	// every call except mfaEnrollExempt gets 403 mfa_enrollment_required.
+	MFAEnrollOnly bool
 }
 
 type ctxKey int
@@ -166,6 +174,11 @@ func (s *Server) Handler() http.Handler {
 	admin(viewer, "GET /api/reports/compliance", s.complianceReport)
 	admin(viewer, "GET /api/reports/compliance.csv", s.complianceCSV)
 	admin(viewer, "GET /api/reports/endpoints.csv", s.endpointsCSV)
+	admin(viewer, "GET /api/reports/profile", s.getReportProfile)
+	admin(adm, "PUT /api/reports/profile", s.putReportProfile)
+	admin(viewer, "GET /api/reports/profile/history", s.reportProfileHistory)
+	admin(viewer, "GET /api/reports/compliance-pack", s.compliancePack)
+	admin(viewer, "GET /api/reports/compliance-pack.zip", s.compliancePackZip)
 	admin(viewer, "GET /api/alerts", s.listAlerts)
 	admin(user, "POST /api/alerts/{id}/ack", s.ackAlert)
 	mux.HandleFunc("GET /metrics", s.metrics)
@@ -218,7 +231,11 @@ func (s *Server) Handler() http.Handler {
 	admin(viewer, "POST /api/auth/password", s.changePassword)
 	admin(adm, "GET /api/users", s.listUsers)
 	admin(adm, "POST /api/users", s.createUser)
-	admin(adm, "POST /api/users/{name}/{action}", s.userAction) // disable | enable | reset_password | set_role
+	admin(adm, "POST /api/users/{name}/{action}", s.userAction) // disable | enable | reset_password | set_role | reset_mfa | delete
+	mux.HandleFunc("POST /api/auth/mfa", s.mfaLogin)
+	admin(viewer, "POST /api/auth/mfa/enroll/start", s.mfaEnrollStart)
+	admin(viewer, "POST /api/auth/mfa/enroll/confirm", s.mfaEnrollConfirm)
+	admin(store.RoleSuperAdmin, "POST /api/auth/mfa/disable", s.mfaDisable)
 
 	mux.HandleFunc("GET /api/agent-setup/bootstrap/windows.ps1", s.bootstrapWindows)
 	mux.HandleFunc("GET /api/agent-setup/bootstrap/files/{name}", s.bootstrapFile)
@@ -287,6 +304,10 @@ func (s *Server) requireAdmin(role string, h http.HandlerFunc) http.Handler {
 		}
 		if p.MustChangePassword && !passwordChangeExempt[r.URL.Path] {
 			writeErr(w, http.StatusForbidden, passwordChangeRequired)
+			return
+		}
+		if p.MFAEnrollOnly && !mfaEnrollExempt[r.URL.Path] {
+			writeErr(w, http.StatusForbidden, mfaEnrollNeeded)
 			return
 		}
 		if store.RoleRank(p.Role) < store.RoleRank(role) {
@@ -385,7 +406,8 @@ type reasonBody struct {
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(keyPrincipal).(*principal)
 	v := map[string]any{"user": p.User, "role": p.Role, "auth": p.Source, "source": p.Source, "mfa": p.MFA,
-		"email": "", "display_name": "", "must_change_password": p.MustChangePassword, "password_changed_at": "", "builtin": false}
+		"email": "", "display_name": "", "must_change_password": p.MustChangePassword, "password_changed_at": "", "builtin": false,
+		"mfa_enrolled": false, "mfa_required": s.cfg.RequireMFA}
 	switch p.Source {
 	case "password":
 		lp, err := s.store.GetLocalProfile(r.Context(), p.User)
@@ -393,7 +415,13 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, err)
 			return
 		}
+		enrolled, err := s.store.MFAEnrolled(r.Context(), p.User)
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
 		v["email"], v["display_name"], v["password_changed_at"], v["builtin"] = p.User, lp.DisplayName, lp.PasswordChangedAt, lp.Builtin
+		v["mfa_enrolled"], v["mfa_required"] = enrolled, s.store.MFARequired(p.Role)
 	case "sso":
 		email, err := s.store.UserEmail(r.Context(), p.User)
 		if err != nil {
@@ -468,6 +496,9 @@ func (s *Server) packageAction(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &body) {
 		return
 	}
+	if !s.agentAllowed(w, r, r.PathValue("id"), superAdminOnly, agentVendorOnly, store.RoleSuperAdmin) {
+		return
+	}
 	publish := func(p store.Package) error { return s.repo.Publish(p.QuarantinePath, p.SHA256, p.Size) }
 	v, err := s.store.SetPackageState(r.Context(), actor(r), r.PathValue("id"), action, body.Reason, publish)
 	if err != nil {
@@ -526,6 +557,9 @@ func (s *Server) createDeployment(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &n) {
 		return
 	}
+	if !s.agentAllowed(w, r, n.PackageID, superAdminOnly, agentVendorOnly, store.RoleSuperAdmin) {
+		return
+	}
 	v, err := s.store.CreateDeployment(r.Context(), actor(r), n)
 	if err != nil {
 		s.fail(w, err)
@@ -569,6 +603,9 @@ func (s *Server) rejectDeployment(w http.ResponseWriter, r *http.Request) {
 func (s *Server) decideDeployment(w http.ResponseWriter, r *http.Request, decide func(ctx context.Context, actor, role, id, reason string) (store.Deployment, error)) {
 	var body reasonBody
 	if !decode(w, r, &body) {
+		return
+	}
+	if !s.agentDeploymentAllowed(w, r, r.PathValue("id")) {
 		return
 	}
 	p := r.Context().Value(keyPrincipal).(*principal)

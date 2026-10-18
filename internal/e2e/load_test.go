@@ -46,9 +46,7 @@ func TestLoad(t *testing.T) {
 		b, _ := json.Marshal(body)
 		req, _ := http.NewRequest("POST", e.srv.URL+path, bytes.NewReader(b))
 		req.Header.Set("Content-Type", "application/json")
-		if token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
+		e.authorize(req, token)
 		start := time.Now()
 		resp, err := client.Do(req)
 		if err != nil {

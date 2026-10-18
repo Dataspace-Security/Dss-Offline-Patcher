@@ -13,7 +13,7 @@ certificate, and retire them cleanly when they leave.
 
 ## How enrollment works (from the code)
 
-- An operator creates an **enrollment token** (`enr_…`) bound to a set of groups and a site.
+- A bank user (role `user` or higher) creates an **enrollment token** (`enr_…`) bound to a set of groups and a site.
   Only its hash is stored; the token is shown once.
 - `pmagent enroll` (over `https://`) generates a private key on the endpoint (it never leaves the
   machine), sends a CSR with the token, and receives a client certificate signed by the server's
@@ -34,7 +34,7 @@ Default state directories: Windows `C:\ProgramData\offpatch`, Linux `/var/lib/of
 
 | Item | Notes |
 |---|---|
-| Operator role | Create tokens, edit endpoint groups, retire endpoints. |
+| Console role `user` (or higher) | Create tokens, edit endpoint groups, retire endpoints. |
 | Local admin / root on the endpoint | Enrollment and service install. |
 | `bundle.pub`, `ca.pem`, `root.pub` | Console → **Agent setup** offers `bundle.pub` and `ca.pem`; `root.pub` comes from the acquisition zone (runbook 02). |
 | Agent binary or package | From `<data_dir>/agent-dist/` (Agent setup page) or your software distribution. |
@@ -43,13 +43,23 @@ Default state directories: Windows `C:\ProgramData\offpatch`, Linux `/var/lib/of
 
 ## Onboarding — single endpoint
 
-1. **Token** (console **Endpoints → Create enrollment token**, or API):
+1. **Token** (console **Endpoints → Create enrollment token**, or API signed in as a `user`, cookie
+   jar from `POST /api/auth/login`, see [runbooks/README.md](README.md#conventions-used-in-the-runbooks)):
 
    ```bash
-   curl --cacert ca.pem -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+   curl --cacert ca.pem -b jar -H 'X-Offpatch-CSRF: 1' -H 'Content-Type: application/json' \
      -d '{"groups":["pilot"],"site":"hq","expires_in_hours":24,"max_uses":1}' \
      https://pm.corp.internal:8443/api/enrollment-tokens
    # {"token":"enr_…","expires_at":"…","max_uses":1}
+   ```
+
+   Or on the server shell, without a console session (one use, audited as created by `system:cli`):
+
+   ```bash
+   sudo runuser -u offpatch -- /opt/offpatch/bin/pmserver enroll-token \
+     -config /etc/offpatch/pmserver.json -groups pilot -site hq -hours 1
+   # token: enr_…
+   # expires_at: …
    ```
 
 2. **Windows** (elevated PowerShell, binary and key files in the current directory):
@@ -126,7 +136,7 @@ be re-enrolled when keys change (runbooks 03, 04).
 
 ## After enrollment
 
-- Check owner, criticality, site and groups on the endpoint page (operator can edit). Changing
+- Check owner, criticality, site and groups on the endpoint page (role `user` can edit). Changing
   groups adds the endpoint to rings of active deployments.
 - First check-in sends inventory; status leaves `stale` once inventory arrives.
 
@@ -139,10 +149,10 @@ be re-enrolled when keys change (runbooks 03, 04).
 
 ## Offboarding
 
-1. **Retire** in the console (Endpoint → Retire, operator, reason) or:
+1. **Retire** in the console (Endpoint → Retire, role `user`, reason) or, signed in as a `user`:
 
    ```bash
-   curl --cacert ca.pem -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+   curl --cacert ca.pem -b jar -H 'X-Offpatch-CSRF: 1' -H 'Content-Type: application/json' \
      -d '{"reason":"CHG-2201 decommissioned"}' \
      https://pm.corp.internal:8443/api/endpoints/e-…/retire
    ```
@@ -173,7 +183,7 @@ be re-enrolled when keys change (runbooks 03, 04).
 ## Rollback / escape hatch
 
 - Wrong groups or site on a token: retire the endpoints enrolled with it, create a correct token,
-  re-enroll. Or simply edit the endpoints' groups/site (operator).
+  re-enroll. Or simply edit the endpoints' groups/site (role `user`).
 - Token leaked: there is no API to revoke an enrollment token. It stops working when it expires or
   its uses are spent. Watch `endpoint.enrolled` events and retire unexpected endpoints. Keep expiry
   short.

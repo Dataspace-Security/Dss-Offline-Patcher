@@ -25,8 +25,9 @@
 #   --skip-backup                     upgrade without the automatic pre-upgrade backup
 #   --insecure-lab                    plain HTTP (first install, isolated lab only)
 #   --admin-email EMAIL               role server/all: sign-in email of the built-in super admin (vendor),
-#                                     created when none exists (default superadmin@offpatch.local); its
-#                                     generated password is shown ONCE (lost: pmserver reset-admin)
+#                                     created when none exists (default superadmin@dataspacesecurity.com)
+#                                     with the vendor's default password (see the vendor handbook); change
+#                                     it after the first sign-in (lost: pmserver reset-admin)
 #   --with-agent                      role all: also enroll this machine as a managed endpoint
 #   --go-version 1.27.2               Go toolchain to install when building from source
 #
@@ -44,7 +45,7 @@ GO_VERSION="1.27.2"
 AGENT_SERVER="" AGENT_TOKEN="" AGENT_CA="" PUBKEY_IN="" ROOTPUB_IN=""
 AUDIT_DIR_IN="" BACKUP_DIR_IN="" BACKUP_KEEP_IN="" SKIP_BACKUP=0
 ALLOW_FROM=()
-ADMIN_EMAIL="superadmin@offpatch.local"
+ADMIN_EMAIL="superadmin@dataspacesecurity.com"
 UNINSTALL=0 PURGE=0 STATUS=0 YES=0
 
 PREFIX=/opt/offpatch                 # binaries
@@ -164,7 +165,6 @@ if [ $STATUS = 1 ]; then
   echo "backup timer:      $( [ $HAVE_SYSTEMD = 1 ] && systemctl is-active offpatch-backup.timer 2>/dev/null || echo 'cron/manual')"
   [ -f "$BACKUP_DIR/last-success" ] && echo "last good backup:  $(head -n 1 "$BACKUP_DIR/last-success")"
   [ -f "$BACKUP_DIR/last-failure" ] && echo "last FAILED backup: $(cat "$BACKUP_DIR/last-failure")"
-  [ -f "$ETC/admin-token.txt" ] && echo "admin token file:  $ETC/admin-token.txt (lab; remove on production machines)"
   [ -f "$ETC/console-url.txt" ] && echo "console:           $(cat "$ETC/console-url.txt")"
   exit 0
 fi
@@ -172,7 +172,7 @@ fi
 # ---------------------------------------------------------------- uninstall
 list_secrets() {
   local f
-  for f in "$ETC"/keys/*.key "$ETC/pki/ca.key" "$ETC/pki/server.key" "$ETC/admin-token.txt" "$SRV_DATA/audit-signing.key" "$AGENT_STATE"/*; do
+  for f in "$ETC"/keys/*.key "$ETC/pki/ca.key" "$ETC/pki/server.key" "$SRV_DATA/audit-signing.key" "$AGENT_STATE"/*; do
     [ -e "$f" ] && warn "  still on disk: $f"
   done
   return 0
@@ -656,8 +656,7 @@ EOF
 }
 
 CURL_CA=()
-NEW_TOKEN=""
-ADMIN_CREATED_EMAIL="" ADMIN_CREATED_PW=""
+ADMIN_CREATED_EMAIL="" ADMIN_CREATED_PW="" ADMIN_DEFAULT_PW=0
 if [ $IS_SERVER = 1 ]; then
   step "Management server"
   install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$SRV_DATA" "$SRV_DATA/inbox" "$SRV_DATA/agent-dist"
@@ -669,30 +668,32 @@ if [ $IS_SERVER = 1 ]; then
   fi
   [ -d "$ETC/pki" ] && { chown -R "$SVC_USER":"$SVC_USER" "$ETC/pki"; chmod 0700 "$ETC/pki"; chmod 0644 "$ETC/pki/ca.pem"; }
 
-  # Break-glass admin token (API / automation; the console signs in with email + password and
-  # takes the token only at /login?token=1): only its SHA-256 is stored. Production roles show it once;
-  # the lab keeps it in a root-only file so --with-agent and re-runs can use it.
-  if [ ! -f "$ETC/admin-token.sha256" ]; then
-    out=$("$PREFIX/bin/pmserver" new-token)
-    tok=$(echo "$out" | awk '/^token:/{print $2}'); sha=$(echo "$out" | awk '/^token_sha256:/{print $2}')
-    [ -n "$tok" ] && [ -n "$sha" ] || die "pmserver new-token returned no token"
-    ( umask 077; printf '%s\n' "$sha" > "$ETC/admin-token.sha256" )
-    if [ "$ROLE" = all ]; then
-      ( umask 077; printf '%s\n' "$tok" > "$ETC/admin-token.txt" )
-      ok "created break-glass admin token → $ETC/admin-token.txt (root only, 0600; lab)"
-    else
-      NEW_TOKEN=$tok
-      banner "Break-glass admin token (shown ONCE, not stored on this machine):" "" "  $tok" "" \
-             "Put it in the safe now. Lost it? pmserver new-token, replace token_sha256 in" "$ETC/pmserver.json and restart offpatch-server."
-    fi
+  # MFA key: encrypts local users' authenticator (TOTP) secrets (AES-256-GCM). pmserver creates
+  # it on first start when missing; created here so it exists before the first sign-in. Kept
+  # in the data dir so backups include it (a restore without it loses every MFA enrolment).
+  if [ ! -f "$SRV_DATA/mfa.key" ]; then
+    ( umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$SRV_DATA/mfa.key"; echo >> "$SRV_DATA/mfa.key" )
+    ok "created the MFA key $SRV_DATA/mfa.key"
   fi
-  if [ -f "$ETC/admin-token.txt" ]; then
-    chown root:root "$ETC/admin-token.txt"; chmod 0600 "$ETC/admin-token.txt"
-    if [ "$ROLE" = all ]; then ok "lab: break-glass token kept in $ETC/admin-token.txt (root only, 0600)"
-    else warn "$ETC/admin-token.txt holds the break-glass token in clear text. Move it to the safe, then: sudo shred -u $ETC/admin-token.txt"; fi
+  chown "$SVC_USER":"$SVC_USER" "$SRV_DATA/mfa.key"; chmod 0600 "$SRV_DATA/mfa.key"
+  # Static admin tokens were removed (only email + password sessions and SSO sign in). Upgrades
+  # from earlier versions: drop admin_tokens / allow_static_tokens from the config (the new
+  # pmserver refuses to start with them) and delete the old break-glass token files.
+  if [ -f "$ETC/pmserver.json" ] && grep -qE '"(admin_tokens|allow_static_tokens)"' "$ETC/pmserver.json"; then
+    command -v python3 >/dev/null || die "remove \"admin_tokens\" and \"allow_static_tokens\" from $ETC/pmserver.json by hand (python3 not found), then re-run"
+    python3 - "$ETC/pmserver.json" <<'PY' || die "could not remove admin_tokens from $ETC/pmserver.json"
+import json, sys
+p = sys.argv[1]
+c = json.load(open(p))
+for k in ("admin_tokens", "allow_static_tokens"):
+    c.pop(k, None)
+json.dump(c, open(p, "w"), indent=2)
+PY
+    ok "removed the static admin tokens from $ETC/pmserver.json (sign in with email + password)"
   fi
-  chown root:root "$ETC/admin-token.sha256"; chmod 0600 "$ETC/admin-token.sha256"
-  sha=$(cat "$ETC/admin-token.sha256")
+  for f in "$ETC/admin-token.txt" "$ETC/admin-token.sha256"; do
+    if [ -f "$f" ]; then shred -u "$f" 2>/dev/null || rm -f "$f"; ok "deleted $f (static admin tokens no longer exist)"; fi
+  done
 
   if [ -z "$AUDIT_DIR" ]; then
     warn "audit_export_dir is not set in $ETC/pmserver.json: audit evidence lives only in the database"
@@ -713,7 +714,6 @@ if [ $IS_SERVER = 1 ]; then
   $tlsline
   "data_dir": "$SRV_DATA",
   "trusted_keys": [{"public_key_file": "$ETC/keys/bundle.pub", "sources": ["acq-zone-1"]}],${rootline}
-  "admin_tokens": [{"user": "admin", "role": "super_admin", "token_sha256": "$sha"}],
   "audit_export_dir": "$AUDIT_DIR",
   "audit_checkpoint_interval": "1h",
   "intake_interval": "5s",
@@ -765,10 +765,15 @@ PY
   chgrp "$XFER_GROUP" "$SRV_DATA" "$SRV_DATA/inbox"
   chmod 0710 "$SRV_DATA"; chmod 2770 "$SRV_DATA/inbox"
   # Built-in super admin (the vendor): created on first install, and on an upgrade when no
-  # local super admin exists yet. pmserver generates the password and stores only its PBKDF2
-  # hash; it is shown once in the summary. Lost it? pmserver reset-admin (see the summary).
+  # local super admin exists yet, with the vendor's default password (only its PBKDF2 hash is in
+  # pmserver; see the vendor handbook). The console asks for a new password at the first
+  # sign-in. Lost it? pmserver reset-admin (see the summary).
   if out=$(cd / && runuser -u "$SVC_USER" -- "$PREFIX/bin/pmserver" create-admin -config "$ETC/pmserver.json" -email "$ADMIN_EMAIL" -if-none 2>&1); then
-    if printf '%s\n' "$out" | grep -q '^password:'; then
+    if printf '%s\n' "$out" | grep -q '^default_password: yes'; then
+      ADMIN_CREATED_EMAIL=$(printf '%s\n' "$out" | awk '/^email:/{print $2}')
+      ADMIN_DEFAULT_PW=1
+      ok "created the built-in super admin $ADMIN_CREATED_EMAIL with the default password"
+    elif printf '%s\n' "$out" | grep -q '^password:'; then
       ADMIN_CREATED_EMAIL=$(printf '%s\n' "$out" | awk '/^email:/{print $2}')
       ADMIN_CREATED_PW=$(printf '%s\n' "$out" | awk '/^password:/{print $2}')
       ok "created the built-in super admin $ADMIN_CREATED_EMAIL (password in the summary below)"
@@ -1032,15 +1037,10 @@ fi
 if [ "$ROLE" = all ] && [ $WITH_AGENT = 1 ]; then
   step "Local agent (this machine as a managed endpoint)"
   if [ ! -f "$AGENT_STATE/agent.json" ]; then
-    [ -f "$ETC/admin-token.txt" ] || die "--with-agent needs $ETC/admin-token.txt; or create an enrollment token in the console and use --role agent"
-    # The admin token goes to curl through a 0600 header file, never on a command line.
-    hdr=$(mktemp); chmod 0600 "$hdr"
-    printf 'Authorization: Bearer %s\n' "$(cat "$ETC/admin-token.txt")" > "$hdr"
-    tokjson=$(curl -fs ${CURL_CA[@]+"${CURL_CA[@]}"} -H @"$hdr" -H 'Content-Type: application/json' \
-      -X POST "$URL_LOCAL/api/enrollment-tokens" -d '{"groups":["linux","lab"],"site":"lab","expires_in_hours":1}' || true)
-    rm -f "$hdr"
-    etok=$(echo "$tokjson" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
-    [ -n "$etok" ] || die "could not create an enrollment token: $tokjson"
+    # One-use enrollment token from the server itself (as the service user; audited).
+    tokout=$(cd / && runuser -u "$SVC_USER" -- "$PREFIX/bin/pmserver" enroll-token -config "$ETC/pmserver.json" -groups linux,lab -site lab -hours 1 2>&1 || true)
+    etok=$(printf '%s\n' "$tokout" | awk '/^token:/{print $2}')
+    [ -n "$etok" ] || die "could not create an enrollment token: $tokout"
     ca=""; [ $INSECURE = 0 ] && ca="$ETC/pki/ca.pem"
     rootpub=""; [ -f "$ETC/keys/root.pub" ] && rootpub="$ETC/keys/root.pub"
     enroll_agent "$URL_LOCAL" "$etok" "$ca" "$ETC/keys/bundle.pub" "$rootpub" >/dev/null
@@ -1098,20 +1098,16 @@ chmod 0644 "$STATE_FILE"
 step "Done"
 if [ $IS_SERVER = 1 ]; then
   echo "  Console:        $URL_PUBLIC   (sign in with email + password)"
-  if [ -n "$ADMIN_CREATED_PW" ]; then
+  if [ $ADMIN_DEFAULT_PW = 1 ]; then
+    banner "super admin: $ADMIN_CREATED_EMAIL — default password (see vendor handbook); change it after first sign-in" "" \
+           "Sign in, change the password, then create the bank's first Admin under Settings > Users."
+  elif [ -n "$ADMIN_CREATED_PW" ]; then
     banner "Built-in super admin (vendor): password shown ONCE, stored only as a hash:" "" \
            "  email:    $ADMIN_CREATED_EMAIL" "  password: $ADMIN_CREATED_PW" "" \
            "Sign in, then create the bank's first Admin under Settings > Users." \
            "Changing this password after the first sign-in is recommended."
   fi
   echo "  Super admin:    lost the password? sudo runuser -u $SVC_USER -- $PREFIX/bin/pmserver reset-admin -config $ETC/pmserver.json -email <email>"
-  if [ "$ROLE" = all ]; then
-    echo "  Admin token:    sudo cat $ETC/admin-token.txt   (API / automation; console break-glass: $URL_PUBLIC/login?token=1)"
-  elif [ -n "$NEW_TOKEN" ]; then
-    echo "  Admin token:    shown once above; not stored on this machine (API / automation; console: /login?token=1)"
-  else
-    echo "  Admin token:    unchanged (kept in your safe)"
-  fi
   echo "  Backups:        daily → $BACKUP_DIR (keeps $BACKUP_KEEP); copy them off the machine"
   [ $INSECURE = 0 ] && cat <<EOF
   TLS:            the console uses the internal CA $ETC/pki/ca.pem — import it into your browser /

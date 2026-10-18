@@ -14,7 +14,7 @@ func init() { PasswordIterations = 1000 } // fast tests; production uses Default
 const pw = "correct horse battery"
 
 var (
-	bySuper = Manager{Actor: "user:vendor@offpatch.local", Role: RoleSuperAdmin}
+	bySuper = Manager{Actor: "user:vendor@dataspacesecurity.test", Role: RoleSuperAdmin}
 	byAdmin = Manager{Actor: "user:adam@bank.example", Role: RoleAdmin}
 	byUser  = Manager{Actor: "user:uma@bank.example", Role: RoleUser}
 )
@@ -72,7 +72,6 @@ func TestNormalizeEmail(t *testing.T) {
 func TestCreateLocalUserRules(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	s.Policy.ReservedUsers = map[string]bool{"admin@bank.example": true}
 	for _, c := range []struct {
 		what string
 		by   Manager
@@ -84,13 +83,13 @@ func TestCreateLocalUserRules(t *testing.T) {
 		{"bad email", byAdmin, NewLocalUser{Email: "nope", Role: RoleUser, Password: pw}, ErrInvalid},
 		{"bad role", byAdmin, NewLocalUser{Email: "a@bank.example", Role: "root", Password: pw}, ErrInvalid},
 		{"short password", byAdmin, NewLocalUser{Email: "a@bank.example", Role: RoleUser, Password: "short"}, ErrInvalid},
-		{"reserved token name", byAdmin, NewLocalUser{Email: "admin@bank.example", Role: RoleUser, Password: pw}, ErrConflict},
+		{"removed role name", byAdmin, NewLocalUser{Email: "a@bank.example", Role: "operator", Password: pw}, ErrInvalid},
 	} {
 		if _, err := s.CreateLocalUser(ctx, c.by, c.n, true); !errors.Is(err, c.want) {
 			t.Errorf("%s: want %v, got %v", c.what, c.want, err)
 		}
 	}
-	u, err := s.CreateLocalUser(ctx, byAdmin, NewLocalUser{Email: "Uma@Bank.Example", DisplayName: "Uma Rao", Role: "operator", Password: pw}, true)
+	u, err := s.CreateLocalUser(ctx, byAdmin, NewLocalUser{Email: "Uma@Bank.Example", DisplayName: "Uma Rao", Role: "user", Password: pw}, true)
 	if err != nil || u.Email != "uma@bank.example" || u.Role != RoleUser || !u.MustChangePassword {
 		t.Fatalf("create: %v %+v", err, u)
 	}
@@ -107,16 +106,13 @@ func TestCreateLocalUserRules(t *testing.T) {
 	if _, err := s.Login(ctx, "uma@bank.example", "admin", "", "oidc", true, time.Hour); !errors.Is(err, ErrConflict) {
 		t.Fatalf("SSO sign-in as a local user: want conflict, got %v", err)
 	}
-	if _, err := s.Login(ctx, "Admin@Bank.Example", "admin", "", "oidc", true, time.Hour); !errors.Is(err, ErrConflict) {
-		t.Fatalf("SSO sign-in with a static token name: want conflict, got %v", err)
-	}
 	if _, err := s.Login(ctx, "Uma@Bank.Example", "admin", "", "oidc", true, time.Hour); !errors.Is(err, ErrConflict) {
 		t.Fatalf("SSO sign-in as a local user (other case): want conflict, got %v", err)
 	}
 	if _, err := s.CreateLocalUser(ctx, byAdmin, NewLocalUser{Email: "SSO@bank.example", Role: RoleUser, Password: pw}, true); !errors.Is(err, ErrConflict) {
 		t.Fatalf("local user with an SSO name (other case): %v", err)
 	}
-	if _, err := s.CreateLocalUser(ctx, bySuper, NewLocalUser{Email: "vendor2@offpatch.local", Role: RoleSuperAdmin, Password: pw}, false); err != nil {
+	if _, err := s.CreateLocalUser(ctx, bySuper, NewLocalUser{Email: "vendor2@dataspacesecurity.test", Role: RoleSuperAdmin, Password: pw}, false); err != nil {
 		t.Fatalf("super admin creates super admin: %v", err)
 	}
 	// Audit names the role, never the password or its hash.
@@ -237,12 +233,12 @@ func TestChangeOwnPassword(t *testing.T) {
 func TestUserManagementLimits(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	if _, err := s.CreateBuiltinSuperAdmin(ctx, "vendor@offpatch.local", "", pw); err != nil {
+	if _, err := s.CreateBuiltinSuperAdmin(ctx, "vendor@dataspacesecurity.test", "", pw); err != nil {
 		t.Fatal(err)
 	}
 	mkUser(t, s, bySuper, "adam@bank.example", RoleAdmin)
 	mkUser(t, s, byAdmin, "uma@bank.example", RoleUser)
-	p, _ := s.GetLocalProfile(ctx, "vendor@offpatch.local")
+	p, _ := s.GetLocalProfile(ctx, "vendor@dataspacesecurity.test")
 	if !p.Builtin || p.MustChangePassword {
 		t.Fatalf("builtin super admin: %+v", p)
 	}
@@ -259,9 +255,9 @@ func TestUserManagementLimits(t *testing.T) {
 		}
 	}
 	// Admin: bank roles only.
-	is("admin disables super admin", s.SetUserDisabled(ctx, byAdmin, "vendor@offpatch.local", true, "x"), ErrForbidden)
-	is("admin resets super admin", s.ResetLocalPassword(ctx, byAdmin, "vendor@offpatch.local", "temporary password 1", "x"), ErrForbidden)
-	is("admin demotes super admin", s.SetLocalUserRole(ctx, byAdmin, "vendor@offpatch.local", RoleAdmin, "x"), ErrForbidden)
+	is("admin disables super admin", s.SetUserDisabled(ctx, byAdmin, "vendor@dataspacesecurity.test", true, "x"), ErrForbidden)
+	is("admin resets super admin", s.ResetLocalPassword(ctx, byAdmin, "vendor@dataspacesecurity.test", "temporary password 1", "x"), ErrForbidden)
+	is("admin demotes super admin", s.SetLocalUserRole(ctx, byAdmin, "vendor@dataspacesecurity.test", RoleAdmin, "x"), ErrForbidden)
 	is("admin grants super admin", s.SetLocalUserRole(ctx, byAdmin, "uma@bank.example", RoleSuperAdmin, "x"), ErrForbidden)
 	is("user manages users", s.SetUserDisabled(ctx, byUser, "adam@bank.example", true, "x"), ErrForbidden)
 	is("unknown user", s.SetUserDisabled(ctx, byAdmin, "ghost@bank.example", true, "x"), ErrNotFound)
@@ -274,15 +270,11 @@ func TestUserManagementLimits(t *testing.T) {
 	is("demote self", s.SetLocalUserRole(ctx, byAdmin, "adam@bank.example", RoleUser, "x"), ErrConflict)
 	is("reset self", s.ResetLocalPassword(ctx, byAdmin, "adam@bank.example", "temporary password 1", "x"), ErrConflict)
 	// The last super admin stays.
-	vendor := Manager{Actor: "user:vendor2@offpatch.local", Role: RoleSuperAdmin}
-	is("disable last super admin", s.SetUserDisabled(ctx, vendor, "vendor@offpatch.local", true, "x"), ErrConflict)
-	is("demote last super admin", s.SetLocalUserRole(ctx, vendor, "vendor@offpatch.local", RoleAdmin, "x"), ErrConflict)
-	s.Policy.TokenSuperAdmins = 1 // a break-glass super_admin token counts
-	ok("disable super admin with a token left", s.SetUserDisabled(ctx, vendor, "vendor@offpatch.local", true, "x"))
-	ok("re-enable", s.SetUserDisabled(ctx, vendor, "vendor@offpatch.local", false, "x"))
-	s.Policy.TokenSuperAdmins = 0
-	mkUser(t, s, bySuper, "vendor2@offpatch.local", RoleSuperAdmin)
-	ok("demote one of two super admins", s.SetLocalUserRole(ctx, bySuper, "vendor2@offpatch.local", RoleAdmin, "x"))
+	vendor := Manager{Actor: "user:vendor2@dataspacesecurity.test", Role: RoleSuperAdmin}
+	is("disable last super admin", s.SetUserDisabled(ctx, vendor, "vendor@dataspacesecurity.test", true, "x"), ErrConflict)
+	is("demote last super admin", s.SetLocalUserRole(ctx, vendor, "vendor@dataspacesecurity.test", RoleAdmin, "x"), ErrConflict)
+	mkUser(t, s, bySuper, "vendor2@dataspacesecurity.test", RoleSuperAdmin)
+	ok("demote one of two super admins", s.SetLocalUserRole(ctx, bySuper, "vendor2@dataspacesecurity.test", RoleAdmin, "x"))
 	// SSO users: disable yes, password/role no.
 	s.Login(ctx, "sso@bank.example", "user", "", "oidc", true, time.Hour)
 	ok("disable SSO user", s.SetUserDisabled(ctx, byAdmin, "sso@bank.example", true, "left"))
@@ -323,8 +315,8 @@ func TestUserManagementLimits(t *testing.T) {
 
 	// pmserver reset-admin: only for local super admins; re-enables.
 	is("recover a non super admin", s.RecoverSuperAdmin(ctx, "uma@bank.example", "a recovered secret"), ErrConflict)
-	ok("recover", s.RecoverSuperAdmin(ctx, "vendor@offpatch.local", "a recovered secret"))
-	if l, err := s.LoginPassword(ctx, "vendor@offpatch.local", "a recovered secret", time.Hour); err != nil || l.MustChangePassword {
+	ok("recover", s.RecoverSuperAdmin(ctx, "vendor@dataspacesecurity.test", "a recovered secret"))
+	if l, err := s.LoginPassword(ctx, "vendor@dataspacesecurity.test", "a recovered secret", time.Hour); err != nil || l.MustChangePassword {
 		t.Errorf("recovered login: %v %+v", err, l)
 	}
 	if has, _ := s.HasLocalSuperAdmin(ctx); !has {

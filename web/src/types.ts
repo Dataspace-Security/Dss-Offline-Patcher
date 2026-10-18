@@ -154,26 +154,28 @@ export type AgentSetup = {
 };
 
 // ---- auth & users (v1.1 B2/C8, roles contract) ----
-/** Current roles, lowest to highest. Old names (operator, approver) are mapped to "user" when read. */
+/** The four roles, lowest to highest. */
 export type Role = "viewer" | "user" | "admin" | "super_admin";
-export type AuthKind = "password" | "sso" | "token";
+export type AuthKind = "password" | "sso";
 /** GET /api/me. `auth` / `must_change_password` come with the roles contract; `source` / `mfa` from older servers. */
 export type Me = {
   user: string; role: Role; auth: AuthKind; must_change_password: boolean;
   /** Sign-in e-mail of password users (owner change 2026-10-18). */
   email?: string;
   display_name?: string; source?: string; mfa?: boolean;
+  /** Authenticator-app MFA: set up for this account / required for its role (bank roles yes, super admin optional). */
+  mfa_enrolled?: boolean; mfa_required?: boolean;
   /** Assumed: "" / absent while the built-in super admin still has the installer's password; `builtin` marks that account. */
   password_changed_at?: string; builtin?: boolean;
 };
-export type AuthConfig = { sso: boolean; static_tokens: boolean; require_mfa: boolean; /** Server version, when the server reports it. */ version?: string };
+export type AuthConfig = { sso: boolean; require_mfa: boolean; /** Server version, when the server reports it. */ version?: string };
 export type LogoutResponse = { end_session_url?: string };
 /** GET /api/users: local (e-mail + password) users and SSO users; never password hashes. */
 export type User = {
   /** Local users are identified by `email`; SSO users by `username` (older servers: username only). */
   username?: string; role: Role; display_name?: string;
   /** "local" / "password" = username + password; anything else (e.g. "sso", an issuer) = single sign-on. */
-  source: string; email?: string; mfa?: boolean;
+  source: string; email?: string; mfa?: boolean; mfa_enrolled?: boolean;
   first_login?: string; last_login: string; disabled: boolean; disabled_reason?: string; active_sessions?: number;
   must_change_password?: boolean; locked_until?: string; created_by?: string; created_at?: string;
 };

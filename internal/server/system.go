@@ -102,7 +102,7 @@ func (s *Server) system(w http.ResponseWriter, r *http.Request) {
 		"listen":         c.Listen,
 		"security": map[string]any{
 			"tls": c.TLSCert != "", "mtls_agents": c.PKIDir != "", "insecure_http": c.InsecureHTTP,
-			"sso": c.OIDC != nil, "static_tokens": *c.AllowStaticTokens && len(c.AdminTokens) > 0, "require_mfa": c.RequireMFA,
+			"sso": c.OIDC != nil, "require_mfa": c.RequireMFA,
 		},
 		"policy": map[string]any{
 			"approval_policy": c.ApprovalPolicy, "separation_of_duties": c.SeparationOfDuties, "patch_deadlines": deadlines,

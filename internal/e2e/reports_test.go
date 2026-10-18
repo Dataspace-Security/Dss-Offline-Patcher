@@ -67,7 +67,7 @@ func TestReportsAlertsMetrics(t *testing.T) {
 
 	// ---- CSV: formula injection neutralised ----
 	req, _ := http.NewRequest("GET", e.srv.URL+"/api/reports/compliance.csv", nil)
-	req.Header.Set("Authorization", "Bearer "+tokViewer)
+	e.authorize(req, tokViewer)
 	resp, _ := http.DefaultClient.Do(req)
 	b, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()

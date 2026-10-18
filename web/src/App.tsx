@@ -1,9 +1,10 @@
 import { useEffect, useState, type ComponentType } from "react";
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
-import { api, ApiError, clearToken, PASSWORD_CHANGE_EVENT, UNAUTHORIZED_EVENT } from "./api";
+import { api, ApiError, MFA_ENROLL_EVENT, PASSWORD_CHANGE_EVENT, UNAUTHORIZED_EVENT } from "./api";
 import { AuthContext, hasRole, shouldRecommendPasswordChange } from "./auth";
 import type { Alert, LogoutResponse, Me } from "./types";
-import { ChangePasswordForm, fetchMe, ForcedPasswordChange, SignIn } from "./components/SignIn";
+import { AuthLayout, ChangePasswordForm, fetchMe, ForcedPasswordChange, SignIn } from "./components/SignIn";
+import { MfaSetupFlow } from "./mfa/MfaScreens";
 import { Modal, RoleBadge } from "./components/ui";
 import { ThemeSwitcher } from "./components/ThemeSwitcher";
 import { useThemePref } from "./theme";
@@ -30,6 +31,8 @@ import Users from "./pages/Users";
 import MaintenanceWindows from "./pages/MaintenanceWindows";
 import Alerts, { isOpenAlert } from "./pages/Alerts";
 import Reports from "./pages/Reports";
+import ComplianceReport from "./pages/ComplianceReport";
+import ReportProfilePage from "./pages/ReportProfile";
 import { AlertsRefreshContext } from "./alertsContext";
 
 export default function App() {
@@ -57,8 +60,11 @@ export default function App() {
     // Any call refused with password_change_required: show the change screen.
     const onPwChange = () => setMe((m) => (m ? { ...m, must_change_password: true } : m));
     window.addEventListener(UNAUTHORIZED_EVENT, onUnauth);
+    // Any call refused with mfa_enrollment_required: show the set-up screen.
+    const onMfaEnroll = () => setMe((m) => (m ? { ...m, mfa_required: true, mfa_enrolled: false } : m));
     window.addEventListener(PASSWORD_CHANGE_EVENT, onPwChange);
-    // Always ask: a stored bearer token or a session cookie (password or SSO) may authenticate us.
+    window.addEventListener(MFA_ENROLL_EVENT, onMfaEnroll);
+    // Always ask: a session cookie (password or SSO) may authenticate us.
     fetchMe()
       .then(setMe)
       .catch(() => setMe(null))
@@ -66,6 +72,7 @@ export default function App() {
     return () => {
       window.removeEventListener(UNAUTHORIZED_EVENT, onUnauth);
       window.removeEventListener(PASSWORD_CHANGE_EVENT, onPwChange);
+      window.removeEventListener(MFA_ENROLL_EVENT, onMfaEnroll);
     };
   }, []);
 
@@ -85,7 +92,6 @@ export default function App() {
     } catch {
       /* the session may already be gone; sign out locally regardless */
     }
-    clearToken();
     setMe(null);
     if (endSession) window.location.assign(endSession);
   };
@@ -105,6 +111,15 @@ export default function App() {
     return <ForcedPasswordChange me={me} onSignOut={() => void signOut()} onDone={async () => setMe(await fetchMe())} />;
   }
 
+  if (needsMfaSetup(me)) {
+    return (
+      <AuthLayout title="Set up two-step sign-in" sub="Your role needs a code from an authenticator app at every sign-in. This takes about a minute.">
+        <MfaSetupFlow account={me.email || me.user} onFinished={async () => setMe(await fetchMe())} />
+        <p className="login-alt"><button type="button" className="btn-link" onClick={() => void signOut()}>Sign out</button></p>
+      </AuthLayout>
+    );
+  }
+
   return (
     <AuthContext.Provider value={me}>
       <Shell me={me} onSignOut={() => void signOut()} />
@@ -112,12 +127,16 @@ export default function App() {
   );
 }
 
+/** Password users whose role requires MFA (bank roles) and who have not set it up: only enrolment is allowed. */
+function needsMfaSetup(me: Me): boolean {
+  return me.auth === "password" && !!me.mfa_required && me.mfa_enrolled === false;
+}
+
 const PW_BANNER_KEY = "offpatch.pw-banner-hidden";
 
 const AUTH_BADGE: Record<Me["auth"], { label: string; title: string; cls: string }> = {
   password: { label: "password", title: "Signed in with username and password", cls: "" },
   sso: { label: "SSO", title: "Signed in through single sign-on", cls: "" },
-  token: { label: "token", title: "Signed in with the break-glass / automation token", cls: "auth-src-token" },
 };
 
 function Shell({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
@@ -214,6 +233,8 @@ function Shell({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
               <Route path="/endpoints/:id" element={<EndpointDetailPage />} />
               <Route element={<ReportsArea />}>
                 <Route path="/reports" element={<Reports />} />
+                <Route path="/reports/compliance" element={<ComplianceReport />} />
+                <Route path="/reports/profile" element={<ReportProfilePage />} />
                 <Route path="/reports/exceptions" element={<Exceptions />} />
                 <Route path="/reports/audit" element={<Audit />} />
               </Route>

@@ -103,12 +103,11 @@ func safeReturn(p string) string {
 
 func (s *Server) authConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
-		"sso":           s.cfg.OIDC != nil,
-		"static_tokens": *s.cfg.AllowStaticTokens && len(s.cfg.AdminTokens) > 0,
-		"require_mfa":   s.cfg.RequireMFA,
-		// Email + password sign-in for local users (not when MFA is required:
-		// a password alone is one factor).
-		"password_login": !s.cfg.RequireMFA,
+		"sso":         s.cfg.OIDC != nil,
+		"require_mfa": s.cfg.RequireMFA,
+		// Email + password sign-in for local users, with an authenticator
+		// code (TOTP) as the second factor (required for bank roles).
+		"password_login": true,
 	})
 }
 
@@ -203,8 +202,8 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, tok st
 		SameSite: http.SameSiteStrictMode, MaxAge: int(s.cfg.SessionTTL.Seconds())})
 }
 
-// authLogout ends the cookie session (SSO or local user). With a static
-// token there is no session: nothing to end, 200 all the same.
+// authLogout ends the cookie session (SSO or local user); without one
+// there is nothing to end (200 all the same).
 func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		if r.Header.Get(csrfHeader) != "1" { // no forced logout from another site
@@ -221,21 +220,12 @@ func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, resp)
 }
 
-// principalFor authenticates an admin request by static bearer token
-// (break-glass/automation, if allowed) or session cookie (SSO or local
-// email + password user).
+// principalFor authenticates an admin request by its session cookie (SSO
+// or local email + password user). Static admin tokens were removed: a
+// bearer token is refused with a pointer to the sign-in.
 func (s *Server) principalFor(r *http.Request) (*principal, string) {
-	if tok := bearer(r); tok != "" {
-		if !*s.cfg.AllowStaticTokens {
-			return nil, "static admin tokens are disabled; sign in to the console"
-		}
-		hash := store.HashSecret(tok)
-		for _, t := range s.cfg.AdminTokens {
-			if subtle.ConstantTimeCompare([]byte(hash), []byte(t.TokenSHA256)) == 1 {
-				return &principal{User: t.User, Role: t.Role, Source: "token"}, ""
-			}
-		}
-		return nil, "invalid admin token"
+	if bearer(r) != "" {
+		return nil, "static admin tokens were removed; sign in with email and password"
 	}
 	c, err := r.Cookie(sessionCookie)
 	if err != nil {
@@ -248,12 +238,12 @@ func (s *Server) principalFor(r *http.Request) (*principal, string) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Header.Get(csrfHeader) != "1" {
 		return nil, "missing " + csrfHeader + " header"
 	}
-	if s.cfg.RequireMFA && !ss.MFA {
+	if s.cfg.RequireMFA && !ss.MFA && !ss.MFAEnrollOnly {
 		return nil, "multi-factor authentication required"
 	}
 	src := "sso"
 	if ss.Source == "password" {
 		src = "password"
 	}
-	return &principal{User: ss.Username, Role: ss.Role, Source: src, MFA: ss.MFA, MustChangePassword: ss.MustChangePassword}, ""
+	return &principal{User: ss.Username, Role: ss.Role, Source: src, MFA: ss.MFA, MustChangePassword: ss.MustChangePassword, MFAEnrollOnly: ss.MFAEnrollOnly}, ""
 }

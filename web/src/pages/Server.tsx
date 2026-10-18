@@ -6,7 +6,7 @@ import { fmtBytes, useLoad } from "../util";
 
 type Sys = {
   version: string; go_version: string; platform: string; started_at: string; uptime_seconds: number; listen: string;
-  security: { tls: boolean; mtls_agents: boolean; insecure_http: boolean; sso: boolean; static_tokens: boolean; require_mfa: boolean };
+  security: { tls: boolean; mtls_agents: boolean; insecure_http: boolean; sso: boolean; require_mfa: boolean };
   policy: { approval_policy: Record<string, number> | null; separation_of_duties: boolean; patch_deadlines: Record<string, string> };
   trust: { root_key_configured: boolean; trust_document_sequence: string; bundle_keys: { key_id: string; sources: string[] | null; status: string }[] };
   intake: { interval: string; inbox: string; bundles_waiting: number; last_bundle_received_at: string; max_bundles_per_hour: number;
@@ -55,7 +55,6 @@ export default function ServerPage() {
                 ["Agent mTLS certificates", yes(s.security.mtls_agents)],
                 ["Single sign-on (OIDC)", yes(s.security.sso)],
                 ["MFA required", yes(s.security.require_mfa)],
-                ["Static admin tokens", yes(s.security.static_tokens, false)],
                 ["Two-person approval", s.policy.approval_policy && Object.keys(s.policy.approval_policy).length
                   ? Object.entries(s.policy.approval_policy).map(([k, v]) => `${k}: ${v}`).join(", ") : "1 approver for all severities"],
                 ["Separation of duties", yes(s.policy.separation_of_duties)],

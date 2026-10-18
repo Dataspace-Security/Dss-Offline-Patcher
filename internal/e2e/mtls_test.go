@@ -134,7 +134,7 @@ func TestMTLS(t *testing.T) {
 func TestTLSRequiredByDefault(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "c.json")
-	os.WriteFile(p, []byte(`{"trusted_keys":[{"public_key":"x","sources":["a"]}],"admin_tokens":[{"user":"a","role":"admin","token_sha256":"`+strings.Repeat("a", 64)+`"}]}`), 0o600)
+	os.WriteFile(p, []byte(`{"trusted_keys":[{"public_key":"x","sources":["a"]}]}`), 0o600)
 	if _, err := server.LoadConfig(p); err == nil || !strings.Contains(err.Error(), "TLS is required") {
 		t.Fatalf("config without TLS or insecure_http must be refused, got %v", err)
 	}

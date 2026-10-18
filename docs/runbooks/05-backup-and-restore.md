@@ -22,6 +22,7 @@ tested restore in a non-production environment is part of the **Phase 7 exit gat
 | Received bundle evidence, receipts, trust documents | `data/received/…` |
 | Staged agent binaries | `data/agent-dist/…` |
 | Audit checkpoint signing key pair | `data/audit-signing.key`, `data/audit-signing.pub` |
+| MFA key (decrypts the users' authenticator secrets; `mfa_key_file`, default `<data_dir>/mfa.key`) | `data/mfa.key` |
 | All files in `pki_dir` (incl. **`ca.key`**) unless `-no-pki` | `pki/…` |
 | The config file given with `-config` | `config/<name>` |
 | SHA-256 of every file, audit head (seq + hash) | `backup.json` |
@@ -29,13 +30,24 @@ tested restore in a non-production environment is part of the **Phase 7 exit gat
 **Not included** — back these up separately:
 
 - Files the config points to outside `data_dir`/`pki_dir`: `trusted_keys[].public_key_file`,
-  `root_public_key_file`, `tls_cert`/`tls_key` when not in `pki_dir`, `oidc.ca_cert_file`.
+  `root_public_key_file`, `tls_cert`/`tls_key` when not in `pki_dir`, `oidc.ca_cert_file`, and
+  `mfa_key_file` when it is not `<data_dir>/mfa.key` (only that path is copied).
 - `audit_export_dir` (it is your off-box evidence store; it has its own retention).
 - `<data_dir>/inbox/` (unprocessed transfers) and `*.part`/`*.tmp` files.
 - The systemd unit, OS configuration, logs.
 - Anything in the acquisition zone (keys, `state.json`, `sent.jsonl`) and agent state on endpoints.
 
 `restore` does **not** restore the config file. You put it in place yourself (step R2).
+
+**The MFA key belongs with the database.** A restore without the matching `mfa.key` loses every
+MFA enrolment: authenticator codes no longer verify, and every bank user must be reset (**Reset
+MFA** by an Admin; the super admin with `pmserver reset-admin`) and enrol again. Keep the backup
+encrypted: with the database, the key decrypts the authenticator secrets.
+
+**Audit evidence.** Every `pmserver backup` writes the audit event `backup.created` (actor
+`system:backup`; files, audit seq, whether the PKI was included) and every `pmserver restore` writes
+`backup.restored` into the restored database. The compliance report uses them as backup and
+restore-test evidence.
 
 ## Prerequisites and roles
 
@@ -196,7 +208,7 @@ Run on a separate, non-production host at least before the pilot, then on your D
 2. On the test host: install the same `pmserver` version, **without** creating a new CA: copy the
    binaries to `/opt/offpatch/bin` (or runbook 01 method B steps 1 and 7, not `init-pki`), put the
    config in place with `listen` on the test host and `audit_export_dir` pointing to a scratch
-   directory. (Running the installer would create a new CA and token; restore overwrites the PKI,
+   directory. (Running the installer would create a new CA and a new MFA key; restore overwrites the PKI,
    but use a clean host so nothing is mixed.)
 3. Restore (R3–R4). Record the duration.
 4. Before starting the server, cross-check against a copy of production's audit export:
@@ -208,7 +220,8 @@ Run on a separate, non-production host at least before the pilot, then on your D
    - `GET /api/audit/verify` → `ok: true`, count ≥ the backup's audit seq.
    - Catalog: approved packages present; open one and download its lifecycle export.
    - Endpoints and deployments match production at backup time.
-   - Sign in with SSO and with the break-glass token.
+   - Sign in with SSO and as a local user with an authenticator code enrolled before the backup
+     (proves `mfa.key` was restored). Audit shows `backup.restored`.
 6. Do **not** let production agents reach the test server. Their certificates are valid there
    (same CA, same database), so a production agent pointed at it would check in and could be
    given work. Keep the test host on an isolated network. Optionally enroll one test agent to

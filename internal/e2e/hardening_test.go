@@ -123,7 +123,7 @@ func TestApprovePublishesOutsideTransaction(t *testing.T) {
 		_, err := e.st.GetMeta(qctx, "trust_seq")
 		return err
 	}
-	p, err := e.st.SetPackageState(ctx, "user:alice", "KB5010201-x64", "approve", "CAB-9", publish)
+	p, err := e.st.SetPackageState(ctx, "user:alice@bank.test", "KB5010201-x64", "approve", "CAB-9", publish)
 	if err != nil || !called || p.State != "approved" {
 		t.Fatalf("approve: %v called=%v %+v", err, called, p)
 	}

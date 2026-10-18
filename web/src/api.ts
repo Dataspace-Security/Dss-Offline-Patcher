@@ -1,23 +1,14 @@
-// Single API client: adds the bearer token (if any), always sends the CSRF
-// header and same-origin cookies (SSO session), parses {error} bodies, and
-// signals a return to the login screen on 401.
-
-const TOKEN_KEY = "offpatch.token";
-
-export function getToken(): string | null {
-  return sessionStorage.getItem(TOKEN_KEY);
-}
-export function setToken(t: string): void {
-  sessionStorage.setItem(TOKEN_KEY, t);
-}
-export function clearToken(): void {
-  sessionStorage.removeItem(TOKEN_KEY);
-}
+// Single API client: always sends the CSRF header and same-origin cookies
+// (password or SSO session), parses {error} bodies, and signals a return to
+// the login screen on 401.
 
 export const UNAUTHORIZED_EVENT = "offpatch:unauthorized";
 /** The server refuses everything but a password change until the temporary password is replaced. */
 export const PASSWORD_CHANGE_EVENT = "offpatch:password-change-required";
 export const PASSWORD_CHANGE_REQUIRED = "password_change_required";
+/** Bank roles must set up authenticator-app MFA first: the session only allows enrolment until then. */
+export const MFA_ENROLL_EVENT = "offpatch:mfa-enrollment-required";
+export const MFA_ENROLLMENT_REQUIRED = "mfa_enrollment_required";
 
 export class ApiError extends Error {
   status: number;
@@ -28,16 +19,14 @@ export class ApiError extends Error {
 }
 
 /** `signIn`: a sign-in attempt; a 401 is a wrong password, not an expired session. */
-type Opts = { method?: string; body?: unknown; token?: string; signIn?: boolean };
+type Opts = { method?: string; body?: unknown; signIn?: boolean };
 
 async function raw(path: string, opts: Opts = {}): Promise<Response> {
-  const token = opts.token ?? getToken();
   const headers: Record<string, string> = {
     Accept: "application/json",
     // Required for cookie (SSO) authenticated state changes; harmless otherwise.
     "X-Offpatch-CSRF": "1",
   };
-  if (token) headers.Authorization = `Bearer ${token}`;
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
   let res: Response;
   try {
@@ -58,9 +47,12 @@ async function raw(path: string, opts: Opts = {}): Promise<Response> {
     } catch {
       /* non-JSON error body */
     }
-    if (res.status === 401 && opts.token === undefined && !opts.signIn) {
-      clearToken();
+    if (res.status === 401 && !opts.signIn) {
       window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+    }
+    if (res.status === 403 && msg === MFA_ENROLLMENT_REQUIRED) {
+      window.dispatchEvent(new Event(MFA_ENROLL_EVENT));
+      msg = "Set up two-step sign-in first.";
     }
     if (res.status === 403 && msg === PASSWORD_CHANGE_REQUIRED) {
       window.dispatchEvent(new Event(PASSWORD_CHANGE_EVENT));
@@ -78,13 +70,26 @@ async function json<T>(path: string, opts: Opts = {}): Promise<T> {
 }
 
 export const api = {
-  get: <T>(path: string, token?: string) => json<T>(path, { token }),
+  get: <T>(path: string) => json<T>(path),
   post: <T>(path: string, body: unknown) => json<T>(path, { method: "POST", body }),
-  /** Sign-in calls: never send a stored token, and a 401 does not mean "signed out". */
-  signIn: <T>(path: string, body: unknown) => json<T>(path, { method: "POST", body, token: "", signIn: true }),
+  /** Sign-in calls: a 401 is a wrong password, not "signed out". */
+  signIn: <T>(path: string, body: unknown) => json<T>(path, { method: "POST", body, signIn: true }),
   patch: <T>(path: string, body: unknown) => json<T>(path, { method: "PATCH", body }),
+  put: <T>(path: string, body: unknown) => json<T>(path, { method: "PUT", body }),
   blob: async (path: string) => (await raw(path)).blob(),
 };
+
+/** Like downloadFile, but uses the server's Content-Disposition file name when it sends one. */
+export async function downloadFileNamed(path: string, fallback: string): Promise<string> {
+  const res = await raw(path);
+  const cd = res.headers.get("Content-Disposition") ?? "";
+  const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd);
+  let fileName = m ? m[1] : "";
+  try { fileName = decodeURIComponent(fileName); } catch { /* not percent-encoded */ }
+  const name = fileName.replace(/[\\/:*?"<>|]+/g, "_").trim() || fallback;
+  saveBlob(await res.blob(), name);
+  return name;
+}
 
 /** Fetch an authenticated file and hand it to the browser as a download. */
 export async function downloadFile(path: string, filename: string): Promise<void> {
