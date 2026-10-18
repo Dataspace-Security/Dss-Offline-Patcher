@@ -114,19 +114,22 @@ type fleetStatusEndpoint struct {
 }
 
 type fleetStatusRow struct {
-	Kind         string                `json:"kind"`
-	Key          string                `json:"key"`
-	Name         string                `json:"name"`
-	Latest       string                `json:"latest"`
-	Catalog      *catalogLink          `json:"catalog"`
-	Requested    *store.AcqRequestRef  `json:"requested"`
-	UpToDate     int                   `json:"up_to_date"`
-	Outdated     int                   `json:"outdated"`
-	BeingPatched int                   `json:"being_patched"`
-	Verified     int                   `json:"verified"`
-	Failed       int                   `json:"failed"`
-	Exception    int                   `json:"exception"`
-	Endpoints    []fleetStatusEndpoint `json:"endpoints"`
+	Kind      string               `json:"kind"`
+	Key       string               `json:"key"`
+	Name      string               `json:"name"`
+	Latest    string               `json:"latest"`
+	Catalog   *catalogLink         `json:"catalog"`
+	Requested *store.AcqRequestRef `json:"requested"`
+	// Importable / ImportableReason: as on GET /api/updates and the Library.
+	Importable       string                `json:"importable"`
+	ImportableReason string                `json:"importable_reason"`
+	UpToDate         int                   `json:"up_to_date"`
+	Outdated         int                   `json:"outdated"`
+	BeingPatched     int                   `json:"being_patched"`
+	Verified         int                   `json:"verified"`
+	Failed           int                   `json:"failed"`
+	Exception        int                   `json:"exception"`
+	Endpoints        []fleetStatusEndpoint `json:"endpoints"`
 }
 
 type fleetStatus struct {
@@ -245,6 +248,7 @@ func (s *Server) fleetStatus(ctx context.Context) (fleetStatus, error) {
 	for _, u := range snap.all {
 		cat := u.statusCatalog()
 		row := fleetStatusRow{Kind: u.Kind, Key: u.Key, Name: u.Name, Latest: u.Latest, Catalog: cat, Requested: refFor(refs, u.Kind, u.Key),
+			Importable: u.Importable, ImportableReason: u.ImportableReason,
 			Endpoints: make([]fleetStatusEndpoint, 0, len(u.Endpoints)+len(u.current))}
 		add := func(n fleetNeed, outdated bool) {
 			var st store.TargetStatus

@@ -252,9 +252,15 @@ const installTimeout = 2 * time.Hour
 // to stop: killing wusa/msiexec mid-way can leave a half-applied update. Only
 // installTimeout stops it, and that is reported explicitly.
 func runInstaller(ctx context.Context, name string, args ...string) (code int, res *Result) {
+	return runInstallerCmd(ctx, name, func(ctx context.Context) *exec.Cmd { return exec.CommandContext(ctx, name, args...) })
+}
+
+// runInstallerCmd is runInstaller for a prepared command (EXE installers:
+// exact command line, private working and temp directory).
+func runInstallerCmd(ctx context.Context, name string, build func(context.Context) *exec.Cmd) (code int, res *Result) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), installTimeout)
 	defer cancel()
-	err := exec.CommandContext(ctx, name, args...).Run()
+	err := build(ctx).Run()
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return -1, &Result{State: "failed", ExitCode: -1, Detail: fmt.Sprintf("timed out: %s still running after %s; it was stopped", filepath.Base(name), installTimeout)}
 	}
@@ -282,6 +288,8 @@ func (w *Windows) Install(ctx context.Context, p manifest.Package, file string) 
 	switch p.Kind {
 	case "msu":
 		code, res = runInstaller(ctx, filepath.Join(sys, "wusa.exe"), file, "/quiet", "/norestart")
+	case manifest.KindExe:
+		return w.installExe(ctx, p, file)
 	case "msi":
 		logPath = w.msiLog(p, "")
 		code, res = runInstaller(ctx, filepath.Join(sys, "msiexec.exe"), "/i", file, "/qn", "/norestart", "/l*v", logPath)
@@ -315,6 +323,8 @@ func (w *Windows) Uninstall(ctx context.Context, p manifest.Package) Result {
 		}
 		logPath = w.msiLog(p, "-uninstall")
 		code, res = runInstaller(ctx, filepath.Join(sys, "msiexec.exe"), "/x", p.ProductCode, "/qn", "/norestart", "/l*v", logPath)
+	case manifest.KindExe:
+		return w.uninstallExe(ctx, p)
 	default:
 		return Result{State: "failed", ExitCode: -1, Detail: "rollback is not supported for kind " + p.Kind}
 	}

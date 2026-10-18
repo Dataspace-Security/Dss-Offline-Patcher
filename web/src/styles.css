@@ -93,6 +93,16 @@
   --ease: cubic-bezier(.2, .7, .2, 1);
   --t-fast: .12s;
   --t: .2s;
+  /* Stacking scale: every z-index in the console uses one of these. Overlays
+     (drawer, modal, toast) always sit above sticky page chrome. */
+  --z-base: 0;
+  --z-raised: 1;      /* decoration lifted above a sibling in the same box */
+  --z-sticky: 20;     /* sticky table headers, sticky save bars */
+  --z-topbar: 30;     /* the sticky top bar */
+  --z-dropdown: 40;   /* tooltips, popovers */
+  --z-drawer: 50;     /* side drawers / panels that overlay the page */
+  --z-modal: 100;     /* dialogs and their backdrop (portalled to <body>) */
+  --z-toast: 200;
 }
 
 :root[data-theme="dark"] {
@@ -227,7 +237,7 @@ a.brand:hover { text-decoration: none; color: var(--nav-text-strong); }
 .topbar {
   height: var(--topbar-h); display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 24px;
   background: var(--topbar-bg); border-bottom: 1px solid var(--border);
-  position: sticky; top: 0; z-index: 10; backdrop-filter: saturate(1.4) blur(8px); -webkit-backdrop-filter: saturate(1.4) blur(8px);
+  position: sticky; top: 0; z-index: var(--z-topbar); backdrop-filter: saturate(1.4) blur(8px); -webkit-backdrop-filter: saturate(1.4) blur(8px);
 }
 .topbar-zone { font-size: 12px; color: var(--text-2); display: inline-flex; align-items: center; gap: 8px; font-weight: 500; }
 .topbar-zone::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--green-solid); box-shadow: 0 0 0 3px var(--green-bg); }
@@ -399,7 +409,7 @@ textarea { resize: vertical; }
 .table th {
   text-align: left; font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; color: var(--text-2);
   background: var(--surface-2); padding: 9px 12px; border-bottom: 1px solid var(--border); white-space: nowrap;
-  position: sticky; top: var(--topbar-h); z-index: 2;
+  position: sticky; top: var(--topbar-h); z-index: var(--z-sticky);
 }
 .table thead tr:first-child th:first-child { border-top-left-radius: var(--radius-lg); }
 .table thead tr:first-child th:last-child { border-top-right-radius: var(--radius-lg); }
@@ -545,22 +555,35 @@ a.tile:hover, button.tile:hover { text-decoration: none; color: var(--text); box
 
 /* Modal */
 .modal-backdrop {
-  position: fixed; inset: 0; background: var(--overlay); display: grid; place-items: center; z-index: 100; padding: 20px;
+  position: fixed; inset: 0; background: var(--overlay); display: grid; place-items: center; z-index: var(--z-modal); padding: 20px;
   backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); animation: fade-in var(--t) var(--ease);
+  overscroll-behavior: contain;
 }
+/* Fully opaque surface; head and foot stay visible, only the body scrolls (vertically). */
 .modal {
-  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); width: 460px; max-width: 100%;
-  max-height: calc(100vh - 40px); display: flex; flex-direction: column; box-shadow: var(--shadow-lg); animation: modal-in var(--t) var(--ease);
+  background-color: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); width: 460px; max-width: 100%;
+  max-height: calc(100vh - 40px); max-height: calc(100dvh - 40px); display: flex; flex-direction: column; box-shadow: var(--shadow-lg);
+  animation: modal-in var(--t) var(--ease); overflow: hidden; isolation: isolate; min-width: 0;
 }
+body.modal-open { overflow: hidden; }
 @keyframes fade-in { from { opacity: 0; } }
 @keyframes modal-in { from { opacity: 0; transform: translateY(8px) scale(.985); } }
 .modal-wide { width: 720px; }
-.modal-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--border); }
-.modal-head h2 { margin: 0; font-size: 15.5px; }
-.modal-body { padding: 16px 18px; overflow: auto; display: flex; flex-direction: column; gap: 12px; }
+.modal-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--border);
+  flex-shrink: 0; background-color: var(--surface); border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
+.modal-head h2 { margin: 0; font-size: 15.5px; min-width: 0; overflow-wrap: anywhere; }
+.modal-head .btn-icon { flex-shrink: 0; }
+.modal-body { padding: 16px 18px; overflow-x: hidden; overflow-y: auto; display: flex; flex-direction: column; gap: 12px;
+  flex: 1 1 auto; min-height: 0; min-width: 0; overflow-wrap: anywhere; }
+.modal-body > * { min-width: 0; max-width: 100%; }
+/* Tables in dialogs wrap their cells; a table that still does not fit scrolls inside its own box. */
+.modal-body .table th { white-space: normal; }
+.modal-body .table td { overflow-wrap: anywhere; }
+.modal-body .table .pill { white-space: normal; line-height: 1.35; padding-top: 2px; padding-bottom: 2px; }
+.table-scroll { max-width: 100%; overflow-x: auto; }
 .modal-body .banner { margin-bottom: 0; }
 .modal-desc { color: var(--text); }
-.modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--border); background: var(--surface-2); border-radius: 0 0 var(--radius-lg) var(--radius-lg); }
+.modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--border); background-color: var(--surface-2); border-radius: 0 0 var(--radius-lg) var(--radius-lg); flex-shrink: 0; }
 .copybox { display: flex; gap: 6px; }
 .copybox input { flex: 1; }
 
@@ -592,7 +615,7 @@ a.tile:hover, button.tile:hover { text-decoration: none; color: var(--text); box
   50% { transform: translate3d(3%, -2%, 0) rotate(4deg); }
   100% { transform: translate3d(-2%, 3%, 0) rotate(-3deg); }
 }
-.login-brand-inner { position: relative; z-index: 1; max-width: 460px; display: flex; flex-direction: column; gap: 22px; }
+.login-brand-inner { position: relative; z-index: var(--z-raised); max-width: 460px; display: flex; flex-direction: column; gap: 22px; }
 .login-brand .brand-name { font-size: 26px; color: #fff; }
 .login-brand .brand-logo { gap: 14px; color: #fff; }
 .login-brand .brand-logo-mark { filter: drop-shadow(0 4px 14px rgba(79, 193, 174, .35)); }
@@ -653,7 +676,6 @@ a.tile:hover, button.tile:hover { text-decoration: none; color: var(--text); box
 }
 
 /* ---------- agent setup ---------- */
-.modal-xwide { width: 860px; max-width: calc(100vw - 32px); }
 .setup .tabs { margin-top: 4px; }
 .setup .tab { text-transform: none; }
 .setup-ca { align-self: end; padding-bottom: 8px; }
@@ -769,7 +791,7 @@ ul.plain li { padding: 2px 0; }
 .modal-backdrop { grid-template-columns: minmax(0, 1fr); justify-items: center; padding: 12px; }
 .modal { width: min(460px, 100%); }
 .modal-wide { width: min(720px, 100%); }
-.modal-xwide { width: min(860px, 100%); }
+.modal-xwide { width: min(960px, calc(100vw - 32px), 100%); }
 .modal-foot { flex-wrap: wrap; }
 .reason-hint { font-size: 12px; color: var(--text-2); margin-right: auto; align-self: center; }
 

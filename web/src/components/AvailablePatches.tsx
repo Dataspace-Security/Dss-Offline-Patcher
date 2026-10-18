@@ -3,11 +3,12 @@ import { Link } from "react-router-dom";
 import { api, enc } from "../api";
 import { paths } from "../paths";
 import { useCan } from "../auth";
-import type { AcquisitionRequestRecord, AcquisitionRequestRef, CatalogLink, EndpointUpdates, PackageKind } from "../types";
+import type { AcquisitionRequestRecord, AcquisitionRequestRef, AppUpdate, CatalogLink, EndpointUpdates, PackageKind } from "../types";
 import { useLoad } from "../util";
 import { acqStatusPill } from "./AcqRequestStatus";
 import { PatchThis } from "./PatchThis";
 import { isAgentPackage } from "./patchPlan";
+import { appInfoKey, useLibraryImportability, type ImportInfo } from "./importability";
 import { PipelineAction, isRequestable } from "./PipelineAction";
 import { RequestResultBanner } from "./RequestResultBanner";
 import { latestRequests, useImportRequest, type ImportItems } from "./useImportRequest";
@@ -39,7 +40,27 @@ type Row = {
   requestKey: string;
   /** An offpatch agent version (approved and deployed by the super admin only). */
   agent?: boolean;
+  /** The Library's verdict on importing it (apps; from the row or the Library). */
+  importInfo?: ImportInfo;
 };
+
+/**
+ * One app row per winget id and version: an app with several Apps & features
+ * entries (e.g. Microsoft Edge) is listed once, with all its installed names.
+ */
+function groupApps(apps: AppUpdate[]): { u: AppUpdate; names: string[]; versions: string[] }[] {
+  const by = new Map<string, { u: AppUpdate; names: string[]; versions: string[] }>();
+  for (const u of apps) {
+    const k = `${appInfoKey(u.app_id)}@${u.latest_version}`;
+    const g = by.get(k);
+    if (!g) { by.set(k, { u, names: [u.installed_name], versions: [u.installed_version] }); continue; }
+    if (!g.names.includes(u.installed_name)) g.names.push(u.installed_name);
+    if (!g.versions.includes(u.installed_version)) g.versions.push(u.installed_version);
+    if (!g.u.catalog && u.catalog) g.u = { ...g.u, catalog: u.catalog };
+    if (!g.u.importable && u.importable) g.u = { ...g.u, importable: u.importable, importable_reason: u.importable_reason };
+  }
+  return [...by.values()];
+}
 
 /** Where an update stands: to import → importing → awaiting approval → ready → deploying (target state). */
 function Pipeline({ r, requested }: { r: Row; requested: AcquisitionRequestRef | undefined }) {
@@ -55,7 +76,7 @@ function Pipeline({ r, requested }: { r: Row; requested: AcquisitionRequestRef |
   return <Link to={paths.catalog(r.link.package_id)}><Pill state={r.link.state} label={label} /></Link>;
 }
 
-function mergeRows(intel: EndpointUpdates | null, avail: Available[] | null): Row[] {
+function mergeRows(intel: EndpointUpdates | null, avail: Available[] | null, library: Map<string, ImportInfo>): Row[] {
   const byPkg = new Map((avail ?? []).map((a) => [a.package_id, a]));
   const used = new Set<string>();
   const rows: Row[] = [];
@@ -75,14 +96,15 @@ function mergeRows(intel: EndpointUpdates | null, avail: Available[] | null): Ro
       importItems: { apps: [], kbs: [u.kb] }, requestKey: `kb:${u.kb.toLowerCase()}`,
     });
   }
-  for (const u of intel?.apps ?? []) {
+  for (const { u, names, versions } of groupApps(intel?.apps ?? [])) {
     const a = fromCatalog(u.catalog);
     rows.push({
-      key: `app:${u.app_id}:${u.installed_name}`, kind: "app", title: u.installed_name,
+      key: `app:${appInfoKey(u.app_id)}@${u.latest_version}`, kind: "app", title: names.join(" · "),
       sub: <><Mono>{u.app_id}</Mono>{u.matched_by === "name" && <span title="Matched by display name, not by product code"> · matched by name</span>}</>,
-      installed: <Mono>{u.installed_version}</Mono>, available: <b><Mono>{u.latest_version}</Mono></b>,
+      installed: <>{versions.map((v, i) => <span key={v}>{i > 0 && ", "}<Mono>{v}</Mono></span>)}</>, available: <b><Mono>{u.latest_version}</Mono></b>,
       severity: a?.severity, link: u.catalog, deploymentId: a?.deployment_id ?? "", targetState: a?.target_state ?? "",
       importItems: { apps: [u.app_id], kbs: [] }, requestKey: `app:${u.app_id.toLowerCase()}`,
+      importInfo: u.importable ? { importable: u.importable, importable_reason: u.importable_reason } : library.get(appInfoKey(u.app_id)),
     });
   }
   // Catalog packages the intelligence does not list (other OSes, agent, no intel yet).
@@ -118,8 +140,11 @@ export function EndpointUpdatesTable({ endpointId, hostname, os }: { endpointId:
   const [patching, setPatching] = useState<string | null>(null);
   const imp = useImportRequest(() => { void reqs.reload(); void intel.reload(); void avail.reload(); });
   const requestedBy = latestRequests(reqs.data);
-  const rows = mergeRows(intel.data, avail.data);
-  const importable = (r: Row) => !r.deploymentId && !!r.importItems && isRequestable(r.link, r.requestKey ? requestedBy.get(r.requestKey) : undefined);
+  // The Library API is the super admin's; other roles rely on the row fields (assumed server field).
+  const library = useLibraryImportability(useCan("super_admin") && windows);
+  const rows = mergeRows(intel.data, avail.data, library);
+  const importable = (r: Row) => !r.deploymentId && !!r.importItems
+    && isRequestable(r.link, r.requestKey ? requestedBy.get(r.requestKey) : undefined, r.importInfo);
   const loaded = avail.data !== null && (!windows || intel.data !== null || !!intel.error);
   const info = intel.data;
 
@@ -170,6 +195,7 @@ export function EndpointUpdatesTable({ endpointId, hostname, os }: { endpointId:
                   {r.deploymentId
                     ? <Link className="btn btn-sm" to={paths.deployment(r.deploymentId)}>Deployment →</Link>
                     : <PipelineAction link={r.link} agent={r.agent} requested={r.requestKey ? requestedBy.get(r.requestKey) : undefined} onPatch={setPatching}
+                                      importInfo={r.importInfo}
                                       onRequest={importable(r) ? () => void imp.send(r.importItems!, r.key) : undefined}
                                       requesting={imp.busy === r.key} disabled={imp.busy !== null} />}
                 </td>

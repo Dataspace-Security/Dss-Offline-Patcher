@@ -75,8 +75,47 @@ Any other entry is rejected. That includes directories other than `payload/`, sy
 | `rpm` | `package_name`, `version` | `linux` | `rpm -U --replacepkgs` |
 | `pkg` | `package_name` (receipt id), `version` | `macos` | `/usr/sbin/installer` |
 | `agent` | `version` like `1.2.3` (1–4 numeric parts, optional `-`/`+` suffix) | any one of the three | agent self-upgrade |
+| `exe` | `exe` block (below), `version`, `package_name` = `exe.detect.display_name`, file name ending `.exe`, no `product_code` | `windows` | the EXE installer with `exe.silent_args` (agents 0.9.0 and later) |
 
 `package_name`: `[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}`.
+
+#### The `exe` block (kind `exe` only)
+
+Optional field `exe` (`omitempty`): msu, msi, deb, rpm, pkg and agent manifests are byte-identical to the format before EXE support. A package of another kind with an `exe` block is rejected.
+
+```json
+"exe": {
+  "installer_type": "burn",
+  "silent_args": ["/quiet", "/norestart"],
+  "success_codes": [0, 3010, 1641],
+  "busy_codes": [1618],
+  "signer": "Microsoft Corporation",
+  "detect": {
+    "display_name": "Microsoft Visual C++ 2015-2022 Redistributable (x64) - 14.40.33810",
+    "display_version": "14.51.36247.0",
+    "product_code": "{0E3BB569-69D6-4C34-BFF9-C2F81DB5E5F0}",
+    "publisher": "Microsoft Corporation"
+  },
+  "uninstall": { "quiet_uninstall": true },
+  "scope": "machine"
+}
+```
+
+| Field | Rule |
+|---|---|
+| `installer_type` | `exe` \| `inno` \| `nullsoft` \| `burn` |
+| `silent_args` | 1–32 arguments (argv, no shell), each 1–256 characters, no `"` or control characters. Required for every type: pmctl fills the type default for inno (`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-`), nullsoft (`/S`) and burn (`/quiet /norestart`); a plain `exe` needs the winget manifest's switch. |
+| `success_codes` | must include 0; at most 64; int32 or DWORD range. 3010 and 1641 mean installed + restart needed. |
+| `busy_codes` | optional; "another install in progress / package in use": retry later. Not 0, not a success code. |
+| `signer` | required: the Authenticode signer CommonName pmctl verified (also in `vendor_signature.signer`). |
+| `detect.display_name` | required, at most 200 characters, no `"` or control characters; equals `package_name`. |
+| `detect.display_version` | optional: the Apps & features `DisplayVersion` after install (else `version` is expected). |
+| `detect.product_code` | optional: the Apps & features key name (`[A-Za-z0-9{}][A-Za-z0-9{}._ +()-]{0,127}`, e.g. `Microsoft EdgeWebView` or a `{GUID}`). |
+| `detect.publisher` | optional. |
+| `uninstall.quiet_uninstall` | true only if the app registers a `QuietUninstallString` (burn, inno); otherwise rollback is not supported. |
+| `scope` | must be `machine`. |
+
+Agents before 0.9.0 parse manifests strictly and do not know the field: pmctl puts EXE packages in bundles of their own, and the server never offers them to those agents (target `not_applicable`, "agent too old for EXE packages: upgrade the agent to 0.9.0 or later").
 
 ### Limits (server config, defaults)
 

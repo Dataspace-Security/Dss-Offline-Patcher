@@ -35,6 +35,10 @@ func RollbackUnsupported(p Package) string {
 		if p.PackageName == "" {
 			return "the package has no package name"
 		}
+	case "exe":
+		if p.Exe == nil || !p.Exe.Uninstall.QuietUninstall {
+			return RollbackNoQuietUninstall
+		}
 	case "pkg":
 		return "macOS .pkg installers have no uninstall; deploy the previous version's .pkg instead, or remove the app by hand"
 	case "agent":
@@ -55,6 +59,12 @@ func rollbackPresent(inv []InventoryItem, p Package) (bool, string) {
 			return true, "inventory shows " + p.KB
 		case p.Kind == "msi" && it.Kind == "product" && strings.EqualFold(it.ID, p.ProductCode):
 			return true, "inventory shows product " + p.ProductCode
+		case p.Kind == "exe" && exeAppMatch(p, it):
+			// Only this version: removing a newer one would not undo this package.
+			if want := exeWantVersion(p); want == "" || it.Version == "" || (VersionAtLeast(it.Version, want) && VersionAtLeast(want, it.Version)) {
+				return true, "inventory shows " + it.Name + " " + it.Version
+			}
+			return false, fmt.Sprintf("installed version %s is not %s; nothing of this package to roll back", it.Version, exeWantVersion(p))
 		case (p.Kind == "deb" || p.Kind == "rpm") && it.Kind == "pkg" && it.ID == p.PackageName:
 			if VersionAtLeast(it.Version, p.Version) && VersionAtLeast(p.Version, it.Version) {
 				return true, "inventory shows " + p.PackageName + " " + it.Version

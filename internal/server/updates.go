@@ -180,11 +180,34 @@ func (s *Server) catalogIndex(ctx context.Context) (*catalogIndex, error) {
 		if p.ProductCode != "" {
 			keep(ci.byCode, strings.ToLower(p.ProductCode), p)
 		}
-		if k := intel.Normalize(p.PackageName); p.Kind == "msi" && k != "" && p.Version != "" {
-			keep(ci.byName, k, p)
+		if k := intel.Normalize(p.PackageName); (p.Kind == "msi" || p.Kind == "exe") && k != "" && p.Version != "" {
+			keep(ci.byName, nameKey(k, p.PackageName), p)
+		}
+		if p.Kind == "exe" && p.Exe != nil && p.Exe.Detect.ProductCode != "" {
+			keep(ci.byCode, strings.ToLower(p.Exe.Detect.ProductCode), p) // the ARP key inventory reports as the id
 		}
 	}
 	return ci, nil
+}
+
+// nameKey keys the by-name index by normalized name and the architecture
+// the name mentions, so the x86 and x64 builds of one product (the VC++
+// redistributables: "… (x64) - 14.51" vs "… (x86) - 14.51") never link to
+// each other's package.
+func nameKey(normalized, displayName string) string {
+	return normalized + "|" + store.ExeArchTag(displayName)
+}
+
+// byNameFor finds the package for an installed display name: one built for
+// the same architecture the name mentions, else one whose name mentions none
+// (a package for "7-Zip" serves "7-Zip 26.03 (x64 edition)"), never one for
+// another architecture.
+func (ci *catalogIndex) byNameFor(normalized, installedName string) (namedPackage, bool) {
+	if n, ok := ci.byName[nameKey(normalized, installedName)]; ok {
+		return n, true
+	}
+	n, ok := ci.byName[normalized+"|"]
+	return n, ok
 }
 
 func (ci *catalogIndex) forOS(kb string) *catalogLink {
@@ -200,7 +223,7 @@ func (ci *catalogIndex) forApp(u intel.AppUpdate) *catalogLink {
 		return &l
 	}
 	if k := intel.Normalize(u.InstalledName); k != "" {
-		if n, ok := ci.byName[k]; ok && !store.VersionAtLeast(u.InstalledVersion, n.version) {
+		if n, ok := ci.byNameFor(k, u.InstalledName); ok && !store.VersionAtLeast(u.InstalledVersion, n.version) {
 			l := n.link
 			return &l
 		}
@@ -216,7 +239,7 @@ func (ci *catalogIndex) forCurrentApp(u intel.AppUpdate) *catalogLink {
 		return &l
 	}
 	if k := intel.Normalize(u.InstalledName); k != "" {
-		if n, ok := ci.byName[k]; ok {
+		if n, ok := ci.byNameFor(k, u.InstalledName); ok {
 			l := n.link
 			return &l
 		}
@@ -235,8 +258,36 @@ type osUpdateView struct {
 
 type appUpdateView struct {
 	intel.AppUpdate
-	Catalog   *catalogLink         `json:"catalog"`
-	Requested *store.AcqRequestRef `json:"requested"`
+	Catalog          *catalogLink         `json:"catalog"`
+	Requested        *store.AcqRequestRef `json:"requested"`
+	Importable       string               `json:"importable"` // yes | no | unknown (intel.Importable for this endpoint's arch)
+	ImportableReason string               `json:"importable_reason"`
+}
+
+// osImportableReason: Windows updates always come from the catalog.
+const osImportableReason = "Windows cumulative update (Microsoft Update Catalog)"
+
+// importableFor applies the Library's import rule to an update row.
+func importableFor(ix *intel.Index, kind, key, version string, arches []string) (string, string) {
+	if kind == "os" {
+		return intel.ImportableYes, osImportableReason
+	}
+	return intel.Importable(ix.ResolvedFor(key, version), arches, true)
+}
+
+// fleetArches: architectures of the endpoints that have the app (outdated
+// or current), as the Library computes them.
+func (u *fleetUpdate) fleetArches() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, n := range append(append([]fleetNeed{}, u.Endpoints...), u.current...) {
+		if a := strings.ToLower(n.arch); a != "" && !seen[a] {
+			seen[a] = true
+			out = append(out, a)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 type endpointUpdates struct {
@@ -276,7 +327,9 @@ func (s *Server) endpointUpdates(w http.ResponseWriter, r *http.Request) {
 			out.OS = append(out.OS, osUpdateView{OSUpdate: u, Catalog: ci.forOS(u.KB), Requested: refFor(refs, "os", u.KB)})
 		}
 		for _, u := range res.Apps {
-			out.Apps = append(out.Apps, appUpdateView{AppUpdate: u, Catalog: ci.forApp(u), Requested: refFor(refs, "app", u.AppID)})
+			imp, why := importableFor(ix, "app", u.AppID, u.LatestVersion, []string{strings.ToLower(e.Arch)})
+			out.Apps = append(out.Apps, appUpdateView{AppUpdate: u, Catalog: ci.forApp(u), Requested: refFor(refs, "app", u.AppID),
+				Importable: imp, ImportableReason: why})
 		}
 	}
 	writeJSON(w, 200, out)
@@ -290,6 +343,12 @@ type fleetUpdate struct {
 	Latest    string       `json:"latest"`
 	Catalog   *catalogLink `json:"catalog"`
 	Endpoints []fleetNeed  `json:"endpoints"`
+	// Importable: the Library's import rule (intel.Importable with the
+	// architectures of the endpoints that have the app): yes | no | unknown.
+	// "no" rows get "Can't import: <reason>" instead of an Import button,
+	// and requests for them are refused.
+	Importable       string `json:"importable"`
+	ImportableReason string `json:"importable_reason"`
 
 	// For acquisition requests (not shown): the Windows release, and the
 	// architectures and installed forms of an app seen across the fleet.
@@ -441,6 +500,7 @@ func buildFleet(ix *intel.Index, ci *catalogIndex, eps []store.Endpoint) *fleetS
 	}
 	snap.byKey = agg
 	for _, u := range agg {
+		u.Importable, u.ImportableReason = importableFor(ix, u.Kind, u.Key, u.Latest, u.fleetArches())
 		snap.all = append(snap.all, u)
 	}
 	sort.Slice(snap.all, func(i, j int) bool {

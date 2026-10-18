@@ -54,7 +54,7 @@ type App struct {
 	// Architectures of the endpoints that have it installed (x64 | x86 | arm64);
 	// for an app no endpoint has (imported from the console's Library,
 	// endpoints 0), the architecture the operator chose. pmctl fetches the
-	// MSI for each listed architecture.
+	// MSI (or else a deployable EXE installer) for each listed architecture.
 	Architectures []string    `json:"architectures"`
 	Installed     []Installed `json:"installed,omitempty"`
 	Endpoints     int         `json:"endpoints"`

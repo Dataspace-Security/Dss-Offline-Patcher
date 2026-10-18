@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"offpatch/internal/acqrequest"
+	"offpatch/internal/intel"
 	"offpatch/internal/store"
 )
 
@@ -187,7 +188,7 @@ func buildAcqRequest(updates []*fleetUpdate, li *libIndex, body acqRequestBody) 
 		byKey[u.Kind+"\x00"+strings.ToLower(u.Key)] = u
 	}
 	req := &acqrequest.Request{Format: acqrequest.Format, Version: acqrequest.Version, Apps: []acqrequest.App{}, KBs: []acqrequest.KB{}}
-	var missing []string
+	var missing, refused []string
 	seen := map[string]bool{}
 	for _, id := range body.Apps {
 		u := byKey["app\x00"+strings.ToLower(strings.TrimSpace(id))]
@@ -205,6 +206,10 @@ func buildAcqRequest(updates []*fleetUpdate, li *libIndex, body acqRequestBody) 
 			if err != nil {
 				return nil, nil, err
 			}
+			if imp, why := intel.Importable(e.res, []string{arch}, true); imp == intel.ImportableNo {
+				refused = append(refused, e.item.ID+": "+why)
+				continue
+			}
 			req.Apps = append(req.Apps, acqrequest.App{WingetID: e.item.ID, Name: acqrequest.CleanText(e.item.Name), Version: e.appVer,
 				Architectures: []string{arch}})
 			continue
@@ -213,6 +218,10 @@ func buildAcqRequest(updates []*fleetUpdate, li *libIndex, body acqRequestBody) 
 			continue
 		}
 		seen["app\x00"+u.Key] = true
+		if u.Importable == intel.ImportableNo {
+			refused = append(refused, u.Key+": "+u.ImportableReason)
+			continue
+		}
 		a := acqrequest.App{WingetID: u.Key, Name: acqrequest.CleanText(u.Name), Version: u.Latest, Endpoints: len(u.Endpoints), Architectures: []string{}}
 		for ar := range u.arches {
 			if acqrequest.ValidArch(ar) {
@@ -292,5 +301,17 @@ func buildAcqRequest(updates []*fleetUpdate, li *libIndex, body acqRequestBody) 
 				Build: rel.Build, Arch: strings.ToLower(rel.Arch), Server: rel.Server, Endpoints: n})
 		}
 	}
+	if len(refused) > 0 {
+		// The Library already knows the acquisition zone would refuse these
+		// (intel.Importable, the rule pmctl applies): no request is created.
+		return nil, nil, &notImportableError{items: refused}
+	}
 	return req, missing, nil
+}
+
+// notImportableError: requested apps the importable rule says "no" for.
+type notImportableError struct{ items []string }
+
+func (e *notImportableError) Error() string {
+	return "can't import: " + strings.Join(e.items, "; ")
 }

@@ -184,10 +184,10 @@ func (s *Store) IngestBundle(ctx context.Context, in Intake) (Bundle, error) {
 		now := s.now()
 		for _, p := range newPkgs {
 			qpath := filepath.Join(in.QuarantineDir, "payload", filepath.Base(p.File.Name))
-			_, err := tx.Exec(`INSERT INTO packages(package_id,bundle_id,title,vendor,kind,version,kb,product_code,severity,release_date,supersedes,applicability,file_name,size,sha256,source_url,vendor_signature,quarantine_path,state,state_by,state_at,created_at,package_name,prerequisites,expected_ubr) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'quarantined','system:intake',?,?,?,?,?)`,
+			_, err := tx.Exec(`INSERT INTO packages(package_id,bundle_id,title,vendor,kind,version,kb,product_code,severity,release_date,supersedes,applicability,file_name,size,sha256,source_url,vendor_signature,quarantine_path,state,state_by,state_at,created_at,package_name,prerequisites,expected_ubr,exe) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'quarantined','system:intake',?,?,?,?,?,?)`,
 				p.PackageID, m.BundleID, p.Title, p.Vendor, p.Kind, p.Version, p.KB, p.ProductCode, p.Severity, p.ReleaseDate,
 				mustJSON(nonNil(p.Supersedes)), mustJSON(p.Applicability), filepath.Base(p.File.Name), p.File.Size, p.File.SHA256,
-				p.SourceURL, mustJSON(p.VendorSignature), qpath, now, now, p.PackageName, mustJSON(nonNil(p.Prerequisites)), p.ExpectedUBR)
+				p.SourceURL, mustJSON(p.VendorSignature), qpath, now, now, p.PackageName, mustJSON(nonNil(p.Prerequisites)), p.ExpectedUBR, exeJSON(p.Exe))
 			if err != nil {
 				return err
 			}
@@ -221,10 +221,10 @@ func (s *Store) reimportRejected(tx *sql.Tx, bundleID, quarantineDir string, r r
 	qpath := filepath.Join(quarantineDir, "payload", filepath.Base(p.File.Name))
 	if _, err := tx.Exec(`UPDATE packages SET bundle_id=?,title=?,vendor=?,kind=?,version=?,kb=?,product_code=?,severity=?,release_date=?,supersedes=?,applicability=?,
 		file_name=?,size=?,sha256=?,source_url=?,vendor_signature=?,quarantine_path=?,state='quarantined',state_reason='',state_by='system:intake',state_at=?,
-		package_name=?,prerequisites=?,expected_ubr=? WHERE package_id=? AND state='rejected'`,
+		package_name=?,prerequisites=?,expected_ubr=?,exe=? WHERE package_id=? AND state='rejected'`,
 		bundleID, p.Title, p.Vendor, p.Kind, p.Version, p.KB, p.ProductCode, p.Severity, p.ReleaseDate, mustJSON(nonNil(p.Supersedes)), mustJSON(p.Applicability),
 		filepath.Base(p.File.Name), p.File.Size, p.File.SHA256, p.SourceURL, mustJSON(p.VendorSignature), qpath, now,
-		p.PackageName, mustJSON(nonNil(p.Prerequisites)), p.ExpectedUBR, p.PackageID); err != nil {
+		p.PackageName, mustJSON(nonNil(p.Prerequisites)), p.ExpectedUBR, exeJSON(p.Exe), p.PackageID); err != nil {
 		return err
 	}
 	res, err := tx.Exec(`DELETE FROM package_approvals WHERE package_id=?`, p.PackageID)
@@ -332,17 +332,26 @@ type Package struct {
 	// ExpectedUBR (msu): the build revision once installed (0 = unknown);
 	// targets also verify by revision (presentOn).
 	ExpectedUBR int `json:"expected_ubr,omitempty"`
+	// Exe (kind exe): installer type, silent args, exit codes, verified
+	// signer, Apps & features detection and uninstall support (exe.go).
+	Exe *manifest.ExeInstall `json:"exe,omitempty"`
 }
 
-const packageCols = `package_id,bundle_id,title,vendor,kind,version,kb,product_code,severity,release_date,supersedes,applicability,file_name,size,sha256,source_url,vendor_signature,quarantine_path,state,state_reason,state_by,state_at,created_at,package_name,prerequisites,superseded_by,expected_ubr`
+const packageCols = `package_id,bundle_id,title,vendor,kind,version,kb,product_code,severity,release_date,supersedes,applicability,file_name,size,sha256,source_url,vendor_signature,quarantine_path,state,state_reason,state_by,state_at,created_at,package_name,prerequisites,superseded_by,expected_ubr,exe`
 
 func scanPackage(sc interface{ Scan(...any) error }) (Package, error) {
 	var p Package
-	var sup, app, vs, prq string
+	var sup, app, vs, prq, exe string
 	err := sc.Scan(&p.PackageID, &p.BundleID, &p.Title, &p.Vendor, &p.Kind, &p.Version, &p.KB, &p.ProductCode, &p.Severity, &p.ReleaseDate,
-		&sup, &app, &p.FileName, &p.Size, &p.SHA256, &p.SourceURL, &vs, &p.QuarantinePath, &p.State, &p.StateReason, &p.StateBy, &p.StateAt, &p.CreatedAt, &p.PackageName, &prq, &p.SupersededBy, &p.ExpectedUBR)
+		&sup, &app, &p.FileName, &p.Size, &p.SHA256, &p.SourceURL, &vs, &p.QuarantinePath, &p.State, &p.StateReason, &p.StateBy, &p.StateAt, &p.CreatedAt, &p.PackageName, &prq, &p.SupersededBy, &p.ExpectedUBR, &exe)
 	if err != nil {
 		return p, err
+	}
+	if exe != "" {
+		p.Exe = &manifest.ExeInstall{}
+		if json.Unmarshal([]byte(exe), p.Exe) != nil {
+			p.Exe = nil // RollbackUnsupported / matching then treat it as unknown
+		}
 	}
 	json.Unmarshal([]byte(sup), &p.Supersedes)
 	json.Unmarshal([]byte(app), &p.Applicability)
@@ -561,4 +570,12 @@ func approvedBy(p Package, actor string) bool {
 		}
 	}
 	return false
+}
+
+// exeJSON stores the exe block ("" for other kinds).
+func exeJSON(e *manifest.ExeInstall) string {
+	if e == nil {
+		return ""
+	}
+	return mustJSON(e)
 }

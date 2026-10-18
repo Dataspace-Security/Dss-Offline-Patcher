@@ -53,6 +53,12 @@ type WingetInstaller struct {
 	ProductCode         string
 	ReleaseDate         string
 	ARP                 []WingetARPEntry
+	// EXE installers (winget_exe.go): switches, extra success codes,
+	// ExpectedReturnCodes and the OS architectures the entry is not for.
+	Switches        WingetSwitches
+	SuccessCodes    []int
+	ReturnCodes     []WingetReturnCode
+	UnsupportedArch []string
 }
 
 // WingetManifest is the installer manifest of one package version.
@@ -161,6 +167,10 @@ func ParseWingetManifest(b []byte) (*WingetManifest, error) {
 	def := WingetInstaller{InstallerType: str(root, "InstallerType"), NestedInstallerType: str(root, "NestedInstallerType"),
 		Scope: str(root, "Scope"), Locale: str(root, "InstallerLocale"), ProductCode: str(root, "ProductCode"),
 		ReleaseDate: str(root, "ReleaseDate"), ARP: arpEntries(root)}
+	var err2 error
+	if def.Switches, def.SuccessCodes, def.ReturnCodes, def.UnsupportedArch, err2 = exeFields(root); err2 != nil {
+		return nil, err2
+	}
 	list, _ := root["Installers"].([]any)
 	if len(list) == 0 {
 		return nil, errors.New("manifest lists no installers")
@@ -182,6 +192,27 @@ func ParseWingetManifest(b []byte) (*WingetManifest, error) {
 		}
 		if a := arpEntries(im); len(a) > 0 {
 			in.ARP = a
+		}
+		sw, succ, codes, unsup, err := exeFields(im)
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range []struct {
+			dst *string
+			v   string
+		}{{&in.Switches.Silent, sw.Silent}, {&in.Switches.SilentWithProgress, sw.SilentWithProgress}, {&in.Switches.Custom, sw.Custom}} {
+			if f.v != "" {
+				*f.dst = f.v
+			}
+		}
+		if succ != nil {
+			in.SuccessCodes = succ
+		}
+		if codes != nil {
+			in.ReturnCodes = codes
+		}
+		if unsup != nil {
+			in.UnsupportedArch = unsup
 		}
 		in.InstallerType = strings.ToLower(in.InstallerType)
 		in.NestedInstallerType = strings.ToLower(in.NestedInstallerType)
@@ -244,7 +275,7 @@ func (m *WingetManifest) PickMSI(arch string) (WingetInstaller, error) {
 	if len(cands) == 0 {
 		if len(other) > 0 {
 			sort.Strings(other)
-			return WingetInstaller{}, unsupported("%s %s has no MSI installer for %s (only %s); offpatch deploys MSI packages only",
+			return WingetInstaller{}, unsupported("%s %s has no MSI installer for %s (only %s)",
 				m.ID, m.Version, arch, strings.Join(dedupe(other), ", "))
 		}
 		return WingetInstaller{}, unsupported("%s %s has no installer for %s", m.ID, m.Version, arch)

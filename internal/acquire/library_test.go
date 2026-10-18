@@ -93,7 +93,8 @@ ManifestType: installer
 	if len(r.Installers) != 1 || r.Installers[0].Type != "nullsoft" {
 		t.Fatalf("installers: %+v", r.Installers)
 	}
-	if ok, why := LibraryImportable(r, nil); ok != "no" || why != "EXE installer only (nullsoft)" {
+	// NSIS has a documented silent switch (/S): importable as kind exe.
+	if ok, why := LibraryImportable(r, nil); ok != "yes" || why != "EXE installer (nullsoft)" {
 		t.Errorf("importable: %s %s", ok, why)
 	}
 	// Installer manifest missing: ErrWingetNotFound.
@@ -102,9 +103,11 @@ ManifestType: installer
 	}
 }
 
+// LibraryImportable is intel.Importable (pmctl and the server agree).
 func TestLibraryImportable(t *testing.T) {
+	sha := strings.Repeat("ab", 32)
 	in := func(arch, typ string) intel.ResolvedInstaller {
-		return intel.ResolvedInstaller{Arch: arch, Type: typ, URL: "https://x/y"}
+		return intel.ResolvedInstaller{Arch: arch, Type: typ, URL: "https://x/y", SHA256: sha}
 	}
 	cases := []struct {
 		inst   []intel.ResolvedInstaller
@@ -112,19 +115,25 @@ func TestLibraryImportable(t *testing.T) {
 		want   string
 		reason string
 	}{
-		{[]intel.ResolvedInstaller{in("x64", "wix")}, []string{"x64"}, "yes", ""},
-		{[]intel.ResolvedInstaller{in("x86", "msi")}, []string{"x64"}, "yes", ""}, // 32-bit MSI on x64, like PickMSI
-		{[]intel.ResolvedInstaller{in("neutral", "msi")}, []string{"x86"}, "yes", ""},
-		{[]intel.ResolvedInstaller{in("arm64", "msi")}, nil, "yes", ""}, // nothing installed: any arch
-		{[]intel.ResolvedInstaller{in("arm64", "msi"), in("x64", "inno")}, []string{"x64"}, "no", "EXE installer only (inno)"},
-		{[]intel.ResolvedInstaller{in("x64", "msix"), in("x64", "zip")}, []string{"x64"}, "no", "no MSI installer (only msix, zip)"},
-		{[]intel.ResolvedInstaller{in("x86", "exe")}, []string{"arm64"}, "no", "no installer for arm64"},
-		{nil, nil, "no", "no installer pmctl can fetch"},
+		{[]intel.ResolvedInstaller{in("x64", "wix")}, []string{"x64"}, "yes", "MSI installer (x64)"},
+		{[]intel.ResolvedInstaller{in("x86", "msi")}, []string{"x64"}, "yes", "MSI installer (x86)"}, // 32-bit MSI on x64, like PickMSI
+		{[]intel.ResolvedInstaller{in("neutral", "msi")}, []string{"x86"}, "yes", "MSI installer (neutral)"},
+		{[]intel.ResolvedInstaller{in("arm64", "msi")}, nil, "yes", "MSI installer (arm64)"}, // nothing installed: any arch
+		{[]intel.ResolvedInstaller{in("arm64", "msi"), in("x64", "inno")}, []string{"x64"}, "yes", "EXE installer (inno)"},
+		{[]intel.ResolvedInstaller{in("x64", "exe")}, []string{"x64"}, "no", "EXE installer without a documented silent switch"},
+		{[]intel.ResolvedInstaller{{Arch: "x64", Type: "burn", URL: "https://x/y", SHA256: sha, Scope: "user"}}, []string{"x64"}, "no", "installs per user only"},
+		{[]intel.ResolvedInstaller{in("x64", "msix"), in("x64", "zip")}, []string{"x64"}, "no", "no MSI or EXE installer (msix, zip)"},
+		{[]intel.ResolvedInstaller{in("x86", "exe")}, []string{"arm64"}, "no", "no installer for arm64 (only x86)"},
+		{nil, nil, "no", "no installers listed in the winget manifest"},
 	}
 	for i, c := range cases {
 		got, why := LibraryImportable(intel.Resolved{Installers: c.inst}, c.arches)
 		if got != c.want || why != c.reason {
 			t.Errorf("%d: %s %q, want %s %q", i, got, why, c.want, c.reason)
+		}
+		r := intel.Resolved{Installers: c.inst}
+		if s, w := intel.Importable(&r, c.arches, true); s != got || w != why {
+			t.Errorf("%d: intel.Importable disagrees: %s %q", i, s, w)
 		}
 	}
 }

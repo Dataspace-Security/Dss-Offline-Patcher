@@ -108,10 +108,7 @@ func (s *Sim) Install(ctx context.Context, p manifest.Package, file string) Resu
 	if _, err := os.Stat(file); err != nil {
 		return Result{State: "failed", ExitCode: 2, Detail: "file missing: " + err.Error()}
 	}
-	id := p.KB
-	if p.Kind == "msi" {
-		id = p.ProductCode
-	}
+	id := simID(p)
 	for _, f := range s.cfg.FailKBs {
 		if strings.EqualFold(f, id) {
 			return Result{State: "failed", ExitCode: 1603, Detail: "simulated installer failure (fatal error during installation)"}
@@ -123,6 +120,16 @@ func (s *Sim) Install(ctx context.Context, p manifest.Package, file string) Resu
 			return Result{State: "installed", ExitCode: 2359302, Detail: "already installed"}
 		}
 		st.KBs = append(st.KBs, p.KB)
+	} else if p.Kind == manifest.KindExe {
+		if p.Exe == nil {
+			return Result{State: "failed", ExitCode: -1, Detail: "exe package without an exe block"}
+		}
+		if _, err := exeArgs(p.Exe); err != nil {
+			return Result{State: "failed", ExitCode: -1, Detail: "exe package refused: " + err.Error()}
+		}
+		// Like the EXE installer: an older version's ARP entry is replaced.
+		st.Products = slices.DeleteFunc(st.Products, func(it store.InventoryItem) bool { return exeAppMatch(p, it) })
+		st.Products = append(st.Products, store.InventoryItem{Kind: "product", ID: id, Name: p.Exe.Detect.DisplayName, Version: exeWantVersion(p)})
 	} else {
 		st.Products = append(st.Products, store.InventoryItem{Kind: "product", ID: p.ProductCode, Name: p.Title, Version: p.Version})
 	}
@@ -142,10 +149,10 @@ func (s *Sim) Uninstall(ctx context.Context, p manifest.Package) Result {
 	s.simulateWork(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	id := p.KB
-	if p.Kind == "msi" {
-		id = p.ProductCode
+	if !p.RollbackSupported() {
+		return Result{State: "failed", ExitCode: -1, Detail: exeRollbackUnsupported}
 	}
+	id := simID(p)
 	for _, f := range s.cfg.FailUninstall {
 		if strings.EqualFold(f, id) {
 			return Result{State: "failed", ExitCode: 1603, Detail: "simulated uninstall failure"}
@@ -154,7 +161,9 @@ func (s *Sim) Uninstall(ctx context.Context, p manifest.Package) Result {
 	st := s.load()
 	n := len(st.KBs) + len(st.Products)
 	st.KBs = slices.DeleteFunc(st.KBs, func(k string) bool { return strings.EqualFold(k, id) })
-	st.Products = slices.DeleteFunc(st.Products, func(it store.InventoryItem) bool { return strings.EqualFold(it.ID, id) })
+	st.Products = slices.DeleteFunc(st.Products, func(it store.InventoryItem) bool {
+		return strings.EqualFold(it.ID, id) || (p.Kind == manifest.KindExe && exeAppMatch(p, it))
+	})
 	if len(st.KBs)+len(st.Products) == n {
 		return Result{State: "installed", Detail: "not installed; nothing to remove"}
 	}
@@ -265,4 +274,23 @@ func (s *Sim) Hardware(ctx context.Context) store.Hardware {
 		Timezone:    "UTC",
 		IPAddresses: []string{fmt.Sprintf("10.20.%d.%d", n/256%256, n%254+1)},
 	}
+}
+
+// simID identifies a package in FailKBs / FailUninstall and in the
+// simulated inventory: KB, MSI product code, or for EXE packages the ARP key
+// (detect.product_code) or, without one, the Apps & features name.
+func simID(p manifest.Package) string {
+	switch p.Kind {
+	case "msi":
+		return p.ProductCode
+	case manifest.KindExe:
+		if p.Exe == nil {
+			return p.PackageName
+		}
+		if p.Exe.Detect.ProductCode != "" {
+			return p.Exe.Detect.ProductCode
+		}
+		return p.Exe.Detect.DisplayName
+	}
+	return p.KB
 }

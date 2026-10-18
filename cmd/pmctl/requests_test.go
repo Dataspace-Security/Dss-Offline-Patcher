@@ -67,8 +67,8 @@ func writeRequest(t *testing.T, dir, name string, r acqrequest.Request) {
 }
 
 // TestAutoAcquisitionRequests: a request exported by the console is turned
-// into MSI and KB packages in one signed bundle; EXE-only and unknown
-// packages are warnings; the request moves to done/ once sent, a request
+// into MSI and KB packages in one signed bundle; an EXE installer without a
+// valid Authenticode signature and unknown packages are warnings; the request moves to done/ once sent, a request
 // with a failed item stays for the next run, and garbage is rejected.
 func TestAutoAcquisitionRequests(t *testing.T) {
 	stubAuthenticode(t)
@@ -132,7 +132,7 @@ func TestAutoAcquisitionRequests(t *testing.T) {
 		}
 	}
 	warnings := strings.Join(rep.Warnings, "\n")
-	for _, w := range []string{"Microsoft.VisualStudioCode-1.142.0 skipped", "only inno", "Contoso.Gone-1.0 skipped", "not in the winget repository", "notes.json rejected"} {
+	for _, w := range []string{"Microsoft.VisualStudioCode-1.142.0 skipped", "Authenticode: not a PE file", "Contoso.Gone-1.0 skipped", "not in the winget repository", "notes.json rejected"} {
 		if !strings.Contains(warnings, w) {
 			t.Errorf("warning %q missing in:\n%s", w, warnings)
 		}
@@ -147,9 +147,11 @@ func TestAutoAcquisitionRequests(t *testing.T) {
 		t.Errorf("no request feed: %+v", rep.Feeds)
 	}
 	wantItems := map[string][2]string{
-		"Google.Chrome":              {"fetched", ""},
-		"7zip.7zip":                  {"fetched", ""},
-		"Microsoft.VisualStudioCode": {"unsupported", "no MSI installer for x64 in winget (only inno)"},
+		"Google.Chrome": {"fetched", ""},
+		"7zip.7zip":     {"fetched", ""},
+		// Inno, machine scope: an EXE package, but this synthetic payload
+		// is not a signed PE file, so it is refused (and deleted).
+		"Microsoft.VisualStudioCode": {"unsupported", "the installer's Authenticode signature is not valid: not a PE file"},
 		"Contoso.Gone":               {"unsupported", "winget no longer lists version 1.0"},
 		acquiretest.KB:               {"fetched", ""},
 	}

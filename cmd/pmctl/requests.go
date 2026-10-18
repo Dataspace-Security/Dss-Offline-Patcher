@@ -238,13 +238,16 @@ func (r *requestRun) fetchWinget(a acqrequest.App, arch string) error {
 	if err != nil {
 		return fmt.Errorf("winget manifest: %w", err)
 	}
-	in, err := m.PickMSI(arch)
+	in, err := m.PickInstaller(arch)
 	if err != nil {
 		var un *acquire.UnsupportedError
 		if errors.As(err, &un) {
 			return unsupportedItem(pickMSIReason(un.Reason, arch), un.Reason)
 		}
 		return err
+	}
+	if in.IsEXE() {
+		return r.fetchWingetExe(a, arch, m, murl, in)
 	}
 	if in.Architecture != arch && in.Architecture != "neutral" {
 		autoWarn(fmt.Sprintf("%s %s: no %s MSI; using the %s MSI for %s endpoints", a.WingetID, m.Version, arch, in.Architecture, arch))

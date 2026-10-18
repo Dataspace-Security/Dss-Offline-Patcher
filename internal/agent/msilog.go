@@ -44,7 +44,11 @@ func withMSILog(r Result, logPath string) Result {
 
 // msiLogTail reads the end of a verbose msiexec log (UTF-16LE or ANSI/UTF-8)
 // and returns its last meaningful lines, "" when there is nothing to show.
-func msiLogTail(path string) string {
+func msiLogTail(path string) string { return logTailWith(path, msiLogHeader) }
+
+// logTailWith is msiLogTail for any installer log; the tail fits the detail
+// budget together with header.
+func logTailWith(path, header string) string {
 	f, err := os.Open(path)
 	if err != nil {
 		return ""
@@ -63,7 +67,7 @@ func msiLogTail(path string) string {
 	}
 	body := make([]byte, st.Size()-off)
 	m, _ := f.ReadAt(body, off)
-	return meaningfulTail(decodeLogText(head, body[:m], off == 0), msiLogTailLines, msiLogTailChars-len(msiLogHeader))
+	return meaningfulTail(decodeLogText(head, body[:m], off == 0), msiLogTailLines, msiLogTailChars-len(header))
 }
 
 // decodeLogText decodes body with the encoding detected from the start of

@@ -55,6 +55,7 @@ type libInstaller struct {
 	URL         string `json:"url"`
 	SHA256      string `json:"sha256,omitempty"`
 	ProductCode string `json:"product_code,omitempty"`
+	Silent      bool   `json:"silent,omitempty"` // a documented silent switch (plain exe installers)
 }
 
 type libInstalled struct {
@@ -157,7 +158,7 @@ func buildLibIndex(ix *intel.Index) *libIndex {
 		it := libraryItem{Kind: "os", ID: kb, Name: cleanLibText(w.Title, maxLibName), Publisher: "Microsoft", LatestVersion: ver,
 			Description: cleanLibText(w.Product, maxLibName),
 			Links:       libLinks{Homepage: safeLink("https://www.catalog.update.microsoft.com/Search.aspx?q=" + url.QueryEscape(kb))},
-			Importable:  intel.ImportableYes, ImportableReason: "Windows cumulative update (Microsoft Update Catalog)"}
+			Importable:  intel.ImportableYes, ImportableReason: osImportableReason}
 		li.byKey[k] = len(li.entries)
 		li.entries = append(li.entries, libEntry{item: it, pub: "microsoft", date: w.ReleaseDate, kbs: []intel.WindowsRelease{w},
 			search: strings.ToLower(strings.Join([]string{it.Name, kb, "microsoft windows", w.Product}, "\x00"))})
@@ -189,7 +190,7 @@ func buildLibIndex(ix *intel.Index) *libIndex {
 					break
 				}
 				it.Installers = append(it.Installers, libInstaller{Arch: cleanToken(in.Arch), Type: cleanToken(in.Type), Scope: cleanToken(in.Scope),
-					URL: safeLink(in.URL), SHA256: cleanHex(in.SHA256), ProductCode: cleanProductCode(in.ProductCode)})
+					URL: safeLink(in.URL), SHA256: cleanHex(in.SHA256), ProductCode: cleanProductCode(in.ProductCode), Silent: in.Silent})
 			}
 		}
 		parts := []string{it.Name, a.ID, it.Publisher}

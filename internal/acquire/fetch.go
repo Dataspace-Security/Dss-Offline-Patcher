@@ -413,7 +413,13 @@ type FetchURLOptions struct {
 	HTTP        *http.Client
 	// Verified describes where SHA256 came from (default "sha256(operator)").
 	Verified string
-	Progress func(done, total int64)
+	// Exe: the EXE install block (Kind "exe" only).
+	Exe *manifest.ExeInstall
+	// VerifyPayload, if set, runs on the downloaded, hash-checked file
+	// before the spec entry is written (e.g. the Authenticode check of an
+	// EXE installer). An error leaves the spec unchanged.
+	VerifyPayload func(path string) error
+	Progress      func(done, total int64)
 }
 
 // FetchURL downloads a vendor file over HTTPS, requires it to match the
@@ -470,7 +476,7 @@ func FetchURL(ctx context.Context, o FetchURLOptions) (*FetchResult, error) {
 		KB: o.KB, ProductCode: o.ProductCode, PackageName: o.PackageName, Severity: o.Severity, ReleaseDate: o.ReleaseDate,
 		Supersedes:    filterKBs(o.Supersedes, o.KB),
 		Applicability: manifest.Applicability{OS: osForKind(o.Kind, o.OS), Arch: o.Arch, MinBuild: o.MinBuild, MaxBuild: o.MaxBuild},
-		SourceURL:     o.URL, Path: path,
+		SourceURL:     o.URL, Path: path, Exe: o.Exe,
 	}
 	// Validate metadata before spending bandwidth.
 	if err := ValidateEntry(e, 1, o.SHA256); err != nil {
@@ -481,6 +487,11 @@ func FetchURL(ctx context.Context, o FetchURLOptions) (*FetchResult, error) {
 	})
 	if err != nil {
 		return nil, err
+	}
+	if o.VerifyPayload != nil {
+		if err := o.VerifyPayload(dl.Path); err != nil {
+			return nil, err
+		}
 	}
 	e.Acquired = &Provenance{
 		At: time.Now().UTC().Format(time.RFC3339), Method: "url",

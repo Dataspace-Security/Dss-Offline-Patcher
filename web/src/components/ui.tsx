@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { fmtTime, relTime, useNow } from "../util";
 import { normalizeRole, ROLE_HELP, roleLabel } from "../auth";
 
@@ -152,6 +153,22 @@ export function Mono({ children, title }: { children: ReactNode; title?: string 
   return <code className="mono" title={title}>{children}</code>;
 }
 
+// Open dialogs (nested ones too): the page behind stays still while any is open.
+let openModals = 0;
+function lockBodyScroll(): () => void {
+  openModals += 1;
+  document.body.classList.add("modal-open");
+  return () => {
+    openModals = Math.max(0, openModals - 1);
+    if (openModals === 0) document.body.classList.remove("modal-open");
+  };
+}
+
+/**
+ * A dialog. It is rendered at <body> (a portal), so no sticky or transformed
+ * ancestor (side panel, sticky table header) can paint over it; the page
+ * behind does not scroll while it is open.
+ */
 export function Modal({ title, onClose, children, footer, wide, xwide }: {
   title: ReactNode; onClose: () => void; children: ReactNode; footer?: ReactNode; wide?: boolean; xwide?: boolean;
 }) {
@@ -160,7 +177,8 @@ export function Modal({ title, onClose, children, footer, wide, xwide }: {
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
   }, [onClose]);
-  return (
+  useEffect(() => lockBodyScroll(), []);
+  return createPortal(
     <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div className={`modal ${wide ? "modal-wide" : ""} ${xwide ? "modal-xwide" : ""}`} role="dialog" aria-modal="true">
         <div className="modal-head">
@@ -170,7 +188,8 @@ export function Modal({ title, onClose, children, footer, wide, xwide }: {
         <div className="modal-body">{children}</div>
         {footer && <div className="modal-foot">{footer}</div>}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

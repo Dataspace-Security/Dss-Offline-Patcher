@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, enc } from "../api";
 import { paths } from "../paths";
 import { useCan } from "../auth";
 import { ApprovalPanel, DeploymentStatePill } from "../components/DeploymentApproval";
+import { KindTag, TargetDetailText, isAgentTooOld, isExePackage, rollbackBlocker, signerText } from "../components/exeParts";
 import { fetchPolicy, isAgentPackage } from "../components/patchPlan";
 import { CountsBar, Empty, ErrorBanner, KV, Mono, PageHeader, Pill, ReasonModal, Time, targetLabel } from "../components/ui";
 import { TargetProgress } from "../components/TargetProgress";
@@ -88,6 +89,7 @@ export default function DeploymentDetailPage() {
   const rollback = d.operation === "rollback";
   const lost = (d.targets ?? []).filter((t) => t.state === "lost_after_install");
   const deferred = (d.targets ?? []).filter((t) => t.state === "deferred");
+  const oldAgent = (d.targets ?? []).filter((t) => t.state === "not_applicable" && isAgentTooOld(t.detail));
   const failing = (d.targets ?? []).filter(isFailing);
   const exhausted = exhaustedInCurrentRing(d);
   const rings = ringSummaries(d);
@@ -127,8 +129,8 @@ export default function DeploymentDetailPage() {
           <button className="btn" onClick={() => setAction("retry_failed")} title="Reset the attempts of failed targets in the current stage">Retry failed ({exhausted.length})…</button>}
         {canOperate && (isLive || pending) &&
           <button className="btn btn-danger" onClick={() => setAction("cancel")}>Cancel…</button>}
-        {canOperate && canRollBack && (p.rollback_unsupported
-          ? <button className="btn" disabled title={p.rollback_unsupported}>Rollback not supported</button>
+        {canOperate && canRollBack && (rollbackBlocker(p)
+          ? <button className="btn" disabled title={`Rollback: ${rollbackBlocker(p)}`}>Rollback not supported</button>
           : isLive || pending
           ? <button className="btn" disabled title="Cancel this deployment first: an install and a rollback of the same package cannot run at the same time">Roll back…</button>
           : <Link className="btn btn-danger-ghost" to={`/deployments/new?operation=rollback&package_id=${enc(d.package_id)}`}
@@ -183,7 +185,7 @@ export default function DeploymentDetailPage() {
                         <td><Pill state={t.state} label={targetLabel(t.state, t.operation)} />{t.health === "failed" && <Pill state="failed" label="health" />}</td>
                         <td className="num"><Mono>{t.exit_code}</Mono></td>
                         <td className="num">{t.attempts}{isExhausted(t, d) && <div className="cell-sub">no retries left</div>}</td>
-                        <td className="detail-cell">{t.detail || t.health_detail || <span className="muted">—</span>}</td>
+                        <td className="detail-cell">{t.detail ? <TargetDetailText detail={t.detail} /> : t.health_detail || <span className="muted">—</span>}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -203,7 +205,7 @@ export default function DeploymentDetailPage() {
       )}
       {rollback && (
         <div className="banner banner-warn">
-          <b>Rollback:</b> agents uninstall <Mono>{d.package_id}</Mono> ({p?.kind === "msu" ? `wusa /uninstall /kb:${(p.kb || "").replace(/^KB/i, "")}` : p?.kind === "msi" ? `msiexec /x ${p.product_code}` : p?.kind === "deb" ? `dpkg -r ${p.package_name}` : p?.kind === "rpm" ? `rpm -e ${p.package_name}` : "uninstall"}).
+          <b>Rollback:</b> agents uninstall <Mono>{d.package_id}</Mono> ({p?.kind === "msu" ? `wusa /uninstall /kb:${(p.kb || "").replace(/^KB/i, "")}` : p?.kind === "msi" ? `msiexec /x ${p.product_code}` : p?.kind === "deb" ? `dpkg -r ${p.package_name}` : p?.kind === "rpm" ? `rpm -e ${p.package_name}` : p?.kind === "exe" ? "the app's quiet uninstall from Apps & features" : "uninstall"}).
           {" "}Verified = inventory no longer shows it. Justification: {d.justification || "—"}
         </div>
       )}
@@ -212,6 +214,14 @@ export default function DeploymentDetailPage() {
           <b>{lost.length} endpoint{lost.length === 1 ? "" : "s"} stopped checking in after {rollback ? "the uninstall" : "installing"}:</b>{" "}
           {lost.map((t, i) => <span key={t.endpoint_id}>{i > 0 && ", "}<Link to={`/endpoints/${enc(t.endpoint_id)}`}>{t.hostname || t.endpoint_id}</Link></span>)}.
           {" "}They count as failures towards auto-pause. Check them (boot failure?) before resuming; they recover automatically when they check in and verify.
+        </div>
+      )}
+      {oldAgent.length > 0 && (
+        <div className="banner banner-warn">
+          <b>{oldAgent.length} endpoint{oldAgent.length === 1 ? "" : "s"} skipped (not applicable):</b> the agent is too old for EXE packages.{" "}
+          {isSuper
+            ? <>Upgrade the agent to 0.9.0 or later on {oldAgent.length === 1 ? "it" : "them"} (<Link to={paths.agentVersions()}>Upgrade agent</Link>), then deploy this package again.</>
+            : <>The vendor (super admin) upgrades the agent; then this package can be deployed to {oldAgent.length === 1 ? "it" : "them"}.</>}
         </div>
       )}
       {deferred.length > 0 && (
@@ -233,6 +243,13 @@ export default function DeploymentDetailPage() {
           <h2>Settings</h2>
           <KV rows={[
             ["Package", <Link to={paths.catalog(d.package_id)}><Mono>{d.package_id}</Mono></Link>],
+            ...(p && isExePackage(p) ? [
+              ["Kind", <KindTag p={p} />] as [string, ReactNode],
+              ["Signer", signerText(p) || "—"] as [string, ReactNode],
+              ["Silent arguments", p.exe?.silent_args?.length ? <Mono>{p.exe.silent_args.join(" ")}</Mono> : "—"] as [string, ReactNode],
+              ["Detection", p.exe?.detect?.display_name ? <>{p.exe.detect.display_name}{p.exe.detect.display_version ? <> <Mono>{p.exe.detect.display_version}</Mono></> : null}</> : "—"] as [string, ReactNode],
+              ["Rollback", rollbackBlocker(p) ? <span className="text-amber">Rollback: {rollbackBlocker(p)}</span> : "supported"] as [string, ReactNode],
+            ] : []),
             ["Operation", rollback ? <Pill state="failed" label="rollback (uninstall)" /> : "install"],
             ["Current stage", total ? `${ringName(Math.min(Math.max(d.current_ring, 0), total - 1))} (of ${total})` : "—"],
             ...(total > 1 && d.current_ring < total - 1 ? [["Next stage", autoNext ? "starts automatically once the current stage succeeds" : "started by a User or Admin"] as [string, string]] : []),
@@ -287,7 +304,7 @@ export default function DeploymentDetailPage() {
                     <td className="num">{t.exit_code || t.state === "failed" ? <Mono>{t.exit_code}</Mono> : <span className="muted">—</span>}</td>
                     <td>{t.health ? <span title={t.health_detail || undefined}><Pill state={t.health === "ok" ? "verified" : "failed"} label={t.health} /></span> : <span className="muted">—</span>}
                       {t.health === "failed" && t.health_detail && <div className="cell-sub">{t.health_detail}</div>}</td>
-                    <td className="detail-cell">{t.detail || <span className="muted">—</span>}</td>
+                    <td className="detail-cell"><TargetDetailText detail={t.detail} /></td>
                     <td className="nowrap"><ClockRel value={t.updated_at} /></td>
                     <td className="nowrap">
                       {bad && !rollback && canOperate && (canException

@@ -84,6 +84,13 @@ type autoConfig struct {
 	// runs 0.6.5 or later.
 	ExpectedUBR bool `json:"expected_ubr"`
 
+	// EXE installers (kind exe), verified by Authenticode in pure Go:
+	// AuthenticodeRoots adds trust anchors (a PEM file) to the system roots
+	// and the code-signing roots shipped with pmctl; ExeSigners, if set,
+	// accepts only EXE installers whose verified signer CommonName is listed.
+	AuthenticodeRoots string   `json:"authenticode_roots"`
+	ExeSigners        []string `json:"exe_signers"`
+
 	// Advanced: alternative endpoints (tests, or an internal mirror).
 	CatalogURL         string `json:"catalog_url"`
 	MSRCURL            string `json:"msrc_url"`
@@ -309,6 +316,7 @@ func loadAutoConfig(path string) (*autoConfig, error) {
 	c.WorkDir, c.SequenceState, c.Key, c.Pub = abs(c.WorkDir), abs(c.SequenceState), abs(c.Key), abs(c.Pub)
 	c.Send.To, c.Send.Log = abs(c.Send.To), abs(c.Send.Log)
 	c.Requests = abs(c.Requests)
+	c.AuthenticodeRoots = abs(c.AuthenticodeRoots)
 	if c.WorkDir == "" || c.Key == "" {
 		return nil, errors.New("config: work_dir and key are required")
 	}
@@ -466,6 +474,9 @@ func runAutoRequests(ctx context.Context, cfgPath string, dry bool, requestsDir 
 	}
 	if requestsDir != "" {
 		c.Requests = requestsDir
+	}
+	if err := setExeTrust(c.AuthenticodeRoots, c.ExeSigners); err != nil {
+		return rep, err
 	}
 	if onlyRequests && c.Requests == "" {
 		return rep, fmt.Errorf("-only-requests: no requests directory (set \"requests\" in %s or pass -requests)", cfgPath)

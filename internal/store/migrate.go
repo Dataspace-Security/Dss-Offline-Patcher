@@ -51,6 +51,8 @@ var columnMigrations = []struct{ table, column, ddl string }{
 	{"deployments", "activated_at", "TEXT NOT NULL DEFAULT ''"},
 	// Sessions limited to MFA enrolment (MFA required, not enrolled yet).
 	{"sessions", "mfa_enroll_only", "INTEGER NOT NULL DEFAULT 0"},
+	// EXE packages (kind exe): the manifest's exe block as JSON ("" = none).
+	{"packages", "exe", "TEXT NOT NULL DEFAULT ''"},
 }
 
 func hasColumn(db *sql.DB, table, column string) (bool, error) {

@@ -1,21 +1,27 @@
 package intel
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 )
 
 // The importable rule: whether offpatch can import a winget app as a
 // signed catalog package today. The server computes it for the Library and
-// pmctl applies the same rule when it resolves apps, so the console never
-// offers an Import that the acquisition zone will refuse.
+// pmctl applies the same rule when it resolves apps (acquire.PickInstaller,
+// acquire.LibraryImportable), so the console never offers an Import that
+// the acquisition zone will refuse.
 //
-//   - "yes": a resolved installer for one of the wanted architectures has
-//     type msi or wix, and its MSI ProductCode is known (in the manifest) or
-//     can be read from the MSI itself (pmctl reads it on every OS, see
-//     internal/msi).
-//   - "no" with a reason: resolved, but no installer qualifies, e.g. "EXE
-//     installer only (nullsoft)".
+//   - "yes": a resolved installer for one of the wanted architectures is
+//     an MSI (type msi or wix) whose ProductCode is known (in the manifest)
+//     or can be read from the MSI itself (pmctl reads it on every OS, see
+//     internal/msi); or an EXE installer (exe, inno, nullsoft, burn) with
+//     machine (or unspecified) scope, an https URL, a SHA-256 and a silent
+//     switch (the manifest's, or the type's default for inno, nullsoft and
+//     burn). MSI wins over EXE. pmctl still verifies the Authenticode
+//     signature after download (kind exe requires a verified signer).
+//   - "no" with a reason: resolved, but no installer qualifies, e.g.
+//     "installs per user only" or "no MSI or EXE installer (msix)".
 //   - "unknown": not resolved yet (no Resolved entry).
 
 // Importable results.
@@ -25,11 +31,40 @@ const (
 	ImportableUnknown = "unknown"
 )
 
+// Reasons for EXE installers that cannot be imported (shared with pmctl).
+const (
+	ReasonExeNoSilent = "EXE installer without a documented silent switch"
+	ReasonPerUser     = "installs per user only"
+	ReasonExeNoSHA    = "EXE installer without a SHA-256 in the winget manifest"
+	ReasonExeNoHTTPS  = "EXE installer URL is not HTTPS"
+)
+
 // msiTypes are winget InstallerType values offpatch imports as msi packages.
 var msiTypes = map[string]bool{"msi": true, "wix": true}
 
-// exeTypes are winget's EXE installer flavours.
+// exeTypes are winget's EXE installer flavours, imported as kind exe.
 var exeTypes = map[string]bool{"exe": true, "inno": true, "nullsoft": true, "burn": true}
+
+// exeDefaultSilent: types whose silent switches are well known.
+var exeDefaultSilent = map[string]bool{"inno": true, "nullsoft": true, "burn": true}
+
+var sha256Hex = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+
+// ExeReason returns why an EXE-type installer cannot be imported, or "".
+func ExeReason(in ResolvedInstaller) string {
+	t := strings.ToLower(in.Type)
+	switch {
+	case strings.EqualFold(in.Scope, "user"):
+		return ReasonPerUser
+	case !strings.HasPrefix(strings.ToLower(in.URL), "https://"):
+		return ReasonExeNoHTTPS
+	case !sha256Hex.MatchString(in.SHA256):
+		return ReasonExeNoSHA
+	case !exeDefaultSilent[t] && !in.Silent:
+		return ReasonExeNoSilent
+	}
+	return ""
+}
 
 // Importable applies the rule to r. arches are the architectures the app
 // is wanted for (the fleet's, where it is installed); empty means any
@@ -44,8 +79,8 @@ func Importable(r *Resolved, arches []string, canReadMSI bool) (status, reason s
 	for _, a := range arches {
 		want[strings.ToLower(a)] = true
 	}
-	// As pmctl fetches (acquire.archFits): a neutral installer fits x64 and
-	// x86 machines, and a 32-bit MSI also installs on x64.
+	// As pmctl fetches (acquire.archFits / exeArchFits): a neutral installer
+	// fits x64 and x86 machines, and a 32-bit MSI also installs on x64.
 	archOK := func(a string, isMSI bool) bool {
 		a = strings.ToLower(a)
 		if len(want) == 0 || want[a] {
@@ -58,26 +93,39 @@ func Importable(r *Resolved, arches []string, canReadMSI bool) (status, reason s
 		}
 		return false
 	}
-	var types, otherArches []string
+	var types, otherArches, exeReasons []string
 	noCode := false
+	exeYes := ""
 	for _, in := range r.Installers {
 		t := strings.ToLower(in.Type)
 		if !archOK(in.Arch, msiTypes[t]) {
 			otherArches = appendUnique(otherArches, strings.ToLower(in.Arch))
 			continue
 		}
-		if msiTypes[t] {
+		switch {
+		case msiTypes[t]:
 			if in.ProductCode != "" || canReadMSI {
 				return ImportableYes, "MSI installer (" + archLabel(in.Arch) + ")"
 			}
 			noCode = true
-			continue
+		case exeTypes[t]:
+			if why := ExeReason(in); why != "" {
+				exeReasons = appendUnique(exeReasons, why)
+			} else if exeYes == "" {
+				exeYes = "EXE installer (" + t + ")"
+			}
+			types = appendUnique(types, t)
+		default:
+			types = appendUnique(types, t)
 		}
-		types = appendUnique(types, t)
 	}
 	switch {
+	case exeYes != "":
+		return ImportableYes, exeYes
 	case noCode:
 		return ImportableNo, "MSI installer without a ProductCode"
+	case len(exeReasons) > 0:
+		return ImportableNo, bestExeReason(exeReasons)
 	case len(types) == 0 && len(otherArches) > 0:
 		sort.Strings(otherArches)
 		return ImportableNo, "no installer for " + strings.Join(sortedKeys(want), "/") + " (only " + strings.Join(otherArches, ", ") + ")"
@@ -85,16 +133,19 @@ func Importable(r *Resolved, arches []string, canReadMSI bool) (status, reason s
 		return ImportableNo, "no installers listed in the winget manifest"
 	}
 	sort.Strings(types)
-	allExe := true
-	for _, t := range types {
-		if !exeTypes[t] {
-			allExe = false
+	return ImportableNo, "no MSI or EXE installer (" + strings.Join(types, ", ") + ")"
+}
+
+// bestExeReason: the most telling reason when several EXE installers fail.
+func bestExeReason(rs []string) string {
+	for _, want := range []string{ReasonExeNoSilent, ReasonPerUser, ReasonExeNoSHA, ReasonExeNoHTTPS} {
+		for _, r := range rs {
+			if r == want {
+				return r
+			}
 		}
 	}
-	if allExe {
-		return ImportableNo, "EXE installer only (" + strings.Join(types, ", ") + ")"
-	}
-	return ImportableNo, "no MSI installer (" + strings.Join(types, ", ") + ")"
+	return rs[0]
 }
 
 func archLabel(a string) string {

@@ -4,6 +4,7 @@ import { api, ApiError, enc, errMsg } from "../api";
 import { paths } from "../paths";
 import { deploymentApprovalsRequired, needsApprovalsText, othersMustApprove, useCan } from "../auth";
 import { DeploymentStatePill } from "../components/DeploymentApproval";
+import { packageKindLabel, rollbackBlocker } from "../components/exeParts";
 import { AlreadyRunning, runningDeploymentFrom } from "../components/PatchThis";
 import { TargetPreview, nothingToDo, type TargetSummary } from "../components/TargetPreview";
 import { STAGES_HINT, stageLabel } from "../components/deployLabels";
@@ -138,10 +139,10 @@ function stagesSummary(rings: RingDraft[], counts: number[] | null, preview: Tar
 /** One package in the form's select; `needed` (install only) = machines that need it now. */
 function PackageOption({ p, needed, rollback }: { p: Package; needed?: number; rollback: boolean }) {
   return (
-    <option value={p.package_id} disabled={rollback && !!p.rollback_unsupported}>
+    <option value={p.package_id} disabled={rollback && !!rollbackBlocker(p)}>
       {p.title || p.package_id} {p.kb ? `(${p.kb})` : ""} · {p.severity}{p.state === "revoked" ? " · revoked" : ""}
       {needed !== undefined ? ` · needs it: ${needed}` : ""}
-      {rollback && p.rollback_unsupported ? " — rollback not supported" : ""}
+      {rollback && rollbackBlocker(p) ? " — rollback not supported" : ""}
     </option>
   );
 }
@@ -234,7 +235,7 @@ export function NewDeploymentPage() {
 
   const problems: string[] = [];
   if (!packageId) problems.push("Choose an approved package.");
-  if (rollback && selected?.rollback_unsupported) problems.push(`Rollback not supported: ${selected.rollback_unsupported}`);
+  if (rollback && selected && rollbackBlocker(selected)) problems.push(`Rollback not supported: ${rollbackBlocker(selected)}`);
   if (rollback && !justification.trim()) problems.push("Rollback deployments require a justification (e.g. the change ticket).");
   if (!name.trim()) problems.push("Name is required.");
   if (rings.length === 0) problems.push("At least one stage is required.");
@@ -411,8 +412,8 @@ export function NewDeploymentPage() {
           )}
         </details>
 
-        {rollback && selected?.rollback_unsupported && (
-          <div className="banner banner-error"><b>Rollback not supported for {selected.kind}:</b> {selected.rollback_unsupported}</div>
+        {rollback && selected && rollbackBlocker(selected) && (
+          <div className="banner banner-error"><b>Rollback not supported for {packageKindLabel(selected)}:</b> {rollbackBlocker(selected)}</div>
         )}
         {!rollback && <TargetPreview pkg={selected} rings={rings} onSummary={setSummary} />}
 

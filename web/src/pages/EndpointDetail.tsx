@@ -5,6 +5,7 @@ import { paths } from "../paths";
 import { useCan } from "../auth";
 import { Empty, ErrorBanner, KV, Mono, PageHeader, Pill, ReasonModal, RelTime, TargetPill, Time } from "../components/ui";
 import { EndpointUpdatesTable } from "../components/AvailablePatches";
+import { TargetDetailText } from "../components/exeParts";
 import { HardwareCard } from "../components/Hardware";
 import type { Endpoint, EndpointDetail } from "../types";
 import { parseTime, splitList, useLoad, useNow } from "../util";
@@ -122,7 +123,7 @@ export default function EndpointDetailPage() {
                   <td><TargetPill state={t.state} operation={t.operation} /></td>
                   <td className="num">{t.attempts}</td>
                   <td className="num"><Mono>{t.exit_code}</Mono></td>
-                  <td className="detail-cell">{t.detail || <span className="muted">—</span>}</td>
+                  <td className="detail-cell"><TargetDetailText detail={t.detail} /></td>
                   <td className="nowrap"><RelTime value={t.updated_at} /></td>
                 </tr>
               ))}

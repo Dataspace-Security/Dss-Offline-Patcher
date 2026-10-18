@@ -130,7 +130,7 @@ func TestKeyRotationRevocationAndUpgrade(t *testing.T) {
 	}
 
 	// ---- agent self-upgrade, prerequisites, editions (signed with B) ----
-	up := manifest.Package{PackageID: "offpatch-agent-0.2.0", Title: "offpatch agent 0.2.0", Vendor: "offpatch", Kind: "agent", Version: "0.2.0",
+	up := manifest.Package{PackageID: "offpatch-agent-9.9.0", Title: "offpatch agent 9.9.0", Vendor: "offpatch", Kind: "agent", Version: "9.9.0",
 		Severity: "important", Supersedes: []string{}, Applicability: manifest.Applicability{OS: "windows", Arch: "any"}, VendorSignature: manifest.VendorSignature{Status: "not_checked"}}
 	pre := msuPkg("KB5000902-x64", "KB5000902")
 	pre.Prerequisites = []string{"KB5000901"}
@@ -166,7 +166,7 @@ func TestKeyRotationRevocationAndUpgrade(t *testing.T) {
 	}
 	var me store.EndpointDetail
 	e.api("GET", "/api/endpoints/"+a3.id, tokViewer, nil, &me)
-	if me.AgentVersion != "0.2.0" {
+	if me.AgentVersion != "9.9.0" {
 		t.Fatalf("endpoint should report upgraded agent version, got %s", me.AgentVersion)
 	}
 	dd := e.deployment(dPre.DeploymentID)

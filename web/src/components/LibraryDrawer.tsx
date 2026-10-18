@@ -106,7 +106,7 @@ function DrawerBody({ it, canImport, arch, setArch, onImport, busy, busyKey }: {
       {canImport && blocked && <div className="hint">{blocked}</div>}
       {!canImport && <div className="hint">Viewers can look but not import.</div>}
       {it.importable === "unknown" && !blocked && (
-        <div className="hint">The installer has not been checked yet. If it turns out not to be an MSI, the import will show “Can't import” with the reason.</div>
+        <div className="hint">The installer has not been checked yet. If it turns out not to be an MSI or a silent machine-wide EXE installer, the import will show “Can't import” with the reason.</div>
       )}
 
       <KV rows={[

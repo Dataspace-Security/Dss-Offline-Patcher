@@ -134,7 +134,7 @@
 .rprof-regs { display: flex; flex-wrap: wrap; gap: 6px; }
 .rprof-regs .chip { margin: 0; }
 .rprof-savebar {
-  position: sticky; bottom: 0; z-index: 5; display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+  position: sticky; bottom: 0; z-index: var(--z-sticky); display: flex; align-items: center; gap: 10px; padding: 10px 14px;
   background: var(--topbar-bg); backdrop-filter: blur(6px); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-md);
 }
 .rprof-ro textarea, .rprof-ro input, .rprof-ro select { cursor: default; }

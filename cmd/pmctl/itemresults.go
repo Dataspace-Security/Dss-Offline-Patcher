@@ -109,13 +109,25 @@ func pickMSIReason(full, arch string) string {
 	case strings.Contains(full, "InstallerSha256"):
 		return "the winget manifest has no valid SHA-256 for the installer"
 	}
+	// An EXE installer exists but cannot be deployed (acquire.PickEXE):
+	// "EXE installer (inno) for x64 is not importable: installs per user only".
+	if pre, why, ok := strings.Cut(full, " is not importable: "); ok {
+		if i := strings.Index(pre, "EXE installer ("); i >= 0 {
+			return why + " (winget " + strings.TrimSpace(pre[i:]) + ")"
+		}
+		return why
+	}
+	kind := "MSI"
+	if strings.Contains(full, "no MSI or EXE installer") {
+		kind = "MSI or EXE"
+	}
 	if _, rest, ok := strings.Cut(full, "(only "); ok {
 		if only, _, ok := strings.Cut(rest, ")"); ok {
-			return fmt.Sprintf("no MSI installer for %s in winget (only %s)", arch, only)
+			return fmt.Sprintf("no %s installer for %s in winget (only %s)", kind, arch, only)
 		}
 	}
-	if strings.Contains(full, "no MSI installer") {
-		return fmt.Sprintf("no MSI installer for %s in winget", arch)
+	if strings.Contains(full, "no MSI") {
+		return fmt.Sprintf("no %s installer for %s in winget", kind, arch)
 	}
 	return fmt.Sprintf("no installer for %s in winget", arch)
 }

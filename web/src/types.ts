@@ -22,7 +22,21 @@ export type Bundle = {
 };
 
 export type PackageState = "quarantined" | "approved" | "rejected" | "revoked";
-export type PackageKind = "msu" | "msi" | "deb" | "rpm" | "pkg" | "agent";
+export type PackageKind = "msu" | "msi" | "deb" | "rpm" | "pkg" | "agent"
+  | "exe"; // EXE contract: signed vendor EXE installer (Inno Setup / Nullsoft / WiX Burn / plain EXE)
+/** EXE contract: installer technology of an exe-kind package (winget InstallerType). */
+export type ExeInstallerType = "exe" | "inno" | "nullsoft" | "burn";
+/** EXE contract: manifest.ExeInstall (present only on kind "exe"). */
+export type ExeInstall = {
+  installer_type: ExeInstallerType;
+  silent_args: string[]; // argv, no shell
+  success_codes: number[]; // always includes 0; 3010 / 1641 = installed, restart needed
+  busy_codes?: number[]; // "installer busy / package in use": retried later
+  signer: string; // Authenticode subject CN that pmctl verified
+  detect: { display_name: string; display_version?: string; product_code?: string; publisher?: string };
+  uninstall: { quiet_uninstall: boolean }; // false = rollback not supported
+  scope: "machine";
+};
 export type Approval = { by: string; reason: string; at: string };
 export type Package = {
   package_id: string; bundle_id: string; title: string; vendor: string;
@@ -38,6 +52,8 @@ export type Package = {
   package_name: string; prerequisites: string[]; superseded_by: string;
   // v1.2: why a rollback deployment is impossible ("" = supported: msu, msi, deb, rpm)
   rollback_unsupported: string;
+  // EXE contract (assumed server field: store.Package gains `exe` from the manifest, omitted for other kinds)
+  exe?: ExeInstall | null;
 };
 
 export type EndpointStatus = "compliant" | "noncompliant" | "pending_reboot" | "failed" | "exception" | "stale" | "offline" | "retired"
@@ -249,6 +265,8 @@ export type OSUpdate = {
 export type AppUpdate = {
   app_id: string; name: string; installed_name: string; installed_version: string; latest_version: string;
   matched_by: "product_code" | "name"; product_code?: string; catalog: CatalogLink | null;
+  /** EXE contract (assumed server fields, same values as the Library): "no" = Import is not offered. */
+  importable?: Importable; importable_reason?: string;
 };
 export type EndpointUpdates = { intel: IntelSummary | null; os: OSUpdate[]; apps: AppUpdate[]; current: number; unmatched: number };
 export type AcquisitionRequest = {
@@ -263,6 +281,8 @@ export type FleetUpdates = {
   intel: IntelSummary | null;
   updates: { kind: "os" | "app"; key: string; name: string; latest: string; catalog: CatalogLink | null;
     requested?: AcquisitionRequestRef | null; // latest export listing it
+    /** EXE contract (assumed server fields, same values as the Library): "no" = Import is not offered. */
+    importable?: Importable; importable_reason?: string;
     endpoints: { endpoint_id: string; hostname: string; installed: string }[] }[];
 };
 
@@ -306,6 +326,8 @@ export type FleetStatusRow = {
   kind: "os" | "app"; key: string; name: string; latest: string;
   catalog: CatalogLink | null;
   requested: AcquisitionRequestRef | null;
+  /** EXE contract (assumed server fields, same values as the Library): "no" = Import is not offered. */
+  importable?: Importable; importable_reason?: string;
   up_to_date: number; outdated: number; being_patched: number; verified: number; failed: number; exception: number;
   endpoints: FleetStatusEndpoint[];
 };

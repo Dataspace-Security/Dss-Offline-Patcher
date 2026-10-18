@@ -481,7 +481,7 @@ func checkSource(s Source) []string {
 				out = append(out, "product_code applies to msi only")
 			}
 		case "exe":
-			out = append(out, "kind exe is not supported: DSS Patcher installs MSI and MSU packages only")
+			out = append(out, "kind exe is not supported for vendor URL sources: EXE installers are imported from winget, whose manifest supplies the silent switches and detection data")
 		default:
 			out = append(out, "kind: msi or msu")
 		}

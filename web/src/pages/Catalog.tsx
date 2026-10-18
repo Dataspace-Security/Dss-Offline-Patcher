@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { api, enc, qs } from "../api";
 import { paths } from "../paths";
 import { useCan, useMe } from "../auth";
+import { ExeDetails, KindTag, rollbackBlocker } from "../components/exeParts";
 import { LifecycleTimeline } from "../components/LifecycleTimeline";
 import { FleetLine, PatchThis } from "../components/PatchThis";
 import { approvedBy, fetchFleet, fetchPolicy, isAgentPackage } from "../components/patchPlan";
@@ -123,7 +124,7 @@ export default function Catalog({ agents = false }: { agents?: boolean }) {
                     </td>
                     <td><Mono>{p.kb || p.product_code || "—"}</Mono></td>
                     <td><Severity s={p.severity} /></td>
-                    <td><span className="tag">{p.kind}</span></td>
+                    <td><KindTag p={p} /></td>
                     {!packageId && <td className="nowrap">{fmtBytes(p.size)}</td>}
                     <td>
                       <Pill state={p.state} />
@@ -230,8 +231,8 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
                 Patch this…
               </button>
             )}
-            {(p.state === "approved" || p.state === "revoked") && canDeploy && (p.rollback_unsupported
-              ? <button className="btn" disabled title={p.rollback_unsupported}>Rollback not supported</button>
+            {(p.state === "approved" || p.state === "revoked") && canDeploy && (rollbackBlocker(p)
+              ? <button className="btn" disabled title={`Rollback: ${rollbackBlocker(p)}`}>Rollback not supported</button>
               : <button className="btn btn-danger-ghost" title="Agents uninstall this package, stage by stage"
                   onClick={() => navigate(`/deployments/new?operation=rollback&package_id=${enc(p.package_id)}`)}>Roll back…</button>)}
             {p.state === "approved" && canRevoke && (
@@ -300,8 +301,8 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
           <KV rows={[
             ["Needed by", need ? (need.needed ? <><b>{need.needed}</b> endpoint{need.needed === 1 ? "" : "s"}: {need.hostnames.slice(0, 20).join(", ")}{need.hostnames.length > 20 ? " …" : ""}</> : "no endpoint needs it (up to date, not installed, or not applicable)") : "…"],
             ["Vendor", p.vendor],
-            ["Kind", <span className="tag">{p.kind}</span>],
-            ["Rollback", p.rollback_unsupported ? <span className="text-amber">not supported — {p.rollback_unsupported}</span> : "supported (uninstall via rollback deployment)"],
+            ["Kind", <KindTag p={p} />],
+            ["Rollback", rollbackBlocker(p) ? <span className="text-amber">Rollback: {rollbackBlocker(p)}</span> : "supported (uninstall via rollback deployment)"],
             ["Package name", p.package_name ? <Mono>{p.package_name}</Mono> : ""],
             ["Version", p.version],
             ["KB", p.kb],
@@ -313,6 +314,7 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
             ["Prerequisites", (p.prerequisites ?? []).length ? p.prerequisites.map((s) => <Mono key={s}>{s}</Mono>) : ""],
             ["Bundle", <Link to={paths.imports}><Mono>{p.bundle_id}</Mono></Link>],
           ]} />
+          <ExeDetails p={p} />
           <h3>Applicability</h3>
           <KV rows={[
             ["OS", p.applicability?.os],

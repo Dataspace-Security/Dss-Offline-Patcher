@@ -37,8 +37,11 @@ type SpecEntry struct {
 	// endpoint reports once installed (manifest.Package.ExpectedUBR).
 	ExpectedUBR   int                    `json:"expected_ubr,omitempty"`
 	Applicability manifest.Applicability `json:"applicability"`
-	SourceURL     string                 `json:"source_url"`
-	Path          string                 `json:"path"`
+	// Exe: how the agent runs an EXE installer (kind exe only). pmctl build
+	// verifies the payload's Authenticode signer against Exe.Signer again.
+	Exe       *manifest.ExeInstall `json:"exe,omitempty"`
+	SourceURL string               `json:"source_url"`
+	Path      string               `json:"path"`
 	// Acquired records provenance for the operator; `pmctl build` ignores it.
 	Acquired *Provenance `json:"acquired,omitempty"`
 }
@@ -86,6 +89,7 @@ func ValidateEntry(e SpecEntry, size int64, sha256hex string) error {
 			Prerequisites:   e.Prerequisites,
 			ExpectedUBR:     e.ExpectedUBR,
 			Applicability:   e.Applicability,
+			Exe:             e.Exe,
 			File:            manifest.FileRef{Name: "payload/" + filepath.Base(filepath.FromSlash(e.Path)), Size: size, SHA256: sha256hex},
 			SourceURL:       e.SourceURL,
 			VendorSignature: manifest.VendorSignature{Status: "not_checked"},
@@ -230,7 +234,7 @@ func kindFromName(name string) (string, error) {
 	case ".pkg":
 		return "pkg", nil
 	}
-	return "", fmt.Errorf("%s: cannot infer kind from extension; pass -kind (msu|msi|deb|rpm|pkg|agent)", name)
+	return "", fmt.Errorf("%s: cannot infer kind from extension; pass -kind (msu|msi|exe|deb|rpm|pkg|agent)", name)
 }
 
 // osForKind maps a package kind to applicability.os (agent: caller decides).

@@ -32,7 +32,7 @@ import (
 )
 
 // Version is set at build time: -ldflags "-X offpatch/internal/agent.Version=1.2.3".
-var Version = "0.1.0"
+var Version = "0.9.0"
 
 // State is persisted in <state-dir>/agent.json (0600).
 type State struct {
@@ -757,7 +757,8 @@ func (a *Agent) process(ctx context.Context, as store.Assignment, f Facts, inv [
 		if (pkg.KB != "" && it.Kind == "kb" && strings.EqualFold(it.ID, pkg.KB)) ||
 			(pkg.ProductCode != "" && it.Kind == "product" && strings.EqualFold(it.ID, pkg.ProductCode) &&
 				(pkg.Version == "" || it.Version == "" || store.VersionAtLeast(it.Version, pkg.Version))) ||
-			(pkg.PackageName != "" && (it.Kind == "pkg" || (it.Kind == "app" && pkg.Kind == "pkg")) && it.ID == pkg.PackageName && store.VersionAtLeast(it.Version, pkg.Version)) {
+			(pkg.PackageName != "" && (it.Kind == "pkg" || (it.Kind == "app" && pkg.Kind == "pkg")) && it.ID == pkg.PackageName && store.VersionAtLeast(it.Version, pkg.Version)) ||
+			(pkg.Kind == manifest.KindExe && exeUpToDate(pkg, it)) {
 			a.report(ctx, as, "installed", 0, "already present in local inventory")
 			return
 		}
@@ -824,10 +825,14 @@ func (a *Agent) rollback(ctx context.Context, as store.Assignment, pkg manifest.
 		a.report(ctx, as, "failed", -1, "rollback is not supported on platform "+a.plat.Name())
 		return
 	}
+	if !pkg.RollbackSupported() {
+		a.report(ctx, as, "failed", -1, exeRollbackUnsupported)
+		return
+	}
 	present := false
 	for _, it := range inv {
 		if (pkg.KB != "" && it.Kind == "kb" && strings.EqualFold(it.ID, pkg.KB)) || (pkg.ProductCode != "" && it.Kind == "product" && strings.EqualFold(it.ID, pkg.ProductCode)) ||
-			(pkg.PackageName != "" && it.Kind == "pkg" && it.ID == pkg.PackageName) {
+			(pkg.PackageName != "" && it.Kind == "pkg" && it.ID == pkg.PackageName) || (pkg.Kind == manifest.KindExe && exeAppMatch(pkg, it)) {
 			present = true
 		}
 	}

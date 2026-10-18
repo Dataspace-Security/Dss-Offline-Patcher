@@ -108,7 +108,8 @@ func TestResolveLibrary(t *testing.T) {
 	// Next run: cached entries are reused, the rest looked up; a missing
 	// manifest is a warning and stays unresolved (retried later).
 	res = resolveLibrary(context.Background(), srv.Client(), base, apps, ids, res.cache, 300, now)
-	if res.lookedUp != 2 || res.deferred != 0 || len(res.resolved) != 3 || res.importable != 2 {
+	// VS Code's machine-wide Inno installer is importable (kind exe).
+	if res.lookedUp != 2 || res.deferred != 0 || len(res.resolved) != 3 || res.importable != 3 {
 		t.Fatalf("run 2: looked %d deferred %d resolved %+v", res.lookedUp, res.deferred, res.resolved)
 	}
 	if !strings.Contains(strings.Join(res.warnings, "\n"), "Contoso.NoManifest 1.0 (common): no winget manifest yet") {
@@ -123,7 +124,7 @@ func TestResolveLibrary(t *testing.T) {
 	if edge.Publisher != "Microsoft Corporation" || edge.Homepage != "https://www.microsoft.com/en-us/edge" || len(edge.Installers) != 3 || edge.ResolvedAt != "2026-10-18T07:00:00Z" {
 		t.Errorf("edge: %+v", edge)
 	}
-	if s := res.summary(); !strings.Contains(s, "3 packages (2 importable)") {
+	if s := res.summary(); !strings.Contains(s, "3 packages (3 importable)") {
 		t.Errorf("summary: %s", s)
 	}
 }

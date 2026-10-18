@@ -526,10 +526,13 @@ and the Windows cumulative updates per build), not only what the fleet is missin
 never opens a link and never installs anything from the Library; links are shown as text
 (https only).
 
-- **Available** (default) shows what offpatch can import (an MSI installer: *Importable: yes*) or
-  what is installed in the fleet. *Importable: no* says why (for example "EXE installer only
-  (nullsoft)"); *unknown* means the acquisition zone has not looked the app up yet (it does so
-  for configured, requested and about 200 common enterprise apps).
+- **Available** (default) shows what offpatch can import (*Importable: yes*: an MSI installer, or
+  an EXE installer that installs per machine and has a documented silent switch) or what is
+  installed in the fleet. *Importable: no* says why (for example "installs per user only" or
+  "EXE installer without a documented silent switch"); *unknown* means the acquisition zone has
+  not looked the app up yet (it does so for configured, requested and about 200 common
+  enterprise apps). Patches → Needed shows the same verdict: "Can't import: <reason>" replaces
+  the Import button, and the server refuses such a request.
 - **Import** creates an acquisition request (§3.9). For an app that no machine has installed,
   pick the architecture (default x64). What arrives is a signed bundle in **quarantine**, to be
   reviewed and approved like any other package.
@@ -559,6 +562,30 @@ shows under Status as **Refused**; the previous version stays in force.
 
 Nothing here weakens the checks: every file is still verified by its hash or signature and
 arrives in quarantine for approval. See docs/08-acquisition.md "Auto-download policy".
+
+### 3.12 EXE packages (WebView2, VC++ runtimes, Git, ...)
+
+Apps that winget publishes only as EXE installers (plain exe, Inno Setup, NSIS, WiX Burn) are
+imported as packages of **kind EXE** when they install per machine and have a documented silent
+switch. The acquisition zone checks the download against the winget SHA-256 and verifies its
+**Authenticode signature** (on Linux too); the verified signer is recorded in the package.
+
+- **Review before approving.** The package detail shows the installer type, the **signer**
+  (e.g. "Microsoft Corporation"), the silent arguments, how the installed app is detected (Apps &
+  features name, ARP key, version) and whether rollback is supported. Approve only if the signer
+  is the vendor you expect.
+- **Agent 0.9.0 or later.** Older agents cannot run EXE packages: their targets show
+  *not applicable — agent too old for EXE packages: upgrade the agent to 0.9.0 or later*, and they
+  are never offered the package. Upgrade the agent (§5); the targets then come back into scope by
+  themselves.
+- **Rollback** is available only for installers that register a silent uninstall (Burn bundles
+  such as the VC++ runtimes, Inno Setup); otherwise the console says "rollback not supported for
+  this installer (no silent uninstall)". To undo such an install, remove the app by hand or deploy
+  the previous version.
+- **Signature failures on the endpoint** ("signature check failed: … — possible tampering") raise
+  the critical *manifest verification failed* alert: treat them like a tampered bundle (§8.1).
+- EXE packages always arrive in bundles of their own, so endpoints with older agents keep
+  receiving every other update.
 
 ## 4. Monthly Patch Tuesday workflow (end to end)
 

@@ -5,7 +5,8 @@ import { useCan } from "../auth";
 import { RequestedPill } from "../components/AcqRequestStatus";
 import { FleetBar, StatusCounts, UpdateEndpoints, needsAction, type FleetEndpointStatus } from "../components/fleetStatusParts";
 import { PatchThis } from "../components/PatchThis";
-import { PipelineAction, isRequestable } from "../components/PipelineAction";
+import { CantImport, PipelineAction, isRequestable } from "../components/PipelineAction";
+import { cantImportReason, importInfoOf, useLibraryImportability, type ImportInfo } from "../components/importability";
 import { RequestResultBanner } from "../components/RequestResultBanner";
 import { useImportRequest } from "../components/useImportRequest";
 import { fetchFleet } from "../components/patchPlan";
@@ -23,8 +24,38 @@ type NeededEndpoint = FleetUpdates["updates"][number]["endpoints"][number];
 
 const POLL_MS = 60000;
 const NAMES_SHOWN = 5;
-const rowKey = (r: { kind: string; key: string }) => `${r.kind}:${r.key}`;
+const rowKey = (r: { kind: string; key: string }) => `${r.kind}:${r.key.toLowerCase()}`;
 const BULK = "__bulk__";
+
+/** One endpoint per endpoint_id (an app with two Apps & features entries reports the machine twice). */
+function uniqueEndpoints<T extends { endpoint_id: string }>(list: T[]): T[] {
+  const seen = new Set<string>();
+  return list.filter((e) => (seen.has(e.endpoint_id) ? false : (seen.add(e.endpoint_id), true)));
+}
+
+/**
+ * One row per update: rows for the same app id (or KB) and version are
+ * merged, counts added and machines listed once.
+ */
+function groupRows(rows: FleetStatusRow[]): FleetStatusRow[] {
+  const by = new Map<string, FleetStatusRow>();
+  for (const r of rows) {
+    const k = `${rowKey(r)}@${r.latest}`;
+    const prev = by.get(k);
+    if (!prev) { by.set(k, r); continue; }
+    by.set(k, {
+      ...prev,
+      name: prev.name || r.name,
+      catalog: prev.catalog ?? r.catalog,
+      requested: !prev.requested ? r.requested : !r.requested ? prev.requested : prev.requested.at >= r.requested.at ? prev.requested : r.requested,
+      importable: prev.importable ?? r.importable, importable_reason: prev.importable_reason ?? r.importable_reason,
+      up_to_date: prev.up_to_date + r.up_to_date, outdated: prev.outdated + r.outdated, being_patched: prev.being_patched + r.being_patched,
+      verified: prev.verified + r.verified, failed: prev.failed + r.failed, exception: prev.exception + r.exception,
+      endpoints: uniqueEndpoints([...(prev.endpoints ?? []), ...(r.endpoints ?? [])]),
+    });
+  }
+  return [...by.values()];
+}
 
 /**
  * Patches → Needed: every Windows update and application across the fleet
@@ -54,16 +85,20 @@ export default function PatchUpdates() {
   const [patching, setPatching] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
-  const allRows = status.data?.rows ?? [];
+  const allRows = useMemo(() => groupRows(status.data?.rows ?? []), [status.data]);
+  // What the Library knows about importing each app (super admin; others rely on the row fields).
+  const library = useLibraryImportability(isSuper);
+  const infoOf = (r: FleetStatusRow): ImportInfo => importInfoOf(r, library);
+  const requestable = (r: FleetStatusRow) => isRequestable(r.catalog, r.requested, infoOf(r));
   const intel = status.data?.intel ?? null;
   // Endpoints that still need each update (names for the list).
   const neededBy = useMemo(() => {
     const m = new Map<string, NeededEndpoint[]>();
-    for (const u of needed.data?.updates ?? []) m.set(rowKey(u), u.endpoints ?? []);
+    for (const u of needed.data?.updates ?? []) m.set(rowKey(u), uniqueEndpoints([...(m.get(rowKey(u)) ?? []), ...(u.endpoints ?? [])]));
     return m;
   }, [needed.data]);
   const namesOf = (r: FleetStatusRow): NeededEndpoint[] => {
-    const inline = (r.endpoints ?? []).filter((e) => e.status === "outdated" || e.status === "failed");
+    const inline = uniqueEndpoints((r.endpoints ?? []).filter((e) => e.status === "outdated" || e.status === "failed"));
     return inline.length ? inline : neededBy.get(rowKey(r)) ?? [];
   };
 
@@ -80,9 +115,9 @@ export default function PatchUpdates() {
   const actionCount = allRows.filter(needsAction).length;
 
   // Updates not in the catalog yet (or whose package was rejected) can
-  // be imported; the selection follows the current data.
-  const chosen = allRows.filter((r) => isRequestable(r.catalog, r.requested) && selected.has(rowKey(r)));
-  const visibleRequestable = rows.filter((r) => isRequestable(r.catalog, r.requested));
+  // be imported, unless the Library says they cannot; the selection follows the current data.
+  const chosen = allRows.filter((r) => requestable(r) && selected.has(rowKey(r)));
+  const visibleRequestable = rows.filter(requestable);
   const allOn = visibleRequestable.length > 0 && visibleRequestable.every((r) => selected.has(rowKey(r)));
   const toggleOne = (r: FleetStatusRow) => {
     const n = new Set(selected);
@@ -181,7 +216,7 @@ export default function PatchUpdates() {
               {canRequest && (
                 <th style={{ width: 28 }}>
                   <input type="checkbox" className="rowcheck" checked={allOn} disabled={visibleRequestable.length === 0} onChange={toggleAll}
-                         aria-label="Select all importable updates" title="Select every update shown that can be imported (not in the catalog yet, or rejected)" />
+                         aria-label="Select all importable updates" title="Select every update shown that can be imported (not in the catalog yet, or rejected); updates that can't be imported are left out" />
                 </th>
               )}
               <th>Update / application</th><th>Endpoints</th><th>Catalog</th><th style={{ width: 120 }}>Fleet</th><th className="right">Next step</th>
@@ -194,10 +229,10 @@ export default function PatchUpdates() {
               const names = namesOf(r);
               return (
                 <Fragment key={key}>
-                  <tr {...expandRowProps(isOpen, () => toggleOpen(key, ""), isRequestable(r.catalog, r.requested) && selected.has(key) ? "selected" : "")}>
+                  <tr {...expandRowProps(isOpen, () => toggleOpen(key, ""), requestable(r) && selected.has(key) ? "selected" : "")}>
                     {canRequest && (
                       <td onClick={(e) => e.stopPropagation()}>
-                        {isRequestable(r.catalog, r.requested) && (
+                        {requestable(r) && (
                           <input type="checkbox" className="rowcheck" checked={selected.has(key)} onChange={() => toggleOne(r)} aria-label={`Import ${r.name || r.key}`} />
                         )}
                       </td>
@@ -222,16 +257,17 @@ export default function PatchUpdates() {
                     <td onClick={(e) => e.stopPropagation()}>
                       <div className="fs-catalog">
                         <CatalogState link={r.catalog} />
-                        {r.requested && r.catalog && <div><RequestedPill r={r.requested} /></div>}
-                      </div>
+                        {r.requested && r.catalog && <div><RequestedPill r={r.requested} /></div>}                      </div>
                     </td>
                     <td><FleetBar r={r} /></td>
                     <td className="right" onClick={(e) => e.stopPropagation()}>
                       {needsAction(r) || r.catalog
                         ? <PipelineAction link={r.catalog} requested={r.requested} fleet={r.catalog ? fleet.data?.[r.catalog.package_id] : undefined}
-                                          onPatch={setPatching}
-                                          onRequest={isRequestable(r.catalog, r.requested) ? () => void sendRequest([r], key) : undefined}
+                                          onPatch={setPatching} importInfo={infoOf(r)}
+                                          onRequest={requestable(r) ? () => void sendRequest([r], key) : undefined}
                                           requesting={busy === key} disabled={busy !== null} />
+                        : !r.catalog && cantImportReason(infoOf(r), r.requested) !== null
+                        ? <CantImport reason={cantImportReason(infoOf(r), r.requested)!} />
                         : <span className="muted small">nothing to do</span>}
                     </td>
                   </tr>

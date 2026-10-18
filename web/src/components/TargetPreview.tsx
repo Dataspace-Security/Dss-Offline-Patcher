@@ -6,6 +6,7 @@ import { useLoad } from "../util";
 import { stageIndexFor } from "./patchPlan";
 import { Pill } from "./ui";
 import { stageLabel } from "./deployLabels";
+import { isExePackage } from "./exeParts";
 
 type RingDraft = { name: string; groups: string };
 
@@ -20,8 +21,24 @@ const split = (s: string) => s.split(",").map((g) => g.trim()).filter(Boolean);
 // server also skips when it assigns targets — hence "unless an exception
 // covers it" in the wording.
 
+/** First agent release that runs EXE packages (manifest.MinAgentVersionExe). */
+const MIN_AGENT_EXE = "0.9.0";
+
+/** a < b for dotted versions ("0.6.5" < "0.9.0"); unknown versions are not "older". */
+function olderVersion(a: string, b: string): boolean {
+  const pa = a.replace(/^v/i, "").split(/[.+-]/).map((x) => parseInt(x, 10));
+  const pb = b.split(".").map((x) => parseInt(x, 10));
+  if (!a || Number.isNaN(pa[0])) return false;
+  for (let i = 0; i < pb.length; i++) {
+    const x = Number.isNaN(pa[i] ?? NaN) ? 0 : pa[i];
+    if (x !== pb[i]) return x < pb[i];
+  }
+  return false;
+}
+
 function notApplicable(p: Package, e: Endpoint): string | null {
   const a = p.applicability;
+  if (isExePackage(p) && olderVersion(e.agent_version ?? "", MIN_AGENT_EXE)) return `agent ${e.agent_version} too old for EXE packages (upgrade the agent to ${MIN_AGENT_EXE} or later)`;
   if (a.os && e.os && a.os.toLowerCase() !== e.os.toLowerCase()) return `${e.os} endpoint, ${a.os} package`;
   if (a.arch && a.arch !== "any" && a.arch !== e.arch) return `arch ${e.arch} ≠ ${a.arch}`;
   if (a.min_build > 0 && e.build < a.min_build) return `build ${e.build} < ${a.min_build}`;
@@ -85,17 +102,14 @@ export function TargetPreview({ pkg, rings, endpoints, fleet: fleetProp, onSumma
   }, [sTargeted, sWill, sUnknown]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => () => onSummary?.(null), []); // eslint-disable-line react-hooks/exhaustive-deps
   if (!view) return null;
-  const { targeted, willInstall, skipped, unknown, missed, allGroups } = view;
-
-  return (
-    <PreviewBody pkg={pkg} rings={rings} targeted={targeted} willInstall={willInstall} skipped={skipped}
-                 unknown={unknown} missed={missed} allGroups={allGroups} />
-  );
+  return <PreviewBody pkg={pkg} rings={rings} {...view} />;
 }
 
 type PreviewRow = { e: Endpoint; ring: number; na: string | null; outcome: Outcome };
 type PreviewView = {
   targeted: PreviewRow[]; willInstall: number; skipped: number; unknown: number; missed: PreviewRow[]; allGroups: string[];
+  /** Lower-cased host names used by more than one endpoint id. */
+  dupNames: Set<string>;
 };
 
 function buildView(pkg: Package | undefined, rings: RingDraft[], eps: Endpoint[], fleetData: Record<string, PackageFleet> | null | undefined): PreviewView {
@@ -105,7 +119,9 @@ function buildView(pkg: Package | undefined, rings: RingDraft[], eps: Endpoint[]
   const notInstalled = new Set(pf?.not_installed_ids ?? []);
   const stageGroups = rings.map((r) => ({ groups: split(r.groups) }));
 
-  const active = eps.filter((e) => e.status !== "retired");
+  // One row per endpoint id (a list that names a machine twice must not count it twice).
+  const seen = new Set<string>();
+  const active = eps.filter((e) => e.status !== "retired" && !seen.has(e.endpoint_id) && (seen.add(e.endpoint_id), true));
   const rows = active.map((e) => {
     const ring = stageIndexFor(stageGroups, e);
     const na = pkg && ring >= 0 ? notApplicable(pkg, e) : null;
@@ -123,10 +139,27 @@ function buildView(pkg: Package | undefined, rings: RingDraft[], eps: Endpoint[]
   const unknown = count(["unknown"]);
   const missed = rows.filter((r) => r.ring < 0);
   const allGroups = Array.from(new Set(active.flatMap((e) => e.groups ?? []))).sort();
-  return { targeted, willInstall, skipped, unknown, missed, allGroups };
+  const byName = new Map<string, number>();
+  for (const e of active) byName.set(e.hostname.toLowerCase(), (byName.get(e.hostname.toLowerCase()) ?? 0) + 1);
+  const dupNames = new Set([...byName].filter(([, n]) => n > 1).map(([h]) => h));
+  return { targeted, willInstall, skipped, unknown, missed, allGroups, dupNames };
 }
 
-function PreviewBody({ pkg, rings, targeted, willInstall, skipped, unknown, missed, allGroups }:
+const SHORT_ID = 8;
+
+/** Host name; two different machines with the same name also show their short id and a "duplicate name" badge. */
+function MachineName({ e, dup, link = true }: { e: Endpoint; dup: boolean; link?: boolean }) {
+  const name = link ? <Link to={`/endpoints/${enc(e.endpoint_id)}`}>{e.hostname}</Link> : <>{e.hostname}</>;
+  if (!dup) return name;
+  return (
+    <>
+      {name} <code className="mono muted" title={e.endpoint_id}>{e.endpoint_id.slice(0, SHORT_ID)}</code>{" "}
+      <span className="tag text-amber" title="Two enrolled machines report this host name; they are different endpoints">duplicate name</span>
+    </>
+  );
+}
+
+function PreviewBody({ pkg, rings, targeted, willInstall, skipped, unknown, missed, allGroups, dupNames }:
   PreviewView & { pkg: Package | undefined; rings: RingDraft[] }) {
   return (
     <fieldset className="fieldset target-preview">
@@ -147,13 +180,14 @@ function PreviewBody({ pkg, rings, targeted, willInstall, skipped, unknown, miss
         </div>
       )}
       {targeted.length > 0 && (
+        <div className="table-scroll">
         <table className="table table-compact">
           <thead><tr><th>Stage</th><th>Machine</th><th>Groups</th><th>Installed now</th><th>What happens</th></tr></thead>
           <tbody>
             {[...targeted].sort((a, b) => a.ring - b.ring || a.e.hostname.localeCompare(b.e.hostname)).map(({ e, ring, na, outcome }) => (
               <tr key={e.endpoint_id}>
                 <td className="nowrap">{stageLabel(rings[ring]?.name, ring)}</td>
-                <td><Link to={`/endpoints/${enc(e.endpoint_id)}`}>{e.hostname}</Link> {e.status === "offline" || e.status === "stale" ? <span className="muted">({e.status})</span> : null}</td>
+                <td><MachineName e={e} dup={dupNames.has(e.hostname.toLowerCase())} /> {e.status === "offline" || e.status === "stale" ? <span className="muted">({e.status})</span> : null}</td>
                 <td>{(e.groups ?? []).map((g) => <span key={g} className="tag">{g}</span>)}</td>
                 <td className="muted">{e.os_version || e.os}</td>
                 <td><Pill state={OUTCOME[outcome].state} label={na ? `not applicable: ${na}` : OUTCOME[outcome].label} /></td>
@@ -161,13 +195,14 @@ function PreviewBody({ pkg, rings, targeted, willInstall, skipped, unknown, miss
             ))}
           </tbody>
         </table>
+        </div>
       )}
       {missed.length > 0 && (
         <details>
           <summary className="muted">{missed.length} machine{missed.length === 1 ? " is" : "s are"} not in any stage (not touched)</summary>
           <ul className="plain">
             {missed.map(({ e }) => (
-              <li key={e.endpoint_id}>{e.hostname} <span className="muted">({e.os})</span> — groups {(e.groups ?? []).map((g) => <span key={g} className="tag">{g}</span>)}</li>
+              <li key={e.endpoint_id}><MachineName e={e} dup={dupNames.has(e.hostname.toLowerCase())} link={false} /> <span className="muted">({e.os})</span> — groups {(e.groups ?? []).map((g) => <span key={g} className="tag">{g}</span>)}</li>
             ))}
           </ul>
         </details>

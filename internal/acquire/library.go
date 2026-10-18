@@ -23,6 +23,7 @@ import (
 // defaultLocale manifest, or a singleton manifest).
 type WingetLocale struct {
 	Publisher        string
+	PackageName      string // the product name, e.g. "Microsoft Edge WebView2 Runtime"
 	PublisherURL     string
 	PackageURL       string // the product's home page
 	License          string
@@ -78,7 +79,7 @@ func FetchWingetLocale(ctx context.Context, hc *http.Client, base, id, version s
 	if !strings.EqualFold(fields["PackageIdentifier"], id) {
 		return nil, fmt.Errorf("winget locale manifest is for %q, not %s", fields["PackageIdentifier"], id)
 	}
-	return &WingetLocale{Publisher: fields["Publisher"], PublisherURL: fields["PublisherUrl"], PackageURL: fields["PackageUrl"],
+	return &WingetLocale{Publisher: fields["Publisher"], PackageName: fields["PackageName"], PublisherURL: fields["PublisherUrl"], PackageURL: fields["PackageUrl"],
 		License: fields["License"], ShortDescription: fields["ShortDescription"], Description: fields["Description"]}, nil
 }
 
@@ -144,6 +145,11 @@ func ResolveWinget(ctx context.Context, hc *http.Client, base, id, version strin
 		if hex64Re.MatchString(in.SHA256) {
 			ri.SHA256 = in.SHA256
 		}
+		if in.IsEXE() {
+			// Plain "exe" needs the manifest's silent switch (the others have
+			// documented defaults); the flag is only sent where it matters.
+			ri.Silent = in.InstallerType == "exe" && in.Switches.Silent != ""
+		}
 		if msiTypes[ri.Type] {
 			if ri.SHA256 == "" {
 				continue
@@ -194,32 +200,12 @@ func libText(s string, max int) string {
 }
 
 // LibraryImportable applies the Library's import rule to a resolved
-// package, the same rule the server shows: "yes" if an MSI-type installer
-// (msi, wix) exists for one of arches (any architecture when arches is
-// empty: nothing installed yet), matched like PickMSI does when fetching
-// (a neutral MSI fits x64 and x86, a 32-bit MSI fits x64). pmctl reads a
-// missing ProductCode from the MSI itself (internal/msi), so the manifest
-// need not state it. Otherwise "no" with the reason.
+// package: exactly intel.Importable (the rule the server shows), with the
+// MSI ProductCode readable from the file (pmctl reads it with
+// internal/msi). arches empty means any architecture (nothing installed
+// yet). It returns "yes"/"no" and the reason.
 func LibraryImportable(r intel.Resolved, arches []string) (string, string) {
-	var other []string
-	for _, in := range r.Installers {
-		if len(arches) > 0 && !archFits(in.Arch, arches, msiTypes[in.Type]) {
-			continue
-		}
-		if msiTypes[in.Type] {
-			return "yes", ""
-		}
-		other = append(other, in.Type)
-	}
-	switch {
-	case len(other) > 0 && allEXE(other):
-		return "no", "EXE installer only (" + strings.Join(dedupeUnsorted(other), ", ") + ")"
-	case len(other) > 0:
-		return "no", "no MSI installer (only " + strings.Join(dedupeUnsorted(other), ", ") + ")"
-	case len(arches) > 0:
-		return "no", "no installer for " + strings.Join(arches, ", ")
-	}
-	return "no", "no installer pmctl can fetch"
+	return intel.Importable(&r, arches, true)
 }
 
 func archFits(arch string, want []string, isMSI bool) bool {
@@ -230,34 +216,4 @@ func archFits(arch string, want []string, isMSI bool) bool {
 		}
 	}
 	return false
-}
-
-func allEXE(types []string) bool {
-	for _, t := range types {
-		switch t {
-		case "exe", "inno", "nullsoft", "burn":
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-func containsFold(list []string, s string) bool {
-	for _, x := range list {
-		if strings.EqualFold(x, s) {
-			return true
-		}
-	}
-	return false
-}
-
-func dedupeUnsorted(in []string) []string {
-	var out []string
-	for _, s := range in {
-		if !containsFold(out, s) {
-			out = append(out, s)
-		}
-	}
-	return out
 }

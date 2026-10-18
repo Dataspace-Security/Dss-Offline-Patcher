@@ -3,6 +3,7 @@ import { enc } from "../api";
 import { useCan } from "../auth";
 import { paths } from "../paths";
 import type { AcquisitionRequestRef, CatalogLink, PackageFleet } from "../types";
+import { cantImportReason, type ImportInfo } from "./importability";
 import { Pill, RelTime } from "./ui";
 import "../patch.css";
 
@@ -41,14 +42,19 @@ export function ImportProblem({ requested }: { requested: AcquisitionRequestRef 
   );
 }
 
+/** "Can't import: <reason>" for an update the Library or the downloader says cannot be imported. */
+export function CantImport({ reason }: { reason: string }) {
+  return <span className="text-red small" title="No acquisition request is sent for it">Can't import: {reason}</span>;
+}
+
 /**
  * True when an update can be imported: not in the catalog, or its package was
  * rejected (a fresh download gets a new review). Revoked packages stay
- * revoked, and an update the downloader reported it can never fetch is not
- * offered again.
+ * revoked, and an update the Library says is not importable (or the
+ * downloader reported it can never fetch) is not offered.
  */
-export function isRequestable(link: CatalogLink | null | undefined, requested?: AcquisitionRequestRef | null): boolean {
-  if (requested?.status === "unsupported") return false;
+export function isRequestable(link: CatalogLink | null | undefined, requested?: AcquisitionRequestRef | null, info?: ImportInfo | null): boolean {
+  if (cantImportReason(info, requested) !== null) return false;
   return !link || link.state === "rejected";
 }
 
@@ -66,6 +72,8 @@ type Props = {
   disabled?: boolean;
   /** An offpatch agent version: only the super admin (vendor) approves and deploys it. */
   agent?: boolean;
+  /** The Library's verdict; "no" shows "Can't import: <reason>" instead of Import / Ask again. */
+  importInfo?: ImportInfo | null;
 };
 
 function RequestButton({ label, title, onRequest, requesting, disabled }:
@@ -84,7 +92,7 @@ function RequestButton({ label, title, onRequest, requesting, disabled }:
  * quarantined → Review & approve (Users and Admins) or Awaiting approval;
  * approved → Patch this…; deploying → the deployment.
  */
-export function PipelineAction({ link, requested, fleet, onPatch, onRequest, requesting, disabled, agent = false }: Props) {
+export function PipelineAction({ link, requested, fleet, onPatch, onRequest, requesting, disabled, agent = false, importInfo }: Props) {
   const isUser = useCan("user");
   const isSuper = useCan("super_admin");
   const canApprove = agent ? isSuper : isUser;
@@ -92,6 +100,10 @@ export function PipelineAction({ link, requested, fleet, onPatch, onRequest, req
   const canRequest = !!onRequest && canDeploy;
   const unsupported = requested?.status === "unsupported";
   const failed = requested?.status === "failed";
+  const cant = cantImportReason(importInfo, requested);
+  if (!link && cant !== null) {
+    return <div className="row-action"><CantImport reason={cant} /></div>;
+  }
   if (!link) {
     return (
       <div className="row-action">
@@ -122,8 +134,8 @@ export function PipelineAction({ link, requested, fleet, onPatch, onRequest, req
     return (
       <div className="row-action">
         <Link to={paths.catalog(link.package_id)}><Pill state="rejected" /></Link>
-        {requested && requested.status !== "fulfilled" && <RequestedNote requested={requested} />}
-        {canRequest && !unsupported && (
+        {cant !== null ? <CantImport reason={cant} /> : requested && requested.status !== "fulfilled" && <RequestedNote requested={requested} />}
+        {canRequest && !unsupported && cant === null && (
           <RequestButton label={failed ? "Try again" : "Import again"} onRequest={onRequest!} requesting={requesting} disabled={disabled}
                          title="The previous package was rejected; import a fresh download for a new review" />
         )}

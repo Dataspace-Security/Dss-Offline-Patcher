@@ -259,13 +259,18 @@ Tested:
 Besides the newest version of every winget package (`apps`), update intelligence carries `resolved`: installer and description details for a chosen set of packages, so the console's **Library** can show what can be imported, and how, before anyone requests it. For each package pmctl reads the newest version's winget installer manifest and its defaultLocale manifest (`<id>.locale.en-US.yaml`, else the `DefaultLocale` the version manifest names) and records:
 
 - `publisher`, `homepage` (PackageUrl), `publisher_url`, `license`, `description` (ShortDescription). Community text: control characters dropped, length capped, https links only.
-- `installers`: every installer pmctl could fetch (`arch`, `type` msi/wix/exe/inno/nullsoft/burn/msix/zip/portable, `scope`, `url`, `sha256`, `product_code` for MSIs when the manifest states it). Installers without an https URL, and MSIs without a SHA-256, are left out: pmctl could not fetch them.
+- `installers`: every installer pmctl could fetch (`arch`, `type` msi/wix/exe/inno/nullsoft/burn/msix/zip/portable, `scope`, `url`, `sha256`, `product_code` for MSIs when the manifest states it, `silent: true` for a plain `exe` whose manifest documents `InstallerSwitches.Silent`). Installers without an https URL, and MSIs without a SHA-256, are left out: pmctl could not fetch them. (Update the isolated server before pmctl: servers without EXE support refuse an intelligence document that has the `silent` field.)
 
 **Which packages:** the configured ones (`intel.library` and the `winget_id` of `apps` entries), every app id an acquisition request ever asked for (kept in `state.json` `requested_apps`; on the first run also read from `<requests>/done/`), and a built-in list of 288 common enterprise packages (browsers, archivers, PDF readers, meeting clients, Java runtimes, Python, Git, PuTTY, WinSCP, KeePass, Wireshark, VS Code, Visual C++ runtimes, ...; `cmd/pmctl/library_common.go`). Ids missing from the winget index are skipped (a warning for configured and requested ones).
 
 **Cost:** each package version is looked up once: entries are cached by `id@version` in `state.json` (`library`; only the newest version of each id is kept). At most 300 new lookups happen per run (configured first, then requested, newest first, then the built-in list); the rest follow on the next runs. A failed lookup is a warning (at most 10 listed, then "+N more") and is retried next run; it never marks the intelligence feed failed. The feed shows e.g. `..., 212 in the library` and `library: 212 packages (131 importable), 37 looked up`.
 
-**Importable** (the rule the console shows; `acquire.LibraryImportable`): "yes" if there is an MSI-type installer (`msi`, `wix`) for the architecture needed (for an app nobody has installed yet: any architecture), matched as when fetching: a neutral MSI fits x64 and x86, a 32-bit MSI fits x64. The manifest need not state a product code; pmctl reads it from the MSI. Otherwise "no" with the reason, e.g. `EXE installer only (nullsoft)` or `no MSI installer (only msix)`. Not resolved yet: unknown.
+**Importable** (the rule the console shows; `intel.Importable`, which `acquire.LibraryImportable` and pmctl's installer choice `acquire.PickInstaller` apply too, so they always agree): "yes" if, for the architecture needed (for an app nobody has installed yet: any architecture),
+
+- there is an MSI-type installer (`msi`, `wix`), matched as when fetching: a neutral MSI fits x64 and x86, a 32-bit MSI fits x64. The manifest need not state a product code; pmctl reads it from the MSI. Reason `MSI installer (x64)`. An MSI wins over an EXE; or
+- there is an EXE installer (`exe`, `inno`, `nullsoft`, `burn`) for that architecture (or neutral, not arm64) with machine or unspecified scope, an https URL, a SHA-256 and a silent switch: the manifest's `InstallerSwitches.Silent`, or the type's documented default for inno, nullsoft and burn. Reason `EXE installer (inno)`. See [EXE installers](#exe-installers-kind-exe).
+
+Otherwise "no" with the reason: `installs per user only`, `EXE installer without a documented silent switch`, `EXE installer without a SHA-256 in the winget manifest`, `EXE installer URL is not HTTPS`, `no MSI or EXE installer (msix, zip)`, `no installer for arm64 (only x64)`, `MSI installer without a ProductCode`. Not resolved yet: unknown. The same verdict is on every row of `GET /api/updates` and `GET /api/fleet/status` and on each app of `GET /api/endpoints/{id}/updates` (`importable`, `importable_reason`); the console shows "Can't import: <reason>" instead of the Import button, and the server refuses a request for such an app (400 with the reason, no request created).
 
 `intel` keys in `acquire.json` (all optional):
 
@@ -312,7 +317,7 @@ The console's **Updates** page lists everything the fleet is missing according t
 3. **Fetch (acquisition zone).** The next `pmctl auto` run reads every `*.json` in that directory:
    - **Apps:** for each `winget_id` and each requested architecture (`x64`, `x86`, `arm64`, taken from the endpoints that have the app; for an app no endpoint has, the architecture the operator chose when importing it from the Library):
      - pmctl downloads the per-version installer manifest from the winget community repository (`manifests/<l>/<Publisher>/<Name>/<version>/<id>.installer.yaml`, falling back to the singleton `<id>.yaml`) over HTTPS.
-     - It picks the **MSI** installer for that architecture (`InstallerType` `msi` or `wix`; machine scope and a neutral or en-US locale preferred).
+     - It picks the **MSI** installer for that architecture (`InstallerType` `msi` or `wix`; machine scope and a neutral or en-US locale preferred). Without one it takes an **EXE** installer that passes the importable rule (`acquire.PickEXE`), which becomes a `kind: exe` package: see [EXE installers](#exe-installers-kind-exe).
      - x64 endpoints fall back to a 32-bit MSI, with a warning, when no x64 MSI exists.
      - It downloads the installer over HTTPS and accepts it only if it matches the manifest's `InstallerSha256`.
      - It adds a spec entry: `kind: msi`, `product_code` from the manifest or, when the manifest states none (Microsoft Edge, for example), read from the downloaded MSI on any OS, `version` (the Apps & features `DisplayVersion` if the manifest gives one, else the winget version), and `package_name`.
@@ -330,7 +335,8 @@ The console's **Updates** page lists everything the fleet is missing according t
 ### Warnings, failures and the requests directory
 
 - **Warnings, not failures:** items offpatch cannot package are listed under `warnings` in the run report and status report, and are not retried. Examples:
-  - EXE, Inno, Nullsoft, Burn, MSIX or zip installers. offpatch deploys MSI packages only; there is no `exe` package kind.
+  - MSIX, zip and portable installers; EXE installers that install per user only, have no documented silent switch or no SHA-256 (`installs per user only (winget EXE installer (inno) for x64)`).
+  - An EXE installer whose Authenticode signature does not verify (`the installer's Authenticode signature is not valid: ...`; the download is deleted).
   - An MSI whose Property table has no valid `ProductCode` (`MSI has no ProductCode`). A manifest without one is fine: pmctl reads it from the downloaded MSI, on any OS.
   - A version that is no longer in the winget repository.
   - A KB the Update Catalog does not list for the requested product, build and architecture.
@@ -350,12 +356,62 @@ The console's **Updates** page lists everything the fleet is missing according t
   |---|---|---|
   | `fetched` | Downloaded and carried by a bundle sent this run. | |
   | `already_sent` | Sent for this same request by an earlier run (the request was kept because another item failed). | `sent for this request in bundle b-20261017-0003` |
-  | `unsupported` | Can never be fetched this way; not retried. Console: "Can't import: <reason>". | `no MSI installer for x86 in winget (only exe)`, `winget no longer lists version 1.2.3`, `MSI has no ProductCode`, `KB5044273 not in the Microsoft Update Catalog for build 22000 x64` |
+  | `unsupported` | Can never be fetched this way; not retried. Console: "Can't import: <reason>". | `no MSI or EXE installer for x86 in winget (only msix)`, `installs per user only (winget EXE installer (inno) for x64)`, `EXE installer without a documented silent switch (winget EXE installer (exe) for x64)`, `the installer's Authenticode signature is not valid: ...`, `winget no longer lists version 1.2.3`, `MSI has no ProductCode`, `KB5044273 not in the Microsoft Update Catalog for build 22000 x64` |
   | `failed` | Transient; the request stays and the next run retries it. Console: "Import failed: <reason>". | `SHA-256 mismatch: the download does not match the published hash`, `GET https://...: HTTP 503`, `downloaded but not sent: ...`, `the run reached its time limit before this finished; retried next run` |
 
   A package fetched this run counts as `fetched` only if a sent bundle carried it; a failed send or a package left out at build time makes it `failed`. For an app with several architectures, any failed architecture makes the item `failed`, else any fetched one `fetched`; reasons are prefixed with the architecture (`x86: no MSI installer for x86 in winget`). The full error text stays under `failures` and `warnings`.
 - **A request is explicit:** its items are fetched and sent again even if `state.json` says an earlier run, or the regular Microsoft/app feeds, already sent them. This is how a package that was rejected on the isolated side is imported again: export a new request for it. Only what was already sent for *this* request (while it is retried because of a failed item) is not sent twice; that is kept in `state.json` under `request_sent` and dropped once the request moves to `done/` or its file is gone.
 - **Duplicates within a run are fetched once:** an item listed by more than one request, or also brought by the Microsoft feed in the same run, is downloaded once and travels in the same bundle.
+
+### EXE installers (kind exe)
+
+Apps whose winget manifest has no MSI for an architecture (WebView2, OneDrive, the VC++ redistributables, Git, Notepad++ on arm64, ...) are imported as **`kind: exe`** packages when the EXE installer passes the importable rule above. Agents 0.9.0 and later run them.
+
+**What pmctl does** (`cmd/pmctl/requests_exe.go`):
+
+1. Reads the winget installer fields `InstallerType`, `Scope`, `InstallerSwitches` (`Silent`, `Custom`), `InstallerSuccessCodes`, `ExpectedReturnCodes`, `ProductCode`, `AppsAndFeaturesEntries` and `UnsupportedOSArchitectures`. Root values are defaults for each installer; installer values win.
+2. Downloads the installer over HTTPS and accepts it only if it matches `InstallerSha256`.
+3. Verifies its **Authenticode signature in pure Go** on any acquisition host, Linux included (see below), and records the verified signer's CommonName.
+4. Writes the package with an `exe` block (fields in [04-bundle-format.md](04-bundle-format.md)):
+   - `installer_type`: exe | inno | nullsoft | burn.
+   - `silent_args`: the argv (no shell). The manifest's `Silent` switch, split like a Windows command line (double quotes group and are removed; `& | < > ^` are refused), else the type's default: inno `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-`, nullsoft `/S`, burn `/quiet /norestart`. `Custom` switches are appended. A plain `exe` without `Silent` is not importable.
+   - `success_codes`: 0, 3010, 1641, `InstallerSuccessCodes`, and `ExpectedReturnCodes` whose response is `alreadyInstalled`, `rebootRequiredToFinish` or `rebootRequiredForInstall`. 3010 and 1641 mean "installed, restart needed".
+   - `busy_codes`: `ExpectedReturnCodes` with `installInProgress`, `packageInUse` or `packageInUseByApplication`, plus 1618 for burn. These mean "retry later", not a failure.
+   - `signer`: the verified Authenticode signer (also `vendor_signature.signer`, status `valid`).
+   - `detect.display_name` (= `package_name`): the manifest's `AppsAndFeaturesEntries.DisplayName`, else the name the endpoints report when they all name the same app (a version in it is fine), else the locale manifest's `PackageName`.
+   - `detect.display_version`: `AppsAndFeaturesEntries.DisplayVersion`, if stated. `detect.product_code`: the ARP key, winget `ProductCode` (e.g. `Microsoft EdgeWebView`, or a Burn bundle `{GUID}`). `detect.publisher`.
+   - `uninstall.quiet_uninstall`: true for burn and inno (they register a `QuietUninstallString`), false otherwise. Without it, rollback is unsupported ("rollback not supported for this installer (no silent uninstall)") and pmctl warns.
+   - `scope`: always `machine`.
+5. Puts EXE packages in **bundles of their own**, never mixed with msu, msi or agent packages, so agents up to 0.6.5 (strict manifest parsing) keep accepting every other bundle.
+6. `pmctl build` verifies the signature again and refuses a payload whose signer is not the manifest's `exe.signer`.
+
+`acquire.json` options:
+
+| Key | Meaning |
+|---|---|
+| `authenticode_roots` | PEM file of extra trust anchors (e.g. a vendor's private code-signing root), added to the system roots and the shipped ones. |
+| `exe_signers` | If set, only EXE installers whose verified signer CommonName is in this list are accepted. |
+
+**Authenticode on Linux (and every other OS).** `internal/acquire/authenticode` uses only the Go standard library:
+
+1. **PE layout.** The certificate table (data directory 4) must be the last thing in the file, so no unsigned data follows the signature. It must hold exactly one `WIN_CERT_TYPE_PKCS_SIGNED_DATA` entry, with only zero padding after the PKCS#7 blob.
+2. **Image digest.** The Authenticode hash of the file must equal the digest in `SpcIndirectDataContent` (type `SPC_PE_IMAGE_DATA`). The hash covers everything except the optional header CheckSum, the certificate-table directory entry and the table. SHA-256, SHA-384 or SHA-512 only.
+3. **Signer.** The authenticated attributes must state `contentType` = SPC_INDIRECT_DATA and `messageDigest` = hash of the content. The signature over them must verify with the signer certificate (RSA PKCS#1 v1.5 or ECDSA).
+4. **Chain.** The signer certificate must chain, through the certificates in the signature, to a trusted root with the **code-signing** extended key usage. The chain is checked at the time of a verified **timestamp** (RFC 3161 token or PKCS#9 countersignature, whose TSA certificate must chain with the time-stamping usage), else at the current time. A signature made while the certificate was valid stays valid after it expires, as on Windows.
+5. **Several signatures.** A file may carry nested signatures. As on Windows, it is valid if one of them passes steps 2–4 on its own (the primary is tried first). Typical case: a SHA-1 primary with a SHA-256 nested signature.
+
+Trust anchors are the host's system roots plus the code-signing roots shipped in `internal/acquire/authenticode/roots.pem`: Microsoft Root Certificate Authority 2010 and 2011, Microsoft Identity Verification Root CA 2020, DigiCert Trusted Root G4, DigiCert Assured ID Root CA and USERTrust RSA. Their SHA-256 fingerprints are pinned in the tests. Microsoft's code-signing roots are not in the Mozilla-derived bundles Linux distributions use, hence the shipped set.
+
+**Not checked:** revocation (acquisition hosts may have no CRL or OCSP access). SHA-1-only signatures and SHA-1 timestamps are refused, which is stricter than Windows. The recorded signer is shown on the package for approval. The agent verifies the signature again (WinVerifyTrust) and checks that the signer is `exe.signer` before it runs the installer.
+
+**On the isolated server:**
+
+- An EXE deployment target on an endpoint whose agent is older than 0.9.0 is `not_applicable` with detail "agent too old for EXE packages: upgrade the agent to 0.9.0 or later". The package is never offered to that agent. The target comes back in scope when the agent reports 0.9.0 or later.
+- Needs, targeting and verification match Apps & features the way the agent does:
+  - by `detect.product_code` (the ARP key) when set;
+  - else by display name, normalised like intelligence matching, with the same architecture tag, so the x86 and x64 VC++ runtimes never satisfy each other;
+  - per-user entries do not count.
+- A target is verified when the `DisplayVersion` reaches `detect.display_version` (else the package version).
 
 ### The request file
 
@@ -393,7 +449,9 @@ The file contains no host names or endpoint ids. It carries only the ids, versio
 **Known gap:** an endpoint's own "available updates" list (catalog packages it needs) still compares `package_name` with the installed name **exactly**. An app whose Apps & features name contains its version (7-Zip) shows as "in catalog" on the Updates page, but is not offered automatically on the endpoint page; deploy it from the catalog.
 
 Tested:
-- `internal/acquire/winget_test.go`: recorded winget-pkgs manifests for Chrome, 7-Zip, VLC, Notepad++ and VS Code (MSI selection, root defaults, EXE/Inno-only warnings, manifest URLs, 404 fallback, https only).
+- `internal/acquire/winget_test.go`: recorded winget-pkgs manifests for Chrome, 7-Zip, VLC, Notepad++ and VS Code (MSI selection, root defaults, manifest URLs, 404 fallback, https only).
+- `internal/acquire/winget_exe_test.go`: recorded manifests for Microsoft.EdgeWebView2Runtime (exe), Microsoft.VCRedist.2015+.x64 (burn), Notepad++ arm64 (nullsoft), 7-Zip (MSI on x64, exe on arm64), Git and VS Code (inno): installer choice, silent args, exit codes, ARP key, rollback support, per-user / no-switch / no-SHA reasons.
+- `internal/acquire/authenticode`: synthetic signed PE files (valid, tampered, untrusted root, wrong usage, appended data, SHA-1, expired with and without a timestamp) and, where the host has them, real Microsoft-signed files verified against the shipped roots only.
 - `internal/msi/msi_test.go`: the pure-Go MSI reader on synthetic compound files built in the test (512- and 4096-byte sectors, mini stream and regular sectors, 2- and 3-byte string references, a string over 64 KiB) and broken ones (not an MSI, truncated, looping sector chain, no or invalid ProductCode, no string pool). `OFFPATCH_MSI_DIR=<dir>` (optionally `OFFPATCH_MSI_EXPECT="file=CODE;..."`) reads real MSIs: checked against the Windows Installer API on 168 MSIs (24 version 3, 144 version 4) and the Microsoft Edge enterprise MSI 155.0.4283.62 from winget (`{6E669770-C655-388E-835E-C146C8EC6A2E}`).
 - `internal/acquire/library_test.go` and `cmd/pmctl/library_test.go`: the Library from the recorded Edge manifests (no ProductCode, still importable), locale fallbacks and free text the YAML reader refuses, the import rule, the lookup order, the `id@version` cache, the per-run budget and warnings; a request for Edge with no endpoint having it becomes an MSI package whose product code is read from the (synthetic) MSI.
 - `cmd/pmctl/onlyrequests_test.go`: `pmctl auto -only-requests` fetches only the request (no configured app, no Microsoft feed), sends the bundle and status report, archives the request, honours the run lock, and refuses to run without a requests directory.

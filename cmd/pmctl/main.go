@@ -43,7 +43,9 @@ acquisition (connected zone; see docs/08-acquisition.md):
 spec.json lists the packages; each entry is a manifest package without "file"
 but with "path" pointing at the downloaded vendor file. size and sha256 are
 computed. On Windows, "vendor_signature" is filled in automatically via
-Get-AuthenticodeSignature unless already present.
+Get-AuthenticodeSignature unless already present. For kind "exe" (EXE
+installers) the Authenticode signature is verified in pure Go on every OS
+and must name exe.signer, or the build fails.
 `
 
 func main() {
@@ -223,7 +225,14 @@ func buildFromSpec(o buildOpts, spec []specPackage, specDir string) (buildResult
 		if p.Supersedes == nil {
 			p.Supersedes = []string{}
 		}
-		if p.VendorSignature.Status == "" {
+		if p.Kind == manifest.KindExe {
+			// Always re-verified: the signer is what the agent will require.
+			vs, err := checkExeSignature(p, path)
+			if err != nil {
+				return buildResult{}, fmt.Errorf("%s: %w", p.PackageID, err)
+			}
+			p.VendorSignature = vs
+		} else if p.VendorSignature.Status == "" {
 			p.VendorSignature = signatureFor(p.Kind, path)
 		}
 		files[p.File.Name] = path

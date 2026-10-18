@@ -68,6 +68,8 @@ type Package struct {
 	// The server then also verifies the target by UBR when Windows does not
 	// list the KB itself. 0 = unknown (verify by KB only).
 	ExpectedUBR int `json:"expected_ubr,omitempty"`
+	// Exe: install/detect/rollback details, only for kind "exe" (see exe.go).
+	Exe *ExeInstall `json:"exe,omitempty"`
 }
 
 type Manifest struct {
@@ -198,13 +200,19 @@ func (m *Manifest) ValidateSchema(now time.Time) error {
 			if !pkgNameRe.MatchString(p.PackageName) || strings.TrimSpace(p.Version) == "" {
 				add("%s: pkg packages need package_name (receipt id) and version", pfx)
 			}
+		case KindExe:
+			wantOS = "windows"
+			validateExe(&p, pfx, add)
 		case "agent":
 			// offpatch agent self-upgrade; any supported OS.
 			if !versionRe.MatchString(p.Version) {
 				add("%s: agent packages need a version like 1.2.3", pfx)
 			}
 		default:
-			add("%s.kind must be msu, msi, deb, rpm, pkg or agent", pfx)
+			add("%s.kind must be msu, msi, exe, deb, rpm, pkg or agent", pfx)
+		}
+		if err := exeBlockMisuse(&p); err != nil {
+			add("%s: %v", pfx, err)
 		}
 		if wantOS != "" && p.Applicability.OS != wantOS {
 			add("%s: kind %s requires applicability.os %s", pfx, p.Kind, wantOS)

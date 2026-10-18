@@ -32,6 +32,8 @@ func identity(p Package) string {
 		return "kb:" + p.KB
 	case "agent":
 		return "agent"
+	case "exe":
+		return exeIdentity(p)
 	case "msi":
 		if p.PackageName != "" {
 			return "msi:" + strings.ToLower(p.PackageName)
@@ -67,6 +69,12 @@ func needs(p Package, e Endpoint, inv []InventoryItem, sup map[string]bool) (boo
 	case "deb", "rpm", "pkg":
 		for _, it := range inv {
 			if (it.Kind == "pkg" || (it.Kind == "app" && p.Kind == "pkg")) && it.ID == p.PackageName && !VersionAtLeast(it.Version, p.Version) {
+				return true, it.Version, "update available"
+			}
+		}
+	case "exe":
+		for _, it := range inv {
+			if exeAppMatch(p, it) && it.Version != "" && !VersionAtLeast(it.Version, exeWantVersion(p)) {
 				return true, it.Version, "update available"
 			}
 		}
@@ -298,6 +306,13 @@ func appInstalled(inv []InventoryItem, p Package) bool {
 				continue
 			}
 			if (p.ProductCode != "" && strings.EqualFold(it.ID, p.ProductCode)) || (p.PackageName != "" && SameAppName(it.Name, p.PackageName)) {
+				return true
+			}
+		}
+		return false
+	case "exe":
+		for _, it := range inv {
+			if exeAppMatch(p, it) {
 				return true
 			}
 		}

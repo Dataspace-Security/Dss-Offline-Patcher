@@ -51,13 +51,14 @@ pending ─► downloading ─► downloaded ─► installing ─► installed 
    │            └──────────────┴─────────────┴──────► failed ──retry (agent, ≤ max_retries)──► pending
    ├──agent: pre-install check not met──► deferred ──next check-in──► (offered again, as pending)
    ├──agent: already present / not applicable──► not_applicable | verified
+   ├──server: kind exe and agent < 0.9.0──► not_applicable ("agent too old for EXE packages: …") ──agent reports ≥ 0.9.0──► pending
    └──active exception──► exception
 
 installed | pending_reboot ──no activity for lost_after_install (server)──► lost_after_install
 lost_after_install ──endpoint checks in (server)──► verified | pending_reboot | installed
 verified | installed | pending_reboot | lost_after_install ──rollback verified on that endpoint (server)──► rolled_back
 ```
-- `verified` is set **only by the server** when a fresh inventory shows the package's KB/product code (or, for `deb`/`rpm`/`pkg`/`agent`, the package name / agent at the same or a newer version), or a KB that supersedes it (transitively). This check runs at every check-in for targets of `active`, `paused` and `completed` deployments, so an endpoint fixed by hand after its deployment completed still verifies.
+- `verified` is set **only by the server** when a fresh inventory shows the package's KB/product code (or, for `deb`/`rpm`/`pkg`/`agent`, the package name / agent at the same or a newer version; for `exe`, the Apps & features entry — by `exe.detect.product_code`, else by display name with the same x86/x64 tag, machine-wide only — at `exe.detect.display_version` or newer), or a KB that supersedes it (transitively). This check runs at every check-in for targets of `active`, `paused` and `completed` deployments, so an endpoint fixed by hand after its deployment completed still verifies.
   - A Windows cumulative update with `expected_ubr` also verifies by **build revision**: the endpoint's build equals the package's `min_build` and the UBR in its `os_version` (`"… (26300.9711)"`) is ≥ `expected_ubr`, even when Windows does not list the KB.
   - Per-user installs (`InventoryItem.scope` `"user"`, found in loaded user hives) count like machine-wide ones, for needs and targeting too; an MSI deployment still installs per machine.
   - The **evidence** (the matching inventory line, e.g. `product {GUID} "Google Chrome" 130.0.1 (user)`, or `os_version build 26300.9711`) is kept on the target (`evidence`, and appended to the detail as `[…]`) and listed in `GET /api/reports/targets.csv`.
@@ -84,6 +85,7 @@ A deployment with `operation: rollback` uninstalls an approved (or revoked) pack
 | `rpm` | `rpm -e <package_name>` (same) | yes (needs `package_name`) |
 | `pkg` (macOS) | — macOS installer packages have no uninstall | **no** (409; shown as "Rollback not supported") |
 | `agent` | — | **no** |
+| `exe` | the app's `QuietUninstallString` from Apps & features | only with `exe.uninstall.quiet_uninstall` (burn, inno); otherwise **no** (409, "rollback not supported for this installer (no silent uninstall)") |
 
 Targets of a rollback use the same states with these meanings: only endpoints whose inventory shows the package (deb/rpm: at exactly this version) are `pending`, others are `not_applicable`; `installing` = uninstalling, `installed` = uninstaller succeeded, `verified` = a fresh inventory no longer shows it (and no reboot it asked for is pending). Pre-install checks (with no package size) apply. Nothing is downloaded: the agent verifies the signed manifest and takes the KB / product code / package name from it. Rollback targets do not make an endpoint `noncompliant`; their `failed`, `pending_reboot` and `lost_after_install` do count in endpoint status. Rollback deployments are excluded from compliance reports and "available patches".
 

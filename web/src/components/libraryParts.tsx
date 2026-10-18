@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { LibraryItem } from "../types";
+import { EXE_TYPE_LABELS, exeTypeLabel } from "./exeParts";
 import { CopyBox, Pill } from "./ui";
 
 /** A value that follows `value` once it has stopped changing for `ms`. */
@@ -50,10 +51,32 @@ export function UnverifiedLink({ label, url }: { label: string; url: string | un
   );
 }
 
-/** "can import" / "Can't import: reason" / "Not checked yet". */
+/**
+ * The installer technology behind an importable verdict, from the reason the
+ * server gives ("EXE installer (inno)" / "MSI installer (x64)"): "EXE (Inno Setup)", "MSI" or "".
+ */
+export function importableKind(reason: string | undefined): string {
+  const r = (reason ?? "").trim();
+  const exe = /^EXE installer\s*\(([^)]*)\)/i.exec(r);
+  if (exe) {
+    const t = exe[1].split(/[,\s]+/).find((x) => x.toLowerCase() in EXE_TYPE_LABELS)?.toLowerCase() ?? "exe";
+    return `EXE (${exeTypeLabel(t)})`;
+  }
+  return /^MSI installer/i.test(r) ? "MSI" : "";
+}
+
+/** "can import · EXE (Inno Setup)" / "Can't import: reason" / "Not checked yet". */
 export function ImportableBadge({ item }: { item: Pick<LibraryItem, "importable" | "importable_reason"> }) {
   if (item.importable === "yes") {
-    return <span title="DSS Patcher can download and install this (MSI installer)"><Pill state="verified" label="can import" /></span>;
+    const k = importableKind(item.importable_reason);
+    const how = k.startsWith("EXE")
+      ? "a signed EXE installer, run silently"
+      : "an MSI installer";
+    return (
+      <span title={`DSS Patcher can download and install this (${how})${item.importable_reason ? `: ${item.importable_reason}` : ""}`}>
+        <Pill state="verified" label={k.startsWith("EXE") ? `can import · ${k}` : "can import"} />
+      </span>
+    );
   }
   if (item.importable === "no") {
     return <span className="text-red small">Can't import{item.importable_reason ? `: ${item.importable_reason}` : ""}</span>;

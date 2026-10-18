@@ -700,3 +700,16 @@ Types:
 - `AcqPolicyFile`: `{format: "offpatch.acquisition-policy", version: 1, policy_version, edited_by, edited_at, sha256 (hex SHA-256 of the compact JSON of policy), policy: AcqPolicy}`.
 - `DownloaderView` (from the newest acquisition status report): `{source, host, finished_at, outcome, schedule, policy_version, policy_sha256, policy_applied_at, policy_error?, run_request?, sources: [{kind: source|app|windows, id, type?, result, detail?, packages?}], reports_policy}` (`reports_policy: false`: the downloader's pmctl predates the policy).
 - The acquisition status report (`acqstatus.Report`) gains `policy_version`, `policy_sha256`, `policy_edited_by`, `policy_applied_at`, `policy_error`, `sources`, `defaults: {policy: AcqPolicy, feeds: string[]}` and `run_request`; older servers ignore them.
+
+## v1.11 additions — EXE packages (kind `exe`)
+
+| Route | Role | Contract |
+|---|---|---|
+| `GET /api/packages`, `GET /api/packages/{id}` | viewer | `Package` gains `exe` (kind `exe` only; omitted otherwise): the manifest's `exe` block (`installer_type`, `silent_args`, `success_codes`, `busy_codes`, `signer`, `detect {display_name, display_version, product_code, publisher}`, `uninstall {quiet_uninstall}`, `scope`), see [04-bundle-format.md](04-bundle-format.md). `kind` may be `exe`. `rollback_unsupported` is `rollback not supported for this installer (no silent uninstall)` unless `exe.uninstall.quiet_uninstall`. |
+| `POST /api/deployments` | user | A rollback of an `exe` package without `quiet_uninstall` is refused (409, the reason above). Targets of an `exe` deployment on endpoints whose `agent_version` is below 0.9.0 (or unknown) are `not_applicable` with detail `agent too old for EXE packages: upgrade the agent to 0.9.0 or later` and are never assigned; they return to `pending` at the first check-in reporting 0.9.0 or later. |
+| `GET /api/updates`, `GET /api/fleet/status` | viewer | Every row gains `importable: "yes" \| "no" \| "unknown"` and `importable_reason`: the Library's rule (`intel.Importable` with the architectures of the endpoints that have the app; KB rows: `yes`, "Windows cumulative update (Microsoft Update Catalog)"). |
+| `GET /api/endpoints/{id}/updates` | viewer | Each `apps[]` entry gains `importable` and `importable_reason` (rule applied with the endpoint's architecture). |
+| `GET /api/library`, `GET /api/library/{kind}/{id}` | super_admin | `installers[]` entries gain `silent: bool` (omitted when false): the winget manifest documents a silent switch (matters for plain `exe`). `importable_reason` may be `EXE installer (inno)` etc. |
+| `POST /api/acquisition-requests` | user | **400** `can't import: <winget id>: <reason>[; …]` when any requested app is `importable: "no"` (fleet rows: as on `/api/updates`; Library items: with the chosen architecture). No request is created or audited. `unknown` is accepted (pmctl decides). |
+
+The catalog column of `/api/updates` and `/api/fleet/status` also links app rows to `exe` packages, by `exe.detect.product_code` (the ARP key inventory reports as the item id) or normalised `package_name`.

@@ -75,6 +75,10 @@ type ResolvedInstaller struct {
 	URL         string `json:"url"`
 	SHA256      string `json:"sha256,omitempty"`
 	ProductCode string `json:"product_code,omitempty"`
+	// Silent: the winget manifest documents a silent switch for this
+	// installer (InstallerSwitches.Silent). Matters for type "exe" only;
+	// inno, nullsoft and burn have well-known defaults.
+	Silent bool `json:"silent,omitempty"`
 }
 
 // WindowsRelease is the newest cumulative update for one Windows build.

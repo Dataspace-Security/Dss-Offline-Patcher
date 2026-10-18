@@ -60,7 +60,18 @@ func deliver(d *deliveryRun) error {
 	if err := acquire.CheckDiskSpace(d.runDir, total); err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
-	groups := partition(pkgs, d.c.MaxBundleBytes, d.c.MaxBundlePackages, d.fail)
+	// EXE packages travel in bundles of their own: agents before 0.9.0
+	// parse manifests strictly and would refuse a bundle that mixes them in.
+	var plain, exes []pendingPkg
+	for _, p := range pkgs {
+		if p.sp.Kind == manifest.KindExe {
+			exes = append(exes, p)
+		} else {
+			plain = append(plain, p)
+		}
+	}
+	groups := append(partition(plain, d.c.MaxBundleBytes, d.c.MaxBundlePackages, d.fail),
+		partition(exes, d.c.MaxBundleBytes, d.c.MaxBundlePackages, d.fail)...)
 	d.rep.New = slices.DeleteFunc(d.rep.New, func(id string) bool { return d.rep.Failures[id] != "" })
 	for i, g := range groups {
 		if err := d.ctx.Err(); err != nil {
@@ -141,7 +152,14 @@ func preparePackages(specPath string, fail func(id string, err error)) ([]pendin
 			fail(id, fmt.Errorf("payload: %w", err))
 			continue
 		}
-		if sp.VendorSignature.Status == "" {
+		if sp.Kind == manifest.KindExe {
+			vs, err := checkExeSignature(sp.Package, sp.Path)
+			if err != nil {
+				fail(id, fmt.Errorf("left out of the bundle: %w", err))
+				continue
+			}
+			sp.VendorSignature = vs
+		} else if sp.VendorSignature.Status == "" {
 			sp.VendorSignature = signatureFor(sp.Kind, sp.Path)
 		}
 		if sp.VendorSignature.Status == "invalid" {

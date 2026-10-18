@@ -9,6 +9,7 @@ import (
 
 func TestImportable(t *testing.T) {
 	msi := ResolvedInstaller{Arch: "x64", Type: "msi", URL: "https://x/a.msi"}
+	sha := strings.Repeat("ab", 32)
 	cases := []struct {
 		name      string
 		r         *Resolved
@@ -20,9 +21,17 @@ func TestImportable(t *testing.T) {
 		{"msi any arch", &Resolved{Installers: []ResolvedInstaller{msi}}, nil, true, ImportableYes, "MSI installer (x64)"},
 		{"wix fleet arch", &Resolved{Installers: []ResolvedInstaller{{Arch: "x64", Type: "wix", ProductCode: "{X}"}}}, []string{"x64"}, false, ImportableYes, "MSI installer (x64)"},
 		{"msi no code, cannot read", &Resolved{Installers: []ResolvedInstaller{msi}}, nil, false, ImportableNo, "MSI installer without a ProductCode"},
-		{"nullsoft only", &Resolved{Installers: []ResolvedInstaller{{Arch: "x64", Type: "nullsoft"}}}, nil, true, ImportableNo, "EXE installer only (nullsoft)"},
-		{"exe flavours", &Resolved{Installers: []ResolvedInstaller{{Arch: "x64", Type: "inno"}, {Arch: "x86", Type: "Exe"}}}, nil, true, ImportableNo, "EXE installer only (exe, inno)"},
-		{"msix", &Resolved{Installers: []ResolvedInstaller{{Arch: "x64", Type: "msix"}}}, nil, true, ImportableNo, "no MSI installer (msix)"},
+		{"nullsoft only, no sha", &Resolved{Installers: []ResolvedInstaller{{Arch: "x64", Type: "nullsoft", URL: "https://x/a.exe"}}}, nil, true, ImportableNo, ReasonExeNoSHA},
+		{"nullsoft", &Resolved{Installers: []ResolvedInstaller{{Arch: "x64", Type: "nullsoft", URL: "https://x/a.exe", SHA256: sha}}}, nil, true, ImportableYes, "EXE installer (nullsoft)"},
+		{"burn", &Resolved{Installers: []ResolvedInstaller{{Arch: "x64", Type: "burn", URL: "https://x/a.exe", SHA256: sha, Scope: "machine"}}}, []string{"x64"}, true, ImportableYes, "EXE installer (burn)"},
+		{"inno per user", &Resolved{Installers: []ResolvedInstaller{{Arch: "x64", Type: "inno", URL: "https://x/a.exe", SHA256: sha, Scope: "user"}}}, nil, true, ImportableNo, ReasonPerUser},
+		{"inno user and machine", &Resolved{Installers: []ResolvedInstaller{{Arch: "x64", Type: "inno", URL: "https://x/u.exe", SHA256: sha, Scope: "user"}, {Arch: "x64", Type: "inno", URL: "https://x/m.exe", SHA256: sha, Scope: "machine"}}}, nil, true, ImportableYes, "EXE installer (inno)"},
+		{"plain exe without switch", &Resolved{Installers: []ResolvedInstaller{{Arch: "x64", Type: "exe", URL: "https://x/a.exe", SHA256: sha}}}, nil, true, ImportableNo, ReasonExeNoSilent},
+		{"plain exe with switch", &Resolved{Installers: []ResolvedInstaller{{Arch: "x64", Type: "Exe", URL: "https://x/a.exe", SHA256: sha, Silent: true}}}, nil, true, ImportableYes, "EXE installer (exe)"},
+		{"exe http", &Resolved{Installers: []ResolvedInstaller{{Arch: "x64", Type: "inno", URL: "http://x/a.exe", SHA256: sha}}}, nil, true, ImportableNo, ReasonExeNoHTTPS},
+		{"msi wins over exe", &Resolved{Installers: []ResolvedInstaller{{Arch: "x64", Type: "inno", URL: "https://x/a.exe", SHA256: sha}, msi}}, nil, true, ImportableYes, "MSI installer (x64)"},
+		{"msix", &Resolved{Installers: []ResolvedInstaller{{Arch: "x64", Type: "msix"}}}, nil, true, ImportableNo, "no MSI or EXE installer (msix)"},
+		{"portable zip", &Resolved{Installers: []ResolvedInstaller{{Arch: "x64", Type: "zip"}, {Arch: "x64", Type: "portable"}}}, nil, true, ImportableNo, "no MSI or EXE installer (portable, zip)"},
 		{"msi only for another arch", &Resolved{Installers: []ResolvedInstaller{{Arch: "arm64", Type: "msi"}}}, []string{"x64"}, true, ImportableNo, "no installer for x64 (only arm64)"},
 		{"msi neutral", &Resolved{Installers: []ResolvedInstaller{{Arch: "neutral", Type: "msi"}}}, []string{"x64"}, true, ImportableYes, "MSI installer (neutral)"},
 		{"32-bit msi on x64", &Resolved{Installers: []ResolvedInstaller{{Arch: "x86", Type: "msi"}}}, []string{"x64"}, true, ImportableYes, "MSI installer (x86)"},

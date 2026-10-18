@@ -104,7 +104,7 @@ func TestLibrary(t *testing.T) {
 			{ID: "Google.Chrome", Version: "155.0.8059.85", Publisher: "Google LLC", Homepage: "https://www.google.com/chrome/", ResolvedAt: gen,
 				Installers: []intel.ResolvedInstaller{{Arch: "x64", Type: "wix", Scope: "machine", URL: "https://dl.google.com/chrome.msi", SHA256: strings.Repeat("A", 64), ProductCode: "{11111111-2222-3333-4444-555555555555}"}}},
 			{ID: "7zip.7zip", Version: "26.04", Publisher: "Igor Pavlov", Homepage: "https://www.7-zip.org/", License: "LGPL", Description: "File archiver", ResolvedAt: gen,
-				Installers: []intel.ResolvedInstaller{{Arch: "x64", Type: "msi", URL: "https://www.7-zip.org/a/7z2604-x64.msi"}, {Arch: "arm64", Type: "exe", URL: "https://www.7-zip.org/a/7z2604-arm64.exe"}}},
+				Installers: []intel.ResolvedInstaller{{Arch: "x64", Type: "msi", URL: "https://www.7-zip.org/a/7z2604-x64.msi"}, {Arch: "arm64", Type: "exe", URL: "https://www.7-zip.org/a/7z2604-arm64.exe", SHA256: strings.Repeat("b", 64), Silent: true}}},
 			{ID: "Notepad++.Notepad++", Version: "8.7", Publisher: "Notepad++ Team", ResolvedAt: gen,
 				Installers: []intel.ResolvedInstaller{{Arch: "x64", Type: "nullsoft", URL: "https://github.com/notepad-plus-plus/npp.exe"}}},
 			{ID: "Evil.App", Version: "1.0", Publisher: "Evil", Homepage: "javascript:alert(1)", PublisherURL: long, Description: strings.Repeat("d", 3000), ResolvedAt: gen,
@@ -131,7 +131,7 @@ func TestLibrary(t *testing.T) {
 	for _, it := range p.Items {
 		byID[it.ID] = it
 	}
-	if it := byID["Notepad++.Notepad++"]; it.Importable != "no" || it.ImportableReason != "EXE installer only (nullsoft)" {
+	if it := byID["Notepad++.Notepad++"]; it.Importable != "no" || it.ImportableReason != "EXE installer without a SHA-256 in the winget manifest" {
 		t.Errorf("notepad++: %+v", it)
 	}
 	if it := byID["VideoLAN.VLC"]; it.Importable != "unknown" || it.Installers != nil {
@@ -239,6 +239,11 @@ func TestLibrary(t *testing.T) {
 	}
 	if c := e.api("POST", "/api/acquisition-requests", tokSuper, map[string]any{"apps": []string{"Contoso.Nothing"}}, nil); c != 400 {
 		t.Errorf("not in intel: %d", c)
+	}
+	// The Library knows Notepad++ is not importable: refused with the reason, no request created.
+	if c, msg := e.apiErr("POST", "/api/acquisition-requests", tokSuper, map[string]any{"apps": []string{"Notepad++.Notepad++"}, "app_archs": map[string]string{"Notepad++.Notepad++": "x64"}}); c != 400 ||
+		!strings.Contains(msg, "can't import: Notepad++.Notepad++: EXE installer without a SHA-256") {
+		t.Errorf("not importable: %d %q", c, msg)
 	}
 	var raw json.RawMessage
 	if c := e.api("POST", "/api/acquisition-requests", tokSuper, map[string]any{"apps": []string{"7zip.7zip", "Google.Chrome"}, "kbs": []string{"KB5044280"},
