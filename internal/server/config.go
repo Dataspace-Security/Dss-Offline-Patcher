@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -41,32 +42,36 @@ type AdminToken struct {
 }
 
 type Config struct {
-	Listen                  string              `json:"listen"`
-	DataDir                 string              `json:"data_dir"`
-	TLSCert                 string              `json:"tls_cert"`
-	TLSKey                  string              `json:"tls_key"`
-	PKIDir                  string              `json:"pki_dir"`
-	InsecureHTTP            bool                `json:"insecure_http"`
-	TrustedKeys             []KeyConfig         `json:"trusted_keys"`
-	RootPublicKeyFile       string              `json:"root_public_key_file"`
-	AdminTokens             []AdminToken        `json:"admin_tokens"`
-	OIDC                    *oidc.Config        `json:"oidc"`
-	SessionTTL              Duration            `json:"session_ttl"`
-	AllowStaticTokens       *bool               `json:"allow_static_tokens"`
-	RequireMFA              bool                `json:"require_mfa"`
-	ApprovalPolicy          map[string]int      `json:"approval_policy"`
-	SeparationOfDuties      bool                `json:"separation_of_duties"`
-	OfflineAfter            Duration            `json:"offline_after"`
-	StaleInventoryAfter     Duration            `json:"stale_inventory_after"`
-	MaxBundleBytes          int64               `json:"max_bundle_bytes"`
-	MaxFiles                int                 `json:"max_files"`
-	MaxFileBytes            int64               `json:"max_file_bytes"`
-	ScanCommand             []string            `json:"scan_command"`
-	ScanTimeout             Duration            `json:"scan_timeout"` // per file; default 30m
-	IntakeInterval          Duration            `json:"intake_interval"`
-	CheckinIntervalSeconds  int                 `json:"checkin_interval_seconds"`
-	DownloadRateKbps        int                 `json:"download_rate_kbps"`
-	AuditExportDir          string              `json:"audit_export_dir"`
+	Listen                 string         `json:"listen"`
+	DataDir                string         `json:"data_dir"`
+	TLSCert                string         `json:"tls_cert"`
+	TLSKey                 string         `json:"tls_key"`
+	PKIDir                 string         `json:"pki_dir"`
+	InsecureHTTP           bool           `json:"insecure_http"`
+	TrustedKeys            []KeyConfig    `json:"trusted_keys"`
+	RootPublicKeyFile      string         `json:"root_public_key_file"`
+	AdminTokens            []AdminToken   `json:"admin_tokens"`
+	OIDC                   *oidc.Config   `json:"oidc"`
+	SessionTTL             Duration       `json:"session_ttl"`
+	AllowStaticTokens      *bool          `json:"allow_static_tokens"`
+	RequireMFA             bool           `json:"require_mfa"`
+	ApprovalPolicy         map[string]int `json:"approval_policy"`
+	SeparationOfDuties     bool           `json:"separation_of_duties"`
+	OfflineAfter           Duration       `json:"offline_after"`
+	StaleInventoryAfter    Duration       `json:"stale_inventory_after"`
+	MaxBundleBytes         int64          `json:"max_bundle_bytes"`
+	MaxFiles               int            `json:"max_files"`
+	MaxFileBytes           int64          `json:"max_file_bytes"`
+	ScanCommand            []string       `json:"scan_command"`
+	ScanTimeout            Duration       `json:"scan_timeout"` // per file; default 30m
+	IntakeInterval         Duration       `json:"intake_interval"`
+	CheckinIntervalSeconds int            `json:"checkin_interval_seconds"`
+	DownloadRateKbps       int            `json:"download_rate_kbps"`
+	AuditExportDir         string         `json:"audit_export_dir"`
+	// AcquisitionRequestsDir: when set, every exported acquisition request is
+	// also written there (direct hand-off to a co-located pmctl auto). Unset
+	// = strict one-way transfer: the operator carries the downloaded file.
+	AcquisitionRequestsDir  string              `json:"acquisition_requests_dir"`
 	PatchDeadlines          map[string]Duration `json:"patch_deadlines"`
 	Notify                  *NotifyConfig       `json:"notify"`
 	MetricsToken            string              `json:"metrics_token"`
@@ -81,6 +86,36 @@ type Config struct {
 	LostAfterInstall Duration         `json:"lost_after_install"`
 
 	dir string // directory of the config file; relative paths resolve from here
+	// staticTokensDefaulted: allow_static_tokens was not in the file.
+	staticTokensDefaulted bool
+}
+
+// LogAuthMode logs, once at startup, how admins sign in: SSO and / or the
+// static admin_tokens, and whether allow_static_tokens was set or defaulted,
+// so a disabled break-glass token is never a surprise.
+func (c *Config) LogAuthMode(log *slog.Logger) {
+	if log == nil || c.AllowStaticTokens == nil { // not from LoadConfig
+		return
+	}
+	how := "set in the config"
+	if c.staticTokensDefaulted {
+		how = "default (not set in the config)"
+	}
+	sso := c.OIDC != nil
+	switch {
+	case *c.AllowStaticTokens && len(c.AdminTokens) > 0 && sso:
+		log.Info("admin sign-in: SSO, and static admin tokens are ENABLED as break-glass (allow_static_tokens=true); set \"allow_static_tokens\": false to switch them off",
+			"tokens", len(c.AdminTokens), "allow_static_tokens", how)
+	case *c.AllowStaticTokens && len(c.AdminTokens) > 0:
+		log.Info("admin sign-in: static admin tokens only (no SSO configured)", "tokens", len(c.AdminTokens), "allow_static_tokens", how)
+	case *c.AllowStaticTokens:
+		log.Info("admin sign-in: SSO only (no admin_tokens configured, so there is no break-glass token)", "allow_static_tokens", how)
+	case len(c.AdminTokens) > 0:
+		log.Warn("admin sign-in: SSO only; static admin tokens are DISABLED by \"allow_static_tokens\": false, so the configured admin_tokens (including break-glass) do not work",
+			"tokens_ignored", len(c.AdminTokens))
+	default:
+		log.Info("admin sign-in: SSO only; static admin tokens disabled (allow_static_tokens=false)")
+	}
 }
 
 var roleRank = map[string]int{"viewer": 1, "operator": 2, "approver": 3, "admin": 4}
@@ -135,10 +170,13 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: at least one trusted_keys entry is required")
 	}
 	if c.AllowStaticTokens == nil {
-		// With SSO, static tokens are break-glass only: off unless the config
-		// says "allow_static_tokens": true explicitly.
-		t := c.OIDC == nil
+		// Default true, with or without SSO (runbook 01): the admin_tokens
+		// entries are the break-glass path when the IdP is unreachable, so
+		// adding "oidc" must not silently switch them off. Only an explicit
+		// "allow_static_tokens": false does. LogAuthMode says which applies.
+		t := true
 		c.AllowStaticTokens = &t
+		c.staticTokensDefaulted = true
 	}
 	if c.SessionTTL.Duration == 0 {
 		c.SessionTTL.Duration = 8 * time.Hour
@@ -153,6 +191,12 @@ func LoadConfig(path string) (*Config, error) {
 		}
 	}
 	c.AuditExportDir = c.abs(c.AuditExportDir)
+	if c.AcquisitionRequestsDir != "" {
+		if !filepath.IsAbs(c.AcquisitionRequestsDir) {
+			return nil, fmt.Errorf("config: acquisition_requests_dir must be an absolute path (got %q)", c.AcquisitionRequestsDir)
+		}
+		c.AcquisitionRequestsDir = filepath.Clean(c.AcquisitionRequestsDir)
+	}
 	if c.AlertSweepEvery.Duration == 0 {
 		c.AlertSweepEvery.Duration = 5 * time.Minute
 	}

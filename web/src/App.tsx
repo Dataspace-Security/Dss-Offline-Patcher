@@ -15,12 +15,13 @@ import { paths } from "./paths";
 import { DeploymentsArea, EndpointsArea, OverviewArea, PatchesArea, ReportsArea, SettingsArea } from "./pages/Areas";
 import PatchUpdates from "./pages/PatchUpdates";
 import Catalog from "./pages/Catalog";
-import Transfers from "./pages/Transfers";
+import Imports from "./pages/Imports";
+import Library from "./pages/Library";
 import ServerPage from "./pages/Server";
 import AgentSetupPage from "./pages/AgentSetup";
 import Users from "./pages/Users";
 import MaintenanceWindows from "./pages/MaintenanceWindows";
-import Alerts from "./pages/Alerts";
+import Alerts, { isOpenAlert } from "./pages/Alerts";
 import Reports from "./pages/Reports";
 import { AlertsRefreshContext } from "./alertsContext";
 
@@ -82,8 +83,9 @@ export default function App() {
 function Shell({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
   const isAdmin = hasRole(me, "admin");
   const alerts = useLoad(() => api.get<Alert[]>("/api/alerts?open=1"), [], 15000);
-  const openAlerts = alerts.data?.length ?? 0;
-  const critical = (alerts.data ?? []).some((a) => a.severity === "critical");
+  const open = (alerts.data ?? []).filter(isOpenAlert);
+  const openAlerts = open.length;
+  const critical = open.some((a) => a.severity === "critical");
   const { pathname } = useLocation();
 
   return (
@@ -133,15 +135,15 @@ function Shell({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
                 <Route path="/alerts" element={<Alerts />} />
               </Route>
               <Route element={<PatchesArea />}>
-                <Route path="/patches/updates" element={<PatchUpdates />} />
+                <Route path="/patches/needed" element={<PatchUpdates />} />
+                <Route path="/patches/library" element={<Library />} />
                 <Route path="/patches/catalog" element={<Catalog />} />
                 <Route path="/patches/catalog/:packageId" element={<Catalog />} />
-                <Route path="/patches/transfers" element={<Transfers />} />
+                <Route path="/patches/imports" element={<Imports />} />
               </Route>
               <Route element={<DeploymentsArea />}>
                 <Route path="/deployments" element={<DeploymentList />} />
                 <Route path="/deployments/windows" element={<MaintenanceWindows />} />
-                <Route path="/deployments/exceptions" element={<Exceptions />} />
               </Route>
               <Route path="/deployments/new" element={<NewDeploymentPage />} />
               <Route path="/deployments/:id" element={<DeploymentDetailPage />} />
@@ -152,25 +154,30 @@ function Shell({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
               <Route path="/endpoints/:id" element={<EndpointDetailPage />} />
               <Route element={<ReportsArea />}>
                 <Route path="/reports" element={<Reports />} />
+                <Route path="/reports/exceptions" element={<Exceptions />} />
                 <Route path="/reports/audit" element={<Audit />} />
               </Route>
               <Route element={<SettingsArea isAdmin={isAdmin} />}>
                 <Route path="/settings/server" element={<ServerPage />} />
+                <Route path="/settings/agents" element={<Catalog agents key="agents" />} />
+                <Route path="/settings/agents/:packageId" element={<Catalog agents key="agents" />} />
                 <Route path="/settings/users" element={isAdmin ? <Users /> : <Navigate to={paths.server} replace />} />
               </Route>
 
               {/* Old addresses (bookmarks, alert e-mails, other links) keep working, query string included. */}
-              <Route path="/patches" element={<Moved to={paths.updates()} />} />
-              <Route path="/patches/needed" element={<Moved to={paths.updates()} />} />
-              <Route path="/patches/status" element={<Moved to={paths.updates()} add={{ view: "all" }} />} />
-              <Route path="/patches/downloads" element={<Moved to={paths.transfers} />} />
-              <Route path="/patches/received" element={<Moved to={paths.transfers} />} />
-              <Route path="/patches/*" element={<Moved to={paths.updates()} />} />
-              <Route path="/updates" element={<Moved to={paths.updates()} />} />
+              <Route path="/patches" element={<Moved to={paths.needed()} />} />
+              <Route path="/patches/updates" element={<Moved to={paths.needed()} />} />
+              <Route path="/patches/transfers" element={<Moved to={paths.imports} />} />
+              <Route path="/patches/status" element={<Moved to={paths.needed()} add={{ view: "all" }} />} />
+              <Route path="/patches/downloads" element={<Moved to={paths.imports} />} />
+              <Route path="/patches/received" element={<Moved to={paths.imports} />} />
+              <Route path="/deployments/exceptions" element={<Moved to={paths.exceptions} />} />
+              <Route path="/patches/*" element={<Moved to={paths.needed()} />} />
+              <Route path="/updates" element={<Moved to={paths.needed()} />} />
               <Route path="/catalog" element={<Moved to={paths.catalog()} />} />
               <Route path="/catalog/:packageId" element={<MovedPackage />} />
-              <Route path="/acquisition" element={<Moved to={paths.transfers} />} />
-              <Route path="/intake" element={<Moved to={paths.transfers} />} />
+              <Route path="/acquisition" element={<Moved to={paths.imports} />} />
+              <Route path="/intake" element={<Moved to={paths.imports} />} />
               <Route path="/windows" element={<Moved to={paths.windows} />} />
               <Route path="/exceptions" element={<Moved to={paths.exceptions} />} />
               <Route path="/agent-setup" element={<Moved to={paths.addEndpoints} />} />
@@ -210,7 +217,7 @@ function MovedPackage() {
 /** Sidebar: one entry per area; active on any of the area's addresses. */
 const NAV: { to: string; label: string; match: (p: string) => boolean }[] = [
   { to: paths.overview, label: "Overview", match: (p) => p === "/" || p.startsWith("/alerts") },
-  { to: paths.updates(), label: "Patches", match: (p) => p.startsWith("/patches") },
+  { to: paths.needed(), label: "Patches", match: (p) => p.startsWith("/patches") },
   { to: paths.deployments, label: "Deployments", match: (p) => p.startsWith("/deployments") },
   { to: paths.endpoints, label: "Endpoints", match: (p) => p.startsWith("/endpoints") },
   { to: paths.reports, label: "Reports", match: (p) => p.startsWith("/reports") },

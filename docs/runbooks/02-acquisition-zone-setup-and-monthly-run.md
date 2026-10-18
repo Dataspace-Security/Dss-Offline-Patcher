@@ -49,7 +49,47 @@ The installer **never creates a root key** on an acquisition host, and warns if 
 Re-running the same command upgrades and keeps the key, config and state.
 
 `--role all` (single-box lab) is the one exception: it also creates a root key so the lab works,
-and it prints a warning that this layout is not for production.
+and it prints a warning that this layout is not for production. The lab also hands acquisition
+requests over directly (fresh install and re-runs):
+
+| What | Lab (`--role all`) layout |
+|---|---|
+| `acquisition_requests_dir` in `/etc/offpatch/pmserver.json` | `/var/lib/offpatch-acq/requests` |
+| `/var/lib/offpatch-acq` | `offpatch-acq`:`offpatch-inbox` 0710 (the server may traverse, not list) |
+| `/var/lib/offpatch-acq/requests` | `offpatch-acq`:`offpatch-inbox` 2770 (setgid): the server creates request files, `offpatch-acq` reads and moves them to `done/` / `rejected/`; in the server unit's `ReadWritePaths` |
+| Request watcher | `offpatch-acquire-requests.path` (`PathExistsGlob=/var/lib/offpatch-acq/requests/*.json`) starts `offpatch-acquire-requests.service`: `pmctl auto -config /etc/offpatch/acquire.json -only-requests` as `offpatch-acq`, same hardening as `offpatch-acquire.service`, `SuccessExitStatus=2` |
+
+A request that keeps failing stays in the folder; after a failed or partial run the service
+waits 10 minutes before the path unit can start it again, and the path unit is trigger-limited
+(`TriggerLimitIntervalSec=10min`, `TriggerLimitBurst=10`; systemd 250+). If it ever stops
+(`systemctl status offpatch-acquire-requests.path` shows `failed`):
+`sudo systemctl reset-failed offpatch-acquire-requests.path && sudo systemctl start offpatch-acquire-requests.path`.
+The daily run handles pending requests either way. `--role server` and `--role acquisition` do
+not set `acquisition_requests_dir`: production carries the file.
+
+Every run's status report lists each requested item with a result: `fetched`, `already_sent`
+(sent for the same request by an earlier try), `unsupported` (never importable this way, e.g.
+"no MSI installer for x86 in winget", "winget no longer lists version 1.2.3", "KB5044273 not in
+the Microsoft Update Catalog for build 22000 x64": the console shows "Can't import: <reason>") or
+`failed` (transient, e.g. "SHA-256 mismatch"; the request stays and is retried). Items a request
+names are fetched and sent again even if `state.json` says they were sent before; see
+[08-acquisition.md](../08-acquisition.md#warnings-failures-and-the-requests-directory).
+
+A Linux acquisition host needs nothing extra for MSIs whose winget manifest states no product
+code (Microsoft Edge, for example): pmctl reads it from the downloaded MSI itself.
+
+With `"intel": {}` in `acquire.json`, every daily run also fills the console's **Library**: winget
+installer and description details for the configured apps, every app ever requested, and about
+290 common enterprise packages. The first runs look up at most 300 packages each; later
+runs only look up new versions (cached in `state.json`). Lookup failures are warnings in the
+status report and are retried; they do not make the run partial. To keep it to your own list, set
+`"intel": {"library_no_common": true, "library": ["Vendor.App"]}`. See
+[08-acquisition.md](../08-acquisition.md#the-library-update-intelligence).
+
+`"expected_ubr": true` in `acquire.json` (default off) records the build revision each Windows
+cumulative update brings, so the server can confirm it even when Windows does not list the KB.
+**Enable it only after every agent runs 0.6.5 or later**: agents up to 0.6.2 refuse any bundle
+whose manifest has the field (critical alert on the console).
 
 If you do not use the installer, A1 below creates the key by hand (`packaging/acquisition/` has
 units for `/etc/offpatch-acq`).
@@ -297,7 +337,9 @@ so sign their receipts too.
 - Bundle rejected: fix the cause and rebuild. A rejected bundle does not consume its sequence on the
   server.
 - Wrong content already validated (still `quarantined`): an approver **rejects** the packages with a
-  reason. Re-send corrected content under **new** `package_id`s.
+  reason. Re-send corrected content under **new** `package_id`s. To import the same package
+  again after a rejection, export a new acquisition request for it from the console: `pmctl auto`
+  fetches and sends requested items even when `state.json` records them as sent.
 - Wrong content already approved: revoke ([runbook 06](06-failed-update-recovery.md)).
 - A signing key may be exposed: [runbook 04](04-signing-key-compromise.md).
 

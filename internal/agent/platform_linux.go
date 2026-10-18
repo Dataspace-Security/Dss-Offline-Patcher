@@ -204,3 +204,12 @@ func (l *Linux) Health(ctx context.Context, checks []store.HealthCheck) (bool, s
 		return exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", name).Run() == nil, nil
 	})
 }
+
+// BootTime is the kernel's boot time (btime in /proc/stat).
+func (l *Linux) BootTime() (time.Time, error) {
+	b, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return time.Time{}, err
+	}
+	return parseProcStatBtime(b)
+}

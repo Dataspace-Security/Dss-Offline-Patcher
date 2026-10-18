@@ -48,7 +48,38 @@ type Report struct {
 	BundleID   string            `json:"bundle_id,omitempty"`
 	Sent       bool              `json:"sent"`
 	Feeds      []Feed            `json:"feeds"`
+	// Items is the per-item outcome for every item named in an import
+	// request this run, so the console can say "Can't import: <reason>"
+	// on the exact row the operator clicked instead of a run-wide summary.
+	Items []ItemResult `json:"items,omitempty"`
 }
+
+// ItemResult is what happened to one requested item in one run.
+//
+// Result is one of:
+//   - fetched: downloaded and placed in the bundle this run.
+//   - already_sent: an earlier run already sent it.
+//   - unsupported: can never be fetched this way (no MSI installer for the
+//     arch, no ProductCode, version no longer in winget, KB not in the
+//     catalog for that build/arch). Retrying will not help.
+//   - failed: transient (download, hash, network); the next run may work.
+type ItemResult struct {
+	RequestID string `json:"request_id"`
+	Kind      string `json:"kind"`    // app | kb
+	Key       string `json:"key"`     // winget id or KB number
+	Version   string `json:"version"` // app version, or the KB's arch
+	Result    string `json:"result"`  // fetched | already_sent | unsupported | failed
+	Reason    string `json:"reason,omitempty"`
+	PackageID string `json:"package_id,omitempty"`
+}
+
+// Item results.
+const (
+	ItemFetched     = "fetched"
+	ItemAlreadySent = "already_sent"
+	ItemUnsupported = "unsupported"
+	ItemFailed      = "failed"
+)
 
 // Signed is the on-the-wire form.
 type Signed struct {

@@ -190,12 +190,23 @@ type Summary struct {
 		OK    bool  `json:"ok"`
 		Count int64 `json:"count"`
 	} `json:"audit"`
+	// Intel: how old the update intelligence is (nil: none received yet).
+	// Filled by the server, which owns the intelligence.
+	Intel *IntelAge `json:"intel"`
+}
+
+// IntelAge says whether the update intelligence is too old to trust as
+// "what is missing" (stale: older than the server's intel_stale threshold).
+type IntelAge struct {
+	GeneratedAt string  `json:"generated_at"`
+	AgeHours    float64 `json:"age_hours"`
+	Stale       bool    `json:"stale"`
 }
 
 func (s *Store) Summary(ctx context.Context, th Thresholds) (Summary, error) {
 	var sm Summary
 	sm.Endpoints.ByStatus = map[string]int{}
-	for _, k := range []string{"compliant", "noncompliant", "pending_reboot", "failed", "exception", "stale", "offline", "lost_after_install"} {
+	for _, k := range EndpointStatuses {
 		sm.Endpoints.ByStatus[k] = 0
 	}
 	eps, err := s.ListEndpointsBrief(ctx, th)

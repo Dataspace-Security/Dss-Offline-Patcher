@@ -152,6 +152,14 @@ func run(cfgPath string, log *slog.Logger) error {
 		log.Warn("audit_export_dir not set: audit evidence lives only in the database (roadmap B9)")
 	}
 
+	if d := cfg.AcquisitionRequestsDir; d != "" {
+		if err := server.CheckAcquisitionRequestsDir(d); err != nil {
+			log.Warn("acquisition_requests_dir not writable: requests will not be queued directly (operators carry the downloaded file)", "dir", d, "err", err)
+		} else {
+			log.Info("acquisition requests are queued directly (co-located acquisition)", "dir", d)
+		}
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           h.Handler(),

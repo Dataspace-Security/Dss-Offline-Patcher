@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"regexp"
 	"strings"
 	"time"
@@ -20,10 +21,19 @@ import (
 // winget id and version the requested version; for kind "kb", key is the KB
 // and version the architecture (one item per KB and architecture).
 type AcqRequestItem struct {
-	Kind        string `json:"kind"` // app | kb
-	Key         string `json:"key"`
-	Version     string `json:"version"`
-	Status      string `json:"status"` // requested | seen | fulfilled
+	Kind    string `json:"kind"` // app | kb
+	Key     string `json:"key"`
+	Version string `json:"version"`
+	// Status: requested | seen | stale | unsupported | failed | fulfilled.
+	// unsupported and failed come from the newest acquisition status report
+	// with a per-item result for it (unsupported: can never be fetched this
+	// way; failed: transient, the next run may work); fulfilled (the package
+	// arrived) wins over both. stale: still requested or seen, but the
+	// newest acquisition run (finished more than StaleRequestGrace after the
+	// request was created) did not pick the request up, so it will not
+	// arrive by itself ("Not picked up"; ask again).
+	Status      string `json:"status"`
+	Reason      string `json:"reason,omitempty"` // why unsupported / failed
 	FulfilledAt string `json:"fulfilled_at"`
 	PackageID   string `json:"package_id"`
 }
@@ -42,7 +52,8 @@ type AcqRequestRecord struct {
 type AcqRequestRef struct {
 	RequestID string `json:"request_id"`
 	At        string `json:"at"`
-	Status    string `json:"status"` // the item's status
+	Status    string `json:"status"`           // the item's status
+	Reason    string `json:"reason,omitempty"` // for unsupported / failed
 }
 
 // RecordAcqRequest stores an exported request and its audit event in one
@@ -101,6 +112,14 @@ func (s *Store) ListAcqRequests(ctx context.Context, limit int) ([]AcqRequestRec
 	if err != nil {
 		return nil, err
 	}
+	results, err := s.itemResults(ctx)
+	if err != nil {
+		return nil, err
+	}
+	last, err := s.lastAcqRun(ctx)
+	if err != nil {
+		return nil, err
+	}
 	for i := range out {
 		r := &out[i]
 		r.SeenAt = seen[r.RequestID]
@@ -110,8 +129,20 @@ func (s *Store) ListAcqRequests(ctx context.Context, limit int) ([]AcqRequestRec
 			if r.SeenAt != "" {
 				it.Status = "seen"
 			}
+			onItsWay := false
+			if res, ok := results[itemResultKey(r.RequestID, it.Kind, it.Key, it.Version)]; ok {
+				switch res.result {
+				case "unsupported", "failed":
+					it.Status, it.Reason = res.result, res.reason
+				default: // fetched / already_sent: on its way (or here)
+					it.Status, onItsWay = "seen", true
+				}
+			}
+			if (it.Status == "requested" || it.Status == "seen") && !onItsWay && last.missed(r.RequestID, r.CreatedAt) {
+				it.Status, it.Reason = "stale", "the acquisition run at "+last.finishedAt+" did not pick this request up"
+			}
 			if pid, at := pkgs.find(*it, r.CreatedAt); pid != "" {
-				it.Status, it.PackageID, it.FulfilledAt = "fulfilled", pid, at
+				it.Status, it.PackageID, it.FulfilledAt, it.Reason = "fulfilled", pid, at, ""
 			}
 		}
 	}
@@ -140,6 +171,110 @@ func (s *Store) requestsSeen(ctx context.Context) (map[string]string, error) {
 		}
 	}
 	return out, rows.Err()
+}
+
+// StaleRequestGrace: a request is "stale" only when an acquisition run that
+// finished at least this long after the request was created did not list
+// it (a run already under way when the request was queued may miss it).
+const StaleRequestGrace = 10 * time.Minute
+
+// acqRun is the newest acquisition status report (by finished_at): when it
+// finished and the request ids it listed (in a request feed or an item
+// result).
+type acqRun struct {
+	finishedAt string
+	finished   time.Time
+	listed     map[string]bool
+}
+
+// missed reports whether the run finished more than StaleRequestGrace after
+// createdAt and did not list the request.
+func (r acqRun) missed(requestID, createdAt string) bool {
+	if r.finished.IsZero() || r.listed[requestID] {
+		return false
+	}
+	return r.finished.After(parseTime(createdAt).Add(StaleRequestGrace))
+}
+
+// lastAcqRun loads the newest acquisition status report's finish time and
+// listed request ids (zero acqRun when there is none).
+func (s *Store) lastAcqRun(ctx context.Context) (acqRun, error) {
+	var id int64
+	var fin, rep string
+	err := s.db.QueryRowContext(ctx, `SELECT id, finished_at, report FROM acquisition_reports ORDER BY finished_at DESC, id DESC LIMIT 1`).Scan(&id, &fin, &rep)
+	if errors.Is(err, sql.ErrNoRows) {
+		return acqRun{}, nil
+	}
+	if err != nil {
+		return acqRun{}, err
+	}
+	run := acqRun{finishedAt: fin, finished: parseTime(fin), listed: map[string]bool{}}
+	var doc struct {
+		Feeds []struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+		} `json:"feeds"`
+		Items []struct {
+			RequestID string `json:"request_id"`
+		} `json:"items"`
+	}
+	if json.Unmarshal([]byte(rep), &doc) != nil {
+		return acqRun{}, nil // unreadable: say nothing rather than guess
+	}
+	for _, f := range doc.Feeds {
+		if f.Type == "request" {
+			run.listed[f.Name] = true
+		}
+	}
+	for _, it := range doc.Items {
+		run.listed[it.RequestID] = true
+	}
+	return run, nil
+}
+
+type itemResult struct{ result, reason string }
+
+// itemResultKey identifies one requested item across status reports: app
+// ids and KBs are case-insensitive, versions and architectures exact apart
+// from case.
+func itemResultKey(requestID, kind, key, version string) string {
+	return requestID + "\x00" + kind + "\x00" + strings.ToLower(key) + "\x00" + strings.ToLower(version)
+}
+
+// itemResults: per-item results (acqstatus.ItemResult) from acquisition
+// status reports, the newest report for each request item.
+func (s *Store) itemResults(ctx context.Context) (map[string]itemResult, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT json_extract(i.value,'$.request_id'), json_extract(i.value,'$.kind'), json_extract(i.value,'$.key'),
+		json_extract(i.value,'$.version'), json_extract(i.value,'$.result'), json_extract(i.value,'$.reason')
+		FROM acquisition_reports r, json_each(r.report,'$.items') i
+		WHERE json_valid(r.report) AND json_type(r.report,'$.items')='array' ORDER BY r.id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]itemResult{}
+	for rows.Next() {
+		var rid, kind, key, version, result, reason sql.NullString
+		if err := rows.Scan(&rid, &kind, &key, &version, &result, &reason); err != nil {
+			return nil, err
+		}
+		if !rid.Valid || !kind.Valid || !key.Valid || !result.Valid {
+			continue
+		}
+		k := itemResultKey(rid.String, kind.String, key.String, version.String)
+		if _, newer := out[k]; !newer {
+			out[k] = itemResult{result: result.String, reason: truncate(reason.String, 300)}
+		}
+	}
+	return out, rows.Err()
+}
+
+// truncate bounds report text shown in the console (untrusted input).
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
 }
 
 type arrivedPkg struct{ id, at string }
@@ -192,6 +327,10 @@ func wingetPackageID(id, version, arch string) string {
 	return clean
 }
 
+// WingetPackageID is the catalog package id pmctl gives a winget app
+// version for one architecture.
+func WingetPackageID(id, version, arch string) string { return wingetPackageID(id, version, arch) }
+
 // find returns the package that fulfils the item: <KB>-<arch> for a KB, the
 // pmctl package id of the app version for any architecture for an app,
 // delivered by a bundle received at or after the request was created
@@ -243,7 +382,7 @@ func (s *Store) AcqRequestRefs(ctx context.Context) (map[string]AcqRequestRef, e
 	if err != nil {
 		return nil, err
 	}
-	rank := map[string]int{"requested": 0, "seen": 1, "fulfilled": 2}
+	rank := map[string]int{"requested": 0, "stale": 0, "seen": 1, "failed": 1, "unsupported": 1, "fulfilled": 2}
 	out := map[string]AcqRequestRef{}
 	for _, r := range reqs { // newest first
 		mine := map[string]AcqRequestRef{}
@@ -252,8 +391,10 @@ func (s *Store) AcqRequestRefs(ctx context.Context) (map[string]AcqRequestRef, e
 			if _, newer := out[k]; newer {
 				continue // a newer request lists it
 			}
-			if ref, ok := mine[k]; !ok || rank[it.Status] < rank[ref.Status] {
-				mine[k] = AcqRequestRef{RequestID: r.RequestID, At: r.CreatedAt, Status: it.Status}
+			// Least advanced wins; on a tie the one with a reason, so "Can't
+			// import: <reason>" for one architecture is not hidden by another.
+			if ref, ok := mine[k]; !ok || rank[it.Status] < rank[ref.Status] || (rank[it.Status] == rank[ref.Status] && ref.Reason == "" && it.Reason != "") {
+				mine[k] = AcqRequestRef{RequestID: r.RequestID, At: r.CreatedAt, Status: it.Status, Reason: it.Reason}
 			}
 		}
 		for k, v := range mine {

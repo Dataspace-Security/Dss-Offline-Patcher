@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,6 +41,13 @@ type FetchKBOptions struct {
 	// (<KB>-<arch>); true means it was delivered earlier and is neither
 	// downloaded nor written to the spec again (it stays a prerequisite).
 	SkipPrerequisite func(packageID string) bool
+	// RecordUBR: write expected_ubr into the spec entry. Off by default:
+	// agents up to 0.6.2 refuse a bundle whose manifest has the field.
+	RecordUBR bool
+	// ExpectedUBR: the build revision the update brings MinBuild to, when
+	// known otherwise (update intelligence). The catalog title's
+	// "(26100.6899)" wins when it names MinBuild. Recorded for msu only.
+	ExpectedUBR int
 }
 
 // FetchResult reports what FetchKB/FetchURL did.
@@ -230,6 +238,12 @@ func FetchKB(ctx context.Context, cat *Catalog, ms *MSRC, o FetchKBOptions) (*Fe
 	}
 	if len(prereqs) > 0 {
 		e.Prerequisites = prereqs
+	}
+	if kind == "msu" && o.RecordUBR {
+		e.ExpectedUBR = TitleUBR(upd.Title, o.MinBuild)
+		if e.ExpectedUBR == 0 && o.MinBuild > 0 {
+			e.ExpectedUBR = o.ExpectedUBR
+		}
 	}
 	if err := ValidateEntry(e, dl.Size, dl.SHA256); err != nil {
 		return nil, err
@@ -487,4 +501,19 @@ func verifiedOr(v, def string) string {
 		return def
 	}
 	return v
+}
+
+// TitleUBR returns the build revision a catalog title states for build
+// ("... (KB5066835) (26100.6899)" → 6899), or 0.
+func TitleUBR(title string, build int) int {
+	if build <= 0 {
+		return 0
+	}
+	for _, m := range buildUBRRe.FindAllStringSubmatch(title, -1) {
+		if b, _ := strconv.Atoi(m[1]); b == build {
+			ubr, _ := strconv.Atoi(m[2])
+			return ubr
+		}
+	}
+	return 0
 }

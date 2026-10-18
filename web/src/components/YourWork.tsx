@@ -49,7 +49,7 @@ export function YourWork({ summary, endpoints }: { summary: Summary; endpoints: 
   }
   const pkgTotal = Object.values(summary.packages ?? {}).reduce((a, v) => a + (v ?? 0), 0);
   if (pkgTotal === 0) {
-    firstRun.push(<>The catalog is empty — see <Link to={paths.updates()}>Updates</Link> to request updates, then <Link to={paths.transfers}>Transfers</Link> to track them in.</>);
+    firstRun.push(<>The catalog is empty — use Import on <Link to={paths.needed()}>Needed</Link> or in the <Link to={paths.library()}>Library</Link>, then follow them on <Link to={paths.imports}>Imports</Link>.</>);
   }
 
   if (isApprover && me) {
@@ -114,7 +114,7 @@ export function YourWork({ summary, endpoints }: { summary: Summary; endpoints: 
         <div className="banner banner-info">{firstRun.map((f, i) => <div key={i}>{f}</div>)}</div>
       )}
       {open.length === 0
-        ? <div className="muted">Nothing is waiting on you. {isOperator ? "New needs show up on Patches → Updates." : ""}</div>
+        ? <div className="muted">Nothing is waiting on you. {isOperator ? "New needs show up on Patches → Needed." : ""}</div>
         : (
           <ul className="work-list">
             {open.map((i) => (

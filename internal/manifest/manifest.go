@@ -63,6 +63,11 @@ type Package struct {
 	PackageName string `json:"package_name,omitempty"`
 	// Prerequisites: KBs (or package names) that must already be installed.
 	Prerequisites []string `json:"prerequisites,omitempty"`
+	// ExpectedUBR: for a Windows cumulative update (msu), the build revision
+	// (the "9711" of 26300.9711) the endpoint reports once it is installed.
+	// The server then also verifies the target by UBR when Windows does not
+	// list the KB itself. 0 = unknown (verify by KB only).
+	ExpectedUBR int `json:"expected_ubr,omitempty"`
 }
 
 type Manifest struct {
@@ -213,6 +218,11 @@ func (m *Manifest) ValidateSchema(now time.Time) error {
 			if !editionRe.MatchString(ed) {
 				add("%s.applicability.editions entry %q invalid", pfx, ed)
 			}
+		}
+		if p.ExpectedUBR < 0 || p.ExpectedUBR > 1<<20 {
+			add("%s.expected_ubr out of range", pfx)
+		} else if p.ExpectedUBR > 0 && p.Kind != "msu" {
+			add("%s.expected_ubr is only for msu packages", pfx)
 		}
 		if p.KB != "" && !kbRe.MatchString(p.KB) {
 			add("%s.kb invalid", pfx)

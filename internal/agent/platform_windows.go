@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -138,7 +139,7 @@ func (w *Windows) Inventory() ([]store.InventoryItem, bool, error) {
 	if err != nil {
 		return nil, false, fmt.Errorf("inventory: %w", err)
 	}
-	return append(items, prods...), rebootPending(), nil
+	return append(items, mergeUserInventory(prods, userProducts())...), rebootPending(), nil
 }
 
 var productKeyRe = regexp.MustCompile(`^\{[0-9A-Fa-f-]{36}\}$`)
@@ -149,42 +150,81 @@ var productKeyRe = regexp.MustCompile(`^\{[0-9A-Fa-f-]{36}\}$`)
 func msiProducts() ([]store.InventoryItem, error) {
 	var items []store.InventoryItem
 	for _, path := range uninstallKeys {
-		k, err := registry.OpenKey(registry.LOCAL_MACHINE, path, registry.ENUMERATE_SUB_KEYS|registry.WOW64_64KEY)
-		if errors.Is(err, registry.ErrNotExist) {
-			continue // no WOW6432Node on 32-bit Windows
-		}
+		found, err := scanUninstall(registry.LOCAL_MACHINE, path, registry.WOW64_64KEY)
 		if err != nil {
-			return nil, fmt.Errorf("open %s: %w", path, err)
+			return nil, err
 		}
-		names, err := k.ReadSubKeyNames(-1)
-		k.Close()
+		items = append(items, found...)
+	}
+	return items, nil
+}
+
+// userProducts lists per-user installs from every loaded user hive
+// (HKU\<SID>\Software\...\Uninstall). It is best effort: a hive that cannot
+// be read (unloaded meanwhile, access denied) is skipped, and the machine
+// inventory is still reported.
+func userProducts() []store.InventoryItem {
+	k, err := registry.OpenKey(registry.USERS, "", registry.ENUMERATE_SUB_KEYS)
+	if err != nil {
+		return nil
+	}
+	sids, err := k.ReadSubKeyNames(-1)
+	k.Close()
+	if err != nil {
+		return nil
+	}
+	var items []store.InventoryItem
+	for _, sid := range sids {
+		if !isUserHive(sid) {
+			continue
+		}
+		// HKU\<SID>\Software is shared by 32- and 64-bit apps: one view.
+		found, err := scanUninstall(registry.USERS, sid+`\`+userUninstallKey, 0)
 		if err != nil {
-			return nil, fmt.Errorf("enumerate %s: %w", path, err)
+			continue
 		}
-		for _, n := range names {
-			isMSI := productKeyRe.MatchString(n)
-			it := store.InventoryItem{Kind: "product", ID: n}
+		items = append(items, found...)
+	}
+	return items
+}
+
+// scanUninstall reads one Uninstall key. A missing key is not an error (no
+// WOW6432Node on 32-bit Windows, no per-user installs in a profile).
+func scanUninstall(root registry.Key, path string, view uint32) ([]store.InventoryItem, error) {
+	k, err := registry.OpenKey(root, path, registry.ENUMERATE_SUB_KEYS|view)
+	if errors.Is(err, registry.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	names, err := k.ReadSubKeyNames(-1)
+	k.Close()
+	if err != nil {
+		return nil, fmt.Errorf("enumerate %s: %w", path, err)
+	}
+	var items []store.InventoryItem
+	for _, n := range names {
+		isMSI := productKeyRe.MatchString(n)
+		it := store.InventoryItem{Kind: "product", ID: n}
+		if isMSI {
+			it.ID = strings.ToUpper(n)
+		}
+		sk, err := registry.OpenKey(root, path+`\`+n, registry.QUERY_VALUE|view)
+		if err != nil {
 			if isMSI {
-				it.ID = strings.ToUpper(n)
+				items = append(items, it)
 			}
-			sk, err := registry.OpenKey(registry.LOCAL_MACHINE, path+`\`+n, registry.QUERY_VALUE|registry.WOW64_64KEY)
-			if err != nil {
-				if isMSI {
-					items = append(items, it)
-				}
-				continue
-			}
-			it.Name, _, _ = sk.GetStringValue("DisplayName")
-			it.Version, _, _ = sk.GetStringValue("DisplayVersion")
-			sysComp, _, _ := sk.GetIntegerValue("SystemComponent")
-			_, _, perr := sk.GetStringValue("ParentKeyName")
-			sk.Close()
-			// EXE-installed apps (Chrome's EXE setup, Firefox, VLC…) appear under
-			// their own key names. Keep those that Apps & features shows: a
-			// display name, not a hidden component, not an update of another entry.
-			if !isMSI && (strings.TrimSpace(it.Name) == "" || sysComp == 1 || perr == nil) {
-				continue
-			}
+			continue
+		}
+		it.Name, _, _ = sk.GetStringValue("DisplayName")
+		it.Version, _, _ = sk.GetStringValue("DisplayVersion")
+		sysComp, _, _ := sk.GetIntegerValue("SystemComponent")
+		_, _, perr := sk.GetStringValue("ParentKeyName")
+		sk.Close()
+		// EXE-installed apps (Chrome's EXE setup, Firefox, VLC…) appear under
+		// their own key names; keep those that Apps & features shows.
+		if keepUninstallEntry(isMSI, it.Name, sysComp, perr == nil) {
 			items = append(items, it)
 		}
 	}
@@ -238,18 +278,20 @@ func (w *Windows) Install(ctx context.Context, p manifest.Package, file string) 
 	sys := filepath.Join(os.Getenv("SystemRoot"), "System32")
 	var code int
 	var res *Result
+	logPath := "" // msiexec verbose log, quoted in the detail on failure
 	switch p.Kind {
 	case "msu":
 		code, res = runInstaller(ctx, filepath.Join(sys, "wusa.exe"), file, "/quiet", "/norestart")
 	case "msi":
-		code, res = runInstaller(ctx, filepath.Join(sys, "msiexec.exe"), "/i", file, "/qn", "/norestart", "/l*v", w.msiLog(p, ""))
+		logPath = w.msiLog(p, "")
+		code, res = runInstaller(ctx, filepath.Join(sys, "msiexec.exe"), "/i", file, "/qn", "/norestart", "/l*v", logPath)
 	default:
 		return Result{State: "failed", ExitCode: -1, Detail: "unsupported kind " + p.Kind}
 	}
 	if res != nil {
-		return *res
+		return withMSILog(*res, logPath)
 	}
-	return classifyInstall(p.Kind, code)
+	return withMSILog(classifyInstall(p.Kind, code), logPath)
 }
 
 // Uninstall rolls back an .msu (wusa /uninstall /kb:N) or an .msi
@@ -259,6 +301,7 @@ func (w *Windows) Uninstall(ctx context.Context, p manifest.Package) Result {
 	sys := filepath.Join(os.Getenv("SystemRoot"), "System32")
 	var code int
 	var res *Result
+	logPath := ""
 	switch p.Kind {
 	case "msu":
 		kb := strings.TrimPrefix(strings.ToUpper(p.KB), "KB")
@@ -270,14 +313,15 @@ func (w *Windows) Uninstall(ctx context.Context, p manifest.Package) Result {
 		if !msiGUID.MatchString(p.ProductCode) {
 			return Result{State: "failed", ExitCode: -1, Detail: "invalid product code " + p.ProductCode}
 		}
-		code, res = runInstaller(ctx, filepath.Join(sys, "msiexec.exe"), "/x", p.ProductCode, "/qn", "/norestart", "/l*v", w.msiLog(p, "-uninstall"))
+		logPath = w.msiLog(p, "-uninstall")
+		code, res = runInstaller(ctx, filepath.Join(sys, "msiexec.exe"), "/x", p.ProductCode, "/qn", "/norestart", "/l*v", logPath)
 	default:
 		return Result{State: "failed", ExitCode: -1, Detail: "rollback is not supported for kind " + p.Kind}
 	}
 	if res != nil {
-		return *res
+		return withMSILog(*res, logPath)
 	}
-	return classifyUninstall(p.Kind, code)
+	return withMSILog(classifyUninstall(p.Kind, code), logPath)
 }
 
 var msiGUID = regexp.MustCompile(`^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}$`)
@@ -316,4 +360,20 @@ func (w *Windows) Health(ctx context.Context, checks []store.HealthCheck) (bool,
 		}
 		return strings.TrimSpace(string(out)) == "Running", nil
 	})
+}
+
+var procGetTickCount64 = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetTickCount64")
+
+// BootTime is when Windows last started: now minus GetTickCount64 (the
+// milliseconds since boot). It tells the agent that a restart has happened.
+func (w *Windows) BootTime() (time.Time, error) {
+	if err := procGetTickCount64.Find(); err != nil {
+		return time.Time{}, err
+	}
+	lo, hi, _ := procGetTickCount64.Call()
+	ms := uint64(lo)
+	if unsafe.Sizeof(lo) == 4 { // 386: the 64-bit result is EDX:EAX
+		ms |= uint64(hi) << 32
+	}
+	return time.Now().Add(-time.Duration(ms) * time.Millisecond), nil
 }

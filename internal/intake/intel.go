@@ -30,14 +30,16 @@ const (
 
 // IntelSummary is what the console shows about the current document.
 type IntelSummary struct {
-	Source      string   `json:"source"`
-	KeyID       string   `json:"key_id"`
-	GeneratedAt string   `json:"generated_at"`
-	ReceivedAt  string   `json:"received_at"`
-	Windows     int      `json:"windows"`
-	Apps        int      `json:"apps"`
-	AppsSource  string   `json:"apps_source,omitempty"`
-	Warnings    []string `json:"warnings,omitempty"`
+	Source      string `json:"source"`
+	KeyID       string `json:"key_id"`
+	GeneratedAt string `json:"generated_at"`
+	ReceivedAt  string `json:"received_at"`
+	Windows     int    `json:"windows"`
+	Apps        int    `json:"apps"`
+	// Resolved: apps with installer details (the Library's "importable").
+	Resolved   int      `json:"resolved,omitempty"`
+	AppsSource string   `json:"apps_source,omitempty"`
+	Warnings   []string `json:"warnings,omitempty"`
 	// Error is set by the server when the stored document cannot be used
 	// (e.g. its signing key was revoked); nothing is matched then.
 	Error string `json:"error,omitempty"`
@@ -109,7 +111,7 @@ func (s *Service) processIntel(ctx context.Context, path string) error {
 		return err
 	}
 	sum := IntelSummary{Source: d.Source, KeyID: kid, GeneratedAt: gen.Format(time.RFC3339), ReceivedAt: s.Now().UTC().Format("2006-01-02T15:04:05Z"),
-		Windows: len(d.Windows), Apps: len(d.Apps), AppsSource: d.AppsSource, Warnings: d.Warnings}
+		Windows: len(d.Windows), Apps: len(d.Apps), Resolved: len(d.Resolved), AppsSource: d.AppsSource, Warnings: d.Warnings}
 	js, _ := json.Marshal(sum)
 	if err := s.store.SetMeta(ctx, MetaIntelSummary, string(js)); err != nil {
 		return err

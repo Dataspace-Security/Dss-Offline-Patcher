@@ -13,13 +13,18 @@ import "../patch.css";
 
 const STATES: PackageState[] = ["quarantined", "approved", "rejected", "revoked"];
 
-/** Kind filter: Windows updates (.msu), applications, or the offpatch agent itself. */
-type KindFilter = "" | "windows" | "apps" | "agent";
+/** Kind filter: Windows updates (.msu) or applications. Agent packages live in Settings → Agent versions. */
+type KindFilter = "" | "windows" | "apps";
 const KIND_FILTERS: { value: KindFilter; label: string }[] = [
-  { value: "", label: "All" }, { value: "windows", label: "Windows" }, { value: "apps", label: "Apps" }, { value: "agent", label: "Agent" },
+  { value: "", label: "All" }, { value: "windows", label: "Windows" }, { value: "apps", label: "Apps" },
 ];
 function kindGroup(k: PackageKind): Exclude<KindFilter, ""> {
-  return k === "msu" ? "windows" : k === "agent" ? "agent" : "apps";
+  return k === "msu" ? "windows" : "apps";
+}
+
+/** The offpatch agent's own packages (plumbing, not patching). */
+export function isAgentPackage(p: Pick<Package, "kind" | "package_id" | "package_name">): boolean {
+  return p.kind === "agent" || p.package_id.startsWith("offpatch-agent") || (p.package_name ?? "").startsWith("offpatch-agent");
 }
 
 function FleetNum({ n, tone }: { n: number | undefined; tone?: string }) {
@@ -27,10 +32,15 @@ function FleetNum({ n, tone }: { n: number | undefined; tone?: string }) {
   return n ? <b className={tone ? `text-${tone}` : undefined}>{n}</b> : <span className="muted">0</span>;
 }
 
-export default function Catalog() {
+/**
+ * Patches → Catalog (signed packages, agent packages left out), or with
+ * `agents` Settings → Agent versions (only the offpatch agent's packages).
+ */
+export default function Catalog({ agents = false }: { agents?: boolean }) {
   const [sp, setSp] = useSearchParams();
   const state = sp.get("state") ?? "";
-  const kind = (sp.get("kind") ?? "") as KindFilter;
+  const kind = (agents ? "" : sp.get("kind") ?? "") as KindFilter;
+  const pathOf = agents ? paths.agentVersions : paths.catalog;
   const onlyNeeded = sp.get("needed") === "1";
   const { packageId } = useParams();
   const navigate = useNavigate();
@@ -41,18 +51,21 @@ export default function Catalog() {
     if (v) n.set(k, v); else n.delete(k);
     setSp(n);
   };
-  const all = list.data ?? [];
+  const all = (list.data ?? []).filter((p) => isAgentPackage(p) === agents);
   const kindCount = (k: KindFilter) => all.filter((p) => !k || kindGroup(p.kind) === k).length;
   const fleetOf = (id: string): PackageFleet | undefined => needs.data?.[id];
   const rows = all.filter((p) => (!kind || kindGroup(p.kind) === kind) && (!onlyNeeded || (fleetOf(p.package_id)?.needed ?? 0) > 0));
   const num = (id: string, f: (x: PackageFleet) => number) => (needs.data ? (fleetOf(id) ? f(fleetOf(id)!) : 0) : undefined);
 
   const select = (id: string | null) =>
-    navigate({ pathname: paths.catalog(id), search: sp.toString() ? `?${sp}` : "" });
+    navigate({ pathname: pathOf(id), search: sp.toString() ? `?${sp}` : "" });
 
   return (
     <>
-      <PageHeader title="Catalog" sub="Packages extracted from validated bundles. Nothing is deployable until approved.">
+      <PageHeader title={agents ? "Agent versions" : "Catalog"}
+                  sub={agents
+                    ? "New versions of the offpatch agent, from validated bundles. Approve one, then deploy it to upgrade the agents."
+                    : "Packages extracted from validated bundles. Nothing is deployable until approved. Agent packages are under Settings → Agent versions."}>
         <div className="cat-filters">
           <label className="inline-field">
             State
@@ -66,20 +79,23 @@ export default function Catalog() {
           </label>
         </div>
       </PageHeader>
-      <div className="chips">
+      {!agents && <div className="chips">
         {KIND_FILTERS.map((k) => (
           <button key={k.value} className={`chip ${kind === k.value ? "chip-on" : ""}`} onClick={() => setParam("kind", k.value)}>
             {k.label} <b>{list.data ? kindCount(k.value) : "…"}</b>
           </button>
         ))}
-      </div>
+      </div>}
       <ErrorBanner error={list.error} />
       <ErrorBanner error={needs.error ? `Fleet status: ${needs.error}` : null} />
       <div className={packageId ? "split" : ""}>
         <div className="split-main">
-          {list.data && all.length === 0 && !state && (
+          {list.data && all.length === 0 && !state && agents && (
+            <Empty>No agent package has arrived yet. New agent versions come in signed bundles from the acquisition team.</Empty>
+          )}
+          {list.data && all.length === 0 && !state && !agents && (
             <Empty>
-              The catalog is empty. Packages arrive in signed bundles: check <Link to={paths.transfers}>Transfers</Link> (what the
+              The catalog is empty. Packages arrive in signed bundles: check <Link to={paths.imports}>Imports</Link> (what the
               acquisition zone fetched and what came through the transfer).
             </Empty>
           )}
@@ -293,7 +309,7 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
             ["Supersedes", (p.supersedes ?? []).length ? (p.supersedes.map((s) => <Mono key={s}>{s}</Mono>)) : ""],
             ["Superseded by", p.superseded_by ? <Link to={paths.catalog(p.superseded_by)}><Mono>{p.superseded_by}</Mono></Link> : ""],
             ["Prerequisites", (p.prerequisites ?? []).length ? p.prerequisites.map((s) => <Mono key={s}>{s}</Mono>) : ""],
-            ["Bundle", <Link to={paths.transfers}><Mono>{p.bundle_id}</Mono></Link>],
+            ["Bundle", <Link to={paths.imports}><Mono>{p.bundle_id}</Mono></Link>],
           ]} />
           <h3>Applicability</h3>
           <KV rows={[

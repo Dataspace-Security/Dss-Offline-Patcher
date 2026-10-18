@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Link } from "react-router-dom";
 import { api, enc } from "../api";
 import type { Endpoint, Package, PackageFleet } from "../types";
@@ -48,17 +49,56 @@ type TargetPreviewProps = {
   /** Already loaded by the caller (Patch this): skips this component's own fetch. */
   endpoints?: Endpoint[] | null;
   fleet?: Record<string, PackageFleet> | null;
+  /** Told the counts whenever they change (null until the endpoint list is loaded). */
+  onSummary?: (s: TargetSummary | null) => void;
 };
 
+/** What the live preview found: lets the parent block a deployment that would do nothing. */
+export type TargetSummary = {
+  /** Machines in the stages. */
+  targeted: number;
+  /** Machines that will install it (now or when back online). */
+  willInstall: number;
+  /** Machines decided at their next check-in (no inventory / need data yet). */
+  unknown: number;
+};
+
+/** True when the preview is sure nobody installs it: every machine in the stages is up to date, lacks the app or is not applicable. */
+export function nothingToDo(s: TargetSummary | null | undefined): boolean {
+  return !!s && s.targeted > 0 && s.willInstall + s.unknown === 0;
+}
+
 /** Live "which machines get this, and what happens on each?" preview for the deployment form and Patch this. */
-export function TargetPreview({ pkg, rings, endpoints, fleet: fleetProp }: TargetPreviewProps) {
+export function TargetPreview({ pkg, rings, endpoints, fleet: fleetProp, onSummary }: TargetPreviewProps) {
   const ownEps = endpoints === undefined;
   const ownFleet = fleetProp === undefined;
   const epsL = useLoad(() => (ownEps ? api.get<Endpoint[]>("/api/endpoints") : Promise.resolve(null)), [ownEps]);
   const fleetL = useLoad(() => (ownFleet ? api.get<Record<string, PackageFleet>>("/api/packages-needs") : Promise.resolve(null)), [ownFleet]);
   const eps = ownEps ? epsL.data : endpoints;
   const fleetData = ownFleet ? fleetL.data : fleetProp;
-  if (!eps) return null;
+  const view = eps ? buildView(pkg, rings, eps, fleetData) : null;
+  const sTargeted = view ? view.targeted.length : -1;
+  const sWill = view ? view.willInstall : -1;
+  const sUnknown = view ? view.unknown : -1;
+  useEffect(() => {
+    onSummary?.(sTargeted < 0 ? null : { targeted: sTargeted, willInstall: sWill, unknown: sUnknown });
+  }, [sTargeted, sWill, sUnknown]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => onSummary?.(null), []); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!view) return null;
+  const { targeted, willInstall, skipped, unknown, missed, allGroups } = view;
+
+  return (
+    <PreviewBody pkg={pkg} rings={rings} targeted={targeted} willInstall={willInstall} skipped={skipped}
+                 unknown={unknown} missed={missed} allGroups={allGroups} />
+  );
+}
+
+type PreviewRow = { e: Endpoint; ring: number; na: string | null; outcome: Outcome };
+type PreviewView = {
+  targeted: PreviewRow[]; willInstall: number; skipped: number; unknown: number; missed: PreviewRow[]; allGroups: string[];
+};
+
+function buildView(pkg: Package | undefined, rings: RingDraft[], eps: Endpoint[], fleetData: Record<string, PackageFleet> | null | undefined): PreviewView {
   const pf = pkg ? fleetData?.[pkg.package_id] : undefined;
   const needed = new Set(pf?.endpoint_ids ?? []);
   const upToDate = new Set(pf?.up_to_date_ids ?? []);
@@ -83,7 +123,11 @@ export function TargetPreview({ pkg, rings, endpoints, fleet: fleetProp }: Targe
   const unknown = count(["unknown"]);
   const missed = rows.filter((r) => r.ring < 0);
   const allGroups = Array.from(new Set(active.flatMap((e) => e.groups ?? []))).sort();
+  return { targeted, willInstall, skipped, unknown, missed, allGroups };
+}
 
+function PreviewBody({ pkg, rings, targeted, willInstall, skipped, unknown, missed, allGroups }:
+  PreviewView & { pkg: Package | undefined; rings: RingDraft[] }) {
   return (
     <fieldset className="fieldset target-preview">
       <legend>Which machines get this patch? <span className="muted">— live preview</span></legend>
@@ -106,7 +150,7 @@ export function TargetPreview({ pkg, rings, endpoints, fleet: fleetProp }: Targe
         <table className="table table-compact">
           <thead><tr><th>Stage</th><th>Machine</th><th>Groups</th><th>Installed now</th><th>What happens</th></tr></thead>
           <tbody>
-            {targeted.sort((a, b) => a.ring - b.ring || a.e.hostname.localeCompare(b.e.hostname)).map(({ e, ring, na, outcome }) => (
+            {[...targeted].sort((a, b) => a.ring - b.ring || a.e.hostname.localeCompare(b.e.hostname)).map(({ e, ring, na, outcome }) => (
               <tr key={e.endpoint_id}>
                 <td className="nowrap">{stageLabel(rings[ring]?.name, ring)}</td>
                 <td><Link to={`/endpoints/${enc(e.endpoint_id)}`}>{e.hostname}</Link> {e.status === "offline" || e.status === "stale" ? <span className="muted">({e.status})</span> : null}</td>

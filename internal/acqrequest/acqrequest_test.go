@@ -27,6 +27,18 @@ func TestParseRoundTrip(t *testing.T) {
 	}
 }
 
+// A Library import: no endpoint has the app, so no installed forms and
+// endpoints 0; the architecture is the one chosen in the console.
+func TestLibraryImportRequest(t *testing.T) {
+	r := valid()
+	r.Apps = []App{{WingetID: "Microsoft.Edge", Version: "155.0.4283.62", Architectures: []string{"arm64"}, Endpoints: 0}}
+	b, _ := json.Marshal(r)
+	got, err := Parse(strings.NewReader(string(b)))
+	if err != nil || got.Apps[0].Architectures[0] != "arm64" || got.Apps[0].Installed != nil {
+		t.Fatalf("%v %+v", err, got)
+	}
+}
+
 func TestValidateRejects(t *testing.T) {
 	cases := map[string]func(*Request){
 		"format":        func(r *Request) { r.Format = "x" },

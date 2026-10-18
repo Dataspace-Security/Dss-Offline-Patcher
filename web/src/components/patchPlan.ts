@@ -3,7 +3,7 @@
 // that carries a prefilled plan to /deployments/new.
 
 import { api } from "../api";
-import type { Endpoint, Me, NewDeployment, Package, PackageFleet, Policy, RebootPolicy, Ring } from "../types";
+import type { Endpoint, MaintenanceWindow, Me, NewDeployment, Package, PackageFleet, Policy, RebootPolicy, Ring } from "../types";
 
 export type PresetKind = "standard" | "one_ring" | "emergency" | "endpoint";
 
@@ -15,6 +15,49 @@ const HOUR_MS = 3_600_000;
 export const fetchPolicy = (): Promise<Policy> => api.get<Policy>("/api/policy");
 export const fetchFleet = (): Promise<Record<string, PackageFleet>> => api.get<Record<string, PackageFleet>>("/api/packages-needs");
 export const fetchEndpoints = (): Promise<Endpoint[]> => api.get<Endpoint[]>("/api/endpoints");
+export const fetchWindows = (): Promise<MaintenanceWindow[]> => api.get<MaintenanceWindow[]>("/api/maintenance-windows");
+
+/** True when at least one maintenance window lets machines restart by themselves. */
+export function windowsAllowReboot(windows: MaintenanceWindow[] | null | undefined): boolean {
+  return (windows ?? []).some((w) => w.allow_reboot);
+}
+
+// ---- first wave: "every compatible machine that needs it" on many machines ----
+
+/** From this many machines that need it, the rollout starts on a few first. */
+export const FIRST_WAVE_MIN_NEEDED = 10;
+const FIRST_WAVE_MIN = 5;
+const FIRST_WAVE_SHARE = 0.05;
+export const FIRST_WAVE_NAME = "First machines";
+export const REST_NAME = "Everything else";
+
+/** Size of the first wave for N machines that need it: max(5, ceil(5 % of N)); 0 = no first wave (N < 10). */
+export function firstWaveSize(needed: number): number {
+  if (needed < FIRST_WAVE_MIN_NEEDED) return 0;
+  return Math.max(FIRST_WAVE_MIN, Math.ceil(needed * FIRST_WAVE_SHARE));
+}
+
+const SILENT = new Set(["offline", "stale", "awaiting_checkin", "retired"]);
+
+/**
+ * The machines that go first: of those that need it, the ones checking in
+ * (so the first wave can finish), then the rest; by hostname for a stable
+ * choice. Empty when fewer than FIRST_WAVE_MIN_NEEDED machines need it.
+ */
+export function pickFirstWave(neededIds: string[], endpoints: Endpoint[]): string[] {
+  const byId = new Map(endpoints.map((e) => [e.endpoint_id, e]));
+  const live = neededIds.filter((id) => byId.get(id)?.status !== "retired");
+  const k = firstWaveSize(live.length);
+  if (k === 0) return [];
+  const rank = (id: string) => (SILENT.has(byId.get(id)?.status ?? "offline") ? 1 : 0);
+  const name = (id: string) => byId.get(id)?.hostname ?? id;
+  return [...live].sort((a, b) => rank(a) - rank(b) || name(a).localeCompare(name(b))).slice(0, k);
+}
+
+/** True for the two auto-advancing stages built by pickFirstWave. */
+export function isFirstWavePlan(d: Pick<NewDeployment, "rings" | "auto_advance">): boolean {
+  return !!d.auto_advance && d.rings.length === 2 && d.rings[0].name === FIRST_WAVE_NAME;
+}
 
 /** Go duration string ("168h0m0s", "72h", "90m") → milliseconds; null if unparseable. */
 export function parseGoDuration(s: string | undefined | null): number | null {
@@ -122,7 +165,13 @@ export function groupSize(group: string, endpoints: Endpoint[]): number {
   return endpoints.filter((e) => e.status !== "retired" && norm(e.groups ?? []).includes(g)).length;
 }
 
-type PresetOpts = { policy: Policy | null | undefined; endpointId?: string; hostname?: string; justification?: string; now?: number };
+type PresetOpts = {
+  policy: Policy | null | undefined; endpointId?: string; hostname?: string; justification?: string; now?: number;
+  /** Machines that go first (pickFirstWave); empty/absent = one stage. Used by one_ring only. */
+  firstWave?: string[];
+  /** False when no maintenance window allows restarts: machines are then never restarted automatically. */
+  rebootInWindow?: boolean;
+};
 
 /** Builds the deployment body for a preset (Custom is the form, see customHref). */
 export function buildPreset(kind: PresetKind, pkg: Package, o: PresetOpts): NewDeployment {
@@ -130,15 +179,21 @@ export function buildPreset(kind: PresetKind, pkg: Package, o: PresetOpts): NewD
   const base: NewDeployment = {
     package_id: pkg.package_id, name: "", rings: [], max_failure_pct: STANDARD_MAX_FAILURE_PCT,
     max_retries: STANDARD_MAX_RETRIES, window_start: "", window_end: "", emergency: false, justification: "",
-    deadline: "", max_concurrent: 0, reboot_policy: "in_window", ignore_windows: false, health_checks: [], operation: "install",
+    deadline: "", max_concurrent: 0, reboot_policy: o.rebootInWindow === false ? "never" : "in_window",
+    ignore_windows: false, health_checks: [], operation: "install",
   };
+  const wave = o.firstWave ?? [];
   const dl = policyDeadline(pkg, o.policy);
   switch (kind) {
     case "standard":
       return { ...base, name: autoName(pkg, "standard"), deadline: dl ? toRFC(dl) : "",
         rings: [{ name: "Test machines", groups: ["pilot"] }, { name: "All machines", groups: ["all"] }] };
     case "one_ring":
-      return { ...base, name: autoName(pkg, "all endpoints"), deadline: dl ? toRFC(dl) : "",
+      if (wave.length > 0) {
+        return { ...base, name: autoName(pkg, "compatible machines"), deadline: dl ? toRFC(dl) : "", auto_advance: true,
+          rings: [{ name: FIRST_WAVE_NAME, groups: wave.map((id) => `endpoint:${id}`) }, { name: REST_NAME, groups: ["all"] }] };
+      }
+      return { ...base, name: autoName(pkg, "compatible machines"), deadline: dl ? toRFC(dl) : "",
         rings: [{ name: "all", groups: ["all"] }] };
     case "emergency":
       return { ...base, name: autoName(pkg, "emergency"), rings: [{ name: "all", groups: ["all"] }],
@@ -175,6 +230,7 @@ export function customHref(d: NewDeployment): string {
   if (d.emergency) p.set("emergency", "1");
   if (d.justification) p.set("justification", d.justification);
   if (d.ignore_windows) p.set("ignore_windows", "1");
+  if (d.auto_advance) p.set("auto_advance", "1");
   p.set("reboot_policy", d.reboot_policy);
   p.set("max_failure_pct", String(d.max_failure_pct));
   p.set("max_retries", String(d.max_retries));

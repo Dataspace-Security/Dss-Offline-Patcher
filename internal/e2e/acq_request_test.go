@@ -62,7 +62,9 @@ func TestAcquisitionRequestExport(t *testing.T) {
 	if c := e.api("POST", "/api/acquisition-requests", tokOperator, body, &raw); c != 200 {
 		t.Fatalf("export: %d", c)
 	}
-	// What the browser saves is exactly what pmctl parses.
+	// What the browser saves (the response without queued_to) is exactly
+	// what pmctl parses.
+	raw = withoutQueuedTo(t, raw, "")
 	req, err := acqrequest.Parse(strings.NewReader(string(raw)))
 	if err != nil {
 		t.Fatalf("exported file does not parse: %v\n%s", err, raw)

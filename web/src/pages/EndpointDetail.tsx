@@ -9,6 +9,17 @@ import { HardwareCard } from "../components/Hardware";
 import type { Endpoint, EndpointDetail } from "../types";
 import { parseTime, splitList, useLoad, useNow } from "../util";
 
+/** "Restart needed" and why it has not happened yet (the pending_reboot target detail from the server). */
+function RestartNeeded({ e }: { e: EndpointDetail }) {
+  const why = Array.from(new Set(e.targets.filter((t) => t.state === "pending_reboot").map((t) => t.detail).filter(Boolean)));
+  return (
+    <>
+      <Pill state="pending_reboot" />
+      {why.map((d) => <div key={d} className="cell-sub text-amber">{d}</div>)}
+    </>
+  );
+}
+
 export default function EndpointDetailPage() {
   const { id = "" } = useParams();
   const canEdit = useCan("operator");
@@ -54,6 +65,12 @@ export default function EndpointDetailPage() {
           automatically when the agent checks in and the install verifies.
         </div>
       )}
+      {e.status === "awaiting_checkin" && (
+        <div className="banner banner-info">
+          <b>Waiting for first check-in.</b> The agent is enrolled but has not sent its inventory yet, so its patch state is not known.
+          It normally reports within a few minutes; check that the agent service is running if it stays like this.
+        </div>
+      )}
       {(e.status === "offline" || e.status === "stale") && (
         <div className="banner banner-warn">
           This endpoint is <b>{e.status}</b>. Its patch state is unknown — silence is never compliance.
@@ -63,14 +80,18 @@ export default function EndpointDetailPage() {
         <section className="card">
           <h2>System</h2>
           <KV rows={[
-            ["OS", `${e.os} ${e.os_version}`],
+            ["OS", <>{e.os} {e.os_version}{e.missing?.os_support === "out_of_support" && (
+              <div className="banner banner-error" style={{ marginTop: 6 }}>
+                <b>This Windows version no longer receives updates from Microsoft</b> (last cumulative update {e.missing.os_last_update}).
+                No Windows patch will apply to it; upgrade Windows to keep this machine secure.
+              </div>)}</>],
             ["Edition", e.edition],
             ["Build", String(e.build || "—")],
             ["Arch", e.arch],
             ["Agent", e.agent_version],
             ["Last seen", <Time value={e.last_seen} />],
             ["Inventory", <Time value={e.inventory_at} />],
-            ["Reboot pending", e.reboot_pending ? <Pill state="pending_reboot" label="yes" /> : "no"],
+            ["Restart", e.reboot_pending || e.targets.some((t) => t.state === "pending_reboot") ? <RestartNeeded e={e} /> : "not needed"],
             ...(e.targets.some((t) => t.state === "deferred") ? [["Deferred", <span className="text-amber">{e.targets.filter((t) => t.state === "deferred").map((t) => t.detail).filter(Boolean)[0] ?? "pre-install check not met"}</span>] as [string, ReactNode]] : []),
             ["Enrolled", <Time value={e.enrolled_at} />],
             ["Certificate", <CertExpiry value={e.cert_not_after} now={now} />],
@@ -123,7 +144,10 @@ export default function EndpointDetailPage() {
                 <tr key={`${i.kind}-${i.id}-${n}`}>
                   <td className="nowrap"><span className="tag">{i.kind}</span>{i.source === "appstore" && <span className="tag" title="Installed from the Mac App Store, which keeps it updated">App Store</span>}</td>
                   <td><Mono>{i.id}</Mono></td>
-                  <td>{i.name}</td>
+                  <td>
+                    {i.name}
+                    {i.scope === "user" && <span className="muted small" title="Installed for one user only (in that user's profile), not for the whole machine"> (per user)</span>}
+                  </td>
                   <td>{i.version}</td>
                 </tr>
               ))}

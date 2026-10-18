@@ -93,7 +93,7 @@ tampering").
 | `downloading`, `downloaded`, `installing` | In progress | agent |
 | `installed` | Installer succeeded; **not yet verified** | agent |
 | `pending_reboot` | Installed, reboot required; not verified until after the reboot | agent |
-| `verified` | A **fresh inventory** shows the KB / product code / package version, or a KB that supersedes it (transitively) | **server only** |
+| `verified` | A **fresh inventory** shows the KB / product code / package version (machine-wide or per-user install), or a KB that supersedes it (transitively), or (Windows cumulative updates with `expected_ubr`) the machine reports that build revision or later | **server only** |
 | `failed` | Installer or download failed. Retried while `attempts ≤ max_retries` | agent |
 | `not_applicable` | OS/arch/build/edition does not match, or the installer said "not applicable", or the endpoint was retired | server or agent |
 | `exception` | Covered by an active exception | server |
@@ -115,16 +115,22 @@ Each endpoint gets one derived status. The first matching rule wins:
 |---|---|
 | `retired` | The endpoint was retired. Excluded from fleet totals. |
 | `lost_after_install` | Any target `lost_after_install`: it went silent right after installing (§3.8). Highest priority. |
+| `awaiting_checkin` | Enrolled less than 24 h ago and has not sent its first inventory yet (console: "Waiting for first check-in"). Not compliant, but not alerted on as offline / stale. After 24 h without a check-in it is `offline`. |
 | `offline` | No check-in for longer than `offline_after` (default 30 min) |
-| `stale` | Inventory older than `stale_inventory_after` (default 24 h), or never received |
+| `stale` | Inventory older than `stale_inventory_after` (default 24 h) |
 | `failed` | Any target `failed` (in a deployment that is not cancelled) |
 | `pending_reboot` | Any target `pending_reboot`, or the OS reports a reboot pending |
 | `exception` | Any target covered by an exception |
 | `noncompliant` | Any target `pending`/`deferred`/`downloading`/`downloaded`/`installing`/`installed` (rollback targets excepted) |
+| `out_of_support` | Would be compliant, but the update intelligence says its Windows build no longer gets updates from Microsoft (console: "Windows no longer updated") |
+| `updates_available` | Would be compliant, but the update intelligence says it is missing Windows or app updates nobody has deployed yet (console: "Updates available") |
 | `compliant` | Otherwise |
 
 `lost_after_install`, `offline` and `stale` beat everything else. An endpoint that stops talking is **never** shown as
-compliant, and the reports count it as not reporting.
+compliant, and the reports count it as not reporting. `out_of_support` and `updates_available` only ever replace
+`compliant` (never `failed`, `pending_reboot`, `offline`, ...), come from the latest update intelligence, and are used
+everywhere the console counts endpoints (overview, endpoint list and detail, `endpoints.csv`, metrics). Without update
+intelligence a machine with nothing deployed to it is `compliant`.
 
 ---
 
@@ -162,9 +168,12 @@ live in `pmserver.json` and need OS access to the server plus a restart.
 Tokens are sent as `Authorization: Bearer <token>` and are what scripts use against the API. Notes:
 
 - They are managed only in the config file. Adding or removing one needs a server restart.
-- `allow_static_tokens: false` disables all of them. **Default:** `true` without SSO; when `oidc`
-  is configured the default is `false` — set `"allow_static_tokens": true` explicitly to keep a
-  break-glass token (and keep it in a safe).
+- `allow_static_tokens: false` disables all of them. **Default: `true`, with or without SSO**
+  (runbook 01): adding `oidc` does not switch the break-glass token off. Once SSO works, decide
+  whether to keep it (store it in a safe) or set `"allow_static_tokens": false`.
+- pmserver logs one line at startup saying how admins can sign in (`admin sign-in: ...`), and
+  whether `allow_static_tokens` was set or defaulted. It is a **warning** when `admin_tokens` are
+  configured but disabled, so a dead break-glass token is never a surprise.
 - By design, `require_mfa` is **not** applied to static tokens (they are the break-glass path for
   when the IdP is unavailable). Keep them for break-glass and automation, store
   them in a safe, and watch the audit log for their use (`actor` = `user:<name>` from the config).
@@ -193,18 +202,31 @@ Tokens are sent as `Authorization: Bearer <token>` and are what scripts use agai
 | `bundle_rejected` | warning | Intake rejected a bundle |
 | `trust_rejected` | warning | A trust document did not verify or was a replay |
 | `intake_rate_limited` | warning | Inbox rate limit reached; bundles wait in the inbox |
-| `endpoints_offline` / `inventory_stale` | warning | Fleet sweep found offline / stale endpoints |
+| `endpoints_offline` / `inventory_stale` | warning | Fleet sweep found offline / stale endpoints (the message names them) |
+| `install_unverified` | warning | Endpoints reported an install more than 6 h ago and inventory has not confirmed it (counts as a failure for auto-pause) |
+| `out_of_support` | warning | Endpoints run a Windows build Microsoft no longer updates: plan the upgrade |
+| `intel_stale` | warning | The update intelligence is more than 8 days old: what the console says is missing may be out of date; ask the acquisition team |
 | `cert_expiring` | warning | An endpoint's client certificate expires within 14 days and has not been renewed (agent offline?) |
 | `exception_expiring` | info | An active exception expires within 7 days |
 
-   An identical alert (same kind and object) is not raised again while one is open. Acknowledge
-   (operator) with a short note once you have acted. Acknowledging does not fix anything, and the
-   same condition raises a new alert if it is still true at the next sweep (every
+   An identical alert (same kind and object) is not raised again while one is open. Alerts about
+   endpoints name up to five hosts (then "+N more"); the console links them. **Condition alerts
+   close themselves** when the condition clears (shown as resolved by `system:scheduler`, audited
+   `alert.resolved`): offline / stale endpoints back, an install that failed and later verified,
+   health checks that pass after the restart, lost endpoints back, intelligence fresh again, no
+   out-of-support build left, unconfirmed installs confirmed, a renewed certificate. Event alerts
+   (rejected bundle, auto-pause, key compromise, ...) stay until you acknowledge them (operator)
+   with a short note once you have acted. Acknowledging does not fix anything, and the same
+   condition raises a new alert if it is still true at the next sweep (every
    `alert_sweep_interval`, default 5 min).
 3. **Reports.** Check compliance by severity against the deadlines (`patch_deadlines`, default:
    critical 7 days, important 30, moderate 60, low 90, counted from the vendor release date).
-   `overdue` targets are the priority. Export `compliance.csv` / `endpoints.csv` if your change
-   board wants them (the export is audited).
+   `overdue` targets are the priority. Compliance per package counts every endpoint that **needs**
+   the package, not only the targeted ones: needed machines nobody deployed to are outstanding
+   (`not_targeted`). Export `compliance.csv` / `endpoints.csv` if your change board wants them,
+   and **Download evidence (CSV)** (`targets.csv`: per endpoint and package the state, when it
+   verified, the inventory line that proved it and who approved it) for auditors. Every export is
+   audited.
 4. **Intake.** Any rejected bundle since yesterday? Is the transfer reconciliation clean (no
    receipt without a bundle, no bundle without a receipt)?
 5. **Deployments.** Any `paused` deployments? Any active deployment with targets stuck in `pending`
@@ -239,7 +261,8 @@ it"). Plan who approves and who deploys.
 | Name | Free text, required. |
 | Rings | 1–10 rings, each with a name and at least one group. Typical: `pilot` → `broad`. |
 | `max_failure_pct` | 0–100. The deployment auto-pauses when (failed targets with retries exhausted + targets with a failed health check) in the current ring exceed this percentage of considered targets (not counting `not_applicable` and `exception`). **0 means the first exhausted failure pauses it.** |
-| `max_retries` | 0–10. A failed target is offered again while `attempts ≤ max_retries`. |
+| `max_retries` | 0–10. A failed target is offered again while `attempts ≤ max_retries`. "Installer busy" failures (another installation running on the machine) do not use up retries for the first 10 in a row; the target shows `waiting: another installation is running on this machine (try N)`. |
+| `auto_advance` | Default off. When on, a ring that finished within `max_failure_pct` starts the next ring by itself (audited as `deployment.advanced` by `system:scheduler`). A ring that finished over the threshold waits for you. "Patch this → every compatible machine that needs it" turns it on when 10 or more machines need the update: first max(5, 5 %) of them ("First machines"), then everything else. |
 | Window (`window_start`/`window_end`) | `HH:MM` **UTC**, both or neither. May cross midnight. Outside it, no assignments are handed out. |
 | `deadline` | RFC 3339, optional. After it, **endpoint maintenance windows** no longer hold installs back. It does **not** override the deployment window above. |
 | `max_concurrent` | Cap on endpoints downloading/installing at once (0 = no cap). |
@@ -259,7 +282,11 @@ sends `reboot_now`, or an install returned "reboot required" and the assignment 
 The agent schedules a restart in 10 minutes with a warning (Windows `shutdown /r /t 600`, Linux and
 macOS `shutdown -r +10`). With `reboot_policy: never` it never reboots and the target waits in
 `pending_reboot` until someone reboots the machine. A `pending_reboot` target becomes `verified` only
-when inventory shows the update **and** the OS no longer reports a pending reboot.
+when inventory shows the update **and** the OS no longer reports a pending reboot. With `in_window`
+(or `at_deadline` before the deadline) on a machine that has **no** maintenance window with
+`allow_reboot`, no automatic restart can ever happen: the target detail says so ("no maintenance
+window allows automatic restarts (restart the machine or add a window)"), and the console's "Patch
+this" defaults to `never` in that case. The console shows `pending_reboot` as "Restart needed".
 
 ### 3.4 Advancing, pausing, resuming, cancelling
 
@@ -373,6 +400,47 @@ back — the usual order for a bad patch is *revoke*, then *roll back*.
 
 ---
 
+### 3.9 Acquisition requests: carried file or direct hand-off
+
+**Updates → Export acquisition request** lists what the fleet is missing for the acquisition
+zone ([08-acquisition.md](08-acquisition.md)). How it gets there depends on one setting in
+`pmserver.json`:
+
+| `acquisition_requests_dir` | What happens on export | Use it for |
+|---|---|---|
+| unset (default) | The browser downloads `<request_id>.json`; the operator carries it on approved media into the acquisition host's `requests` folder. The console says "Strict one-way transfer". | **Production with separate hosts.** Keep it unset: the isolated server never writes anything towards the connected zone. |
+| absolute path, e.g. `/var/lib/offpatch-acq/requests` | The server also writes the request into that folder (atomically, mode 0640); the console says "Queued for download". | Only when acquisition runs **on the same machine** (the `--role all` lab sets it), or the organisation has formally approved an outbound folder. |
+
+- The audit event `acquisition.request_exported` records `queued_to` (the folder, or empty). If
+  the write fails, the export still succeeds as a download, and the event carries `queued_error`;
+  check the folder's permissions (the server user needs write access; `pmctl auto` needs read and
+  rename).
+- The path must be absolute (the server refuses to start otherwise). If it is not writable at
+  startup the server logs a warning and keeps running.
+- Requests queued this way are handled by the next `pmctl auto` run; the lab also starts
+  `pmctl auto -only-requests` as soon as a file appears (`offpatch-acquire-requests.path`).
+- **Imports** shows each request item as requested, seen, fulfilled, can't import (with the
+  reason), or **Not picked up**: the newest acquisition run, finished more than 10 minutes after
+  the request, did not list it (the file never reached the acquisition host, or was set aside).
+  Use **Ask again** (a new request) after checking with the acquisition team.
+
+### 3.10 Library: importing something new
+
+**Patches → Library** lists everything the update intelligence knows (about 16 000 winget apps
+and the Windows cumulative updates per build), not only what the fleet is missing. It is an
+**untrusted index**: names, descriptions and links come from the winget community. The server
+never opens a link and never installs anything from the Library; links are shown as text
+(https only).
+
+- **Available** (default) shows what offpatch can import (an MSI installer: *Importable: yes*) or
+  what is installed in the fleet. *Importable: no* says why (for example "EXE installer only
+  (nullsoft)"); *unknown* means the acquisition zone has not looked the app up yet (it does so
+  for configured, requested and about 200 common enterprise apps).
+- **Import** creates an acquisition request (§3.9). For an app that no machine has installed,
+  pick the architecture (default x64). What arrives is a signed bundle in **quarantine**, to be
+  reviewed and approved like any other package.
+- The row then shows requested → seen → in catalog (or Not picked up).
+
 ## 4. Monthly Patch Tuesday workflow (end to end)
 
 The full commands are in [runbooks/02-acquisition-zone-setup-and-monthly-run.md](runbooks/02-acquisition-zone-setup-and-monthly-run.md).
@@ -467,7 +535,8 @@ that was offline past its certificate expiry cannot renew and must be re-enrolle
 
 Useful actions to search for: `bundle.validated`, `bundle.rejected`, `package.approval_recorded`,
 `package.approved`, `package.revoked`, `deployment.created`, `deployment.created_emergency`,
-`deployment.auto_paused`, `target.failed`, `target.verified`, `exception.created`,
+`deployment.auto_paused`, `target.failed`, `target.verified`, `target.install_unverified`,
+`alert.resolved`, `report.exported`, `exception.created`,
 `endpoint.enrolled`, `endpoint.retired`, `auth.login`, `auth.login_denied`, `access.denied`,
 `trust.updated`, `audit.checkpoint`, `audit.pruned`.
 
@@ -584,11 +653,14 @@ Notes:
 | `rpm` failed with `Failed dependencies` | Same: `rpm -U` does not resolve dependencies | Same approach. |
 | Deployment `paused`, reason `auto-pause: N/M endpoints failed (x install, y health check, z lost after install) in ring "…" (threshold P%)` | Failures in the current ring crossed `max_failure_pct` | Investigate the failed targets first. Resume (reason required) only when the cause is understood; or cancel / revoke the package. |
 | Target health `failed`, alert `health_check_failed` | A `service_running` service/unit/label is not running, or nothing listens on a `tcp_listening` port, after install | Check the service on the endpoint; check you used the service **name**, not the display name. A failed health check counts toward auto-pause but does **not** make the target `failed`; it can still become `verified`. |
-| Target stays `installed`, never `verified` | Inventory does not show the KB / product code / package version. Some updates do not appear in `Win32_QuickFixEngineering`; the MSI product code in the manifest may not match the installed product | Check the endpoint's Inventory tab. Fix the package metadata (new `package_id`) if it is wrong. |
+| Target stays `installed`, never `verified` (after 6 h: "installed but not confirmed by inventory after 6 h", alert `install_unverified`, counts toward auto-pause) | Inventory does not show the KB / product code / package version. Some updates do not appear in `Win32_QuickFixEngineering` (cumulative updates built with `expected_ubr` verify by build revision instead); the MSI product code in the manifest may not match the installed product | Check the endpoint's Inventory tab. Fix the package metadata (new `package_id`) if it is wrong. |
 | Target `deferred`, detail `not enough free disk space …` / `on battery …` | Pre-install check (§3.8) | Free disk space (Disk Cleanup, clear old profiles) or plug the laptop in; the next check-in proceeds. Adjust `preinstall` in the server config if the minimum is wrong for your fleet. |
 | Target `lost_after_install`, critical alert | Endpoint silent since the install / reboot (§3.8) | Check the machine; it recovers automatically when it checks in. |
 | Create rollback returns 409 `rollback not supported` | macOS `.pkg`, the agent, or a package without KB / product code / package name | Remove by hand or deploy the previous version. |
-| Target stays `pending_reboot` | `reboot_policy: never`, or no maintenance window with `allow_reboot` is open | Reboot through your normal process. |
+| Target stays `pending_reboot` | `reboot_policy: never`, or no maintenance window with `allow_reboot` is open (detail `no maintenance window allows automatic restarts` when none ever is) | Reboot through your normal process, or add a maintenance window with `allow_reboot`. |
+| Target `failed`, detail `waiting: another installation is running on this machine (try N)` | Another installer or Windows Update is running on the machine (msiexec 1618, servicing busy) | Nothing: it is retried at the next check-in without using up retries, 10 times in a row; after that it counts as a normal failure. |
+| Package `rejected`, operator clicked "Import again" | The next acquisition run sends it again | The package returns to `quarantined` for a new review (audit `package.reimported`, earlier approvals cleared). A `revoked` package is never imported again. |
+| Endpoint `awaiting_checkin` for a long time | Agent installed but not running, or cannot reach the server | As for `offline` (§3.6). After 24 h it is shown `offline`. |
 | Approve returns 409 `already approved this package; a different approver is required` | Two-person rule | A second approver approves. |
 | Create deployment returns 409 `separation of duties` | You approved the package | Another operator creates the deployment. |
 

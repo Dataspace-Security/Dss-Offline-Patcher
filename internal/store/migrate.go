@@ -22,14 +22,25 @@ var columnMigrations = []struct{ table, column, ddl string }{
 	{"deployments", "ignore_windows", "INTEGER NOT NULL DEFAULT 0"},
 	{"deployments", "health_checks", "TEXT NOT NULL DEFAULT '[]'"},
 	{"deployments", "operation", "TEXT NOT NULL DEFAULT 'install'"},
+	{"deployments", "auto_advance", "INTEGER NOT NULL DEFAULT 0"},
 	{"targets", "leased_until", "TEXT NOT NULL DEFAULT ''"},
 	{"targets", "health", "TEXT NOT NULL DEFAULT ''"},
 	{"targets", "health_detail", "TEXT NOT NULL DEFAULT ''"},
+	// Consecutive "installer busy" results (not counted as attempts at first).
+	{"targets", "busy_tries", "INTEGER NOT NULL DEFAULT 0"},
 	{"packages", "superseded_by", "TEXT NOT NULL DEFAULT ''"},
 	{"packages", "package_name", "TEXT NOT NULL DEFAULT ''"},
 	{"packages", "prerequisites", "TEXT NOT NULL DEFAULT '[]'"},
 	{"enrollment_tokens", "max_uses", "INTEGER NOT NULL DEFAULT 1"},
 	{"enrollment_tokens", "uses", "INTEGER NOT NULL DEFAULT 0"},
+	// Condition alerts: structured details (endpoint_ids) and when the
+	// condition cleared (the alert closed itself).
+	{"alerts", "details", "TEXT NOT NULL DEFAULT '{}'"},
+	{"alerts", "resolved_at", "TEXT NOT NULL DEFAULT ''"},
+	// Windows cumulative updates: the build revision once installed.
+	{"packages", "expected_ubr", "INTEGER NOT NULL DEFAULT 0"},
+	// Verified targets: the inventory line (or OS revision) that proved it.
+	{"targets", "evidence", "TEXT NOT NULL DEFAULT ''"},
 }
 
 func hasColumn(db *sql.DB, table, column string) (bool, error) {

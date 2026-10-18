@@ -216,8 +216,9 @@ func TestServerCertExpiryAlert(t *testing.T) {
 	}
 }
 
-// M6: with SSO configured, static admin tokens are off unless enabled
-// explicitly (break-glass).
+// Static admin tokens stay on (break-glass) unless allow_static_tokens is
+// false, with or without SSO (runbook 01; P1 item 6: configuring SSO must not
+// silently disable the break-glass token).
 func TestStaticTokensDefault(t *testing.T) {
 	oidcCfg := `"oidc": {"issuer": "https://idp.corp", "client_id": "pm", "redirect_url": "https://pm/auth/callback"},`
 	for _, c := range []struct {
@@ -225,7 +226,8 @@ func TestStaticTokensDefault(t *testing.T) {
 		want  bool
 	}{
 		{"", true},
-		{oidcCfg, false},
+		{oidcCfg, true}, // runbook 01: SSO must not silently disable break-glass
+		{oidcCfg + ` "allow_static_tokens": false,`, false},
 		{oidcCfg + ` "allow_static_tokens": true,`, true},
 	} {
 		cfg, err := LoadConfig(writeConfig(t, t.TempDir(), c.extra))

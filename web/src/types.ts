@@ -8,6 +8,8 @@ export type Summary = {
   deployments: Record<DeploymentState, number>;
   active_exceptions: number;
   audit: { ok: boolean; count: number };
+  /** P2: age of the update intelligence (absent on older servers / without intelligence). stale = older than 8 days. */
+  intel?: { generated_at: string; age_hours: number; stale: boolean } | null;
 };
 
 export type BundleState = "received" | "validated" | "rejected";
@@ -39,7 +41,8 @@ export type Package = {
 };
 
 export type EndpointStatus = "compliant" | "noncompliant" | "pending_reboot" | "failed" | "exception" | "stale" | "offline" | "retired"
-  | "lost_after_install"; // v1.2
+  | "lost_after_install" // v1.2
+  | "updates_available" | "out_of_support" | "awaiting_checkin"; // P1: honest status (was "compliant" / never checked in)
 export type Endpoint = {
   endpoint_id: string; hostname: string; os: string; os_version: string; build: number; arch: string;
   groups: string[]; site: string; owner: string; criticality: string;
@@ -56,7 +59,10 @@ export type Hardware = {
   disks?: { mount: string; total_bytes: number; free_bytes: number }[];
   ip_addresses?: string[]; mac_address?: string; boot_time?: string; logged_in_user?: string; timezone?: string;
 };
-export type InventoryItem = { kind: "kb" | "product" | "pkg" | "app" | "agent"; id: string; name: string; version: string; source?: "appstore" };
+export type InventoryItem = { kind: "kb" | "product" | "pkg" | "app" | "agent"; id: string; name: string; version: string; source?: "appstore";
+  /** P2: "user" = per-user install (one user's profile); empty = whole machine. */
+  scope?: "user" | "";
+};
 export type EndpointDetail = Endpoint & { inventory: InventoryItem[]; targets: Target[] };
 
 export type DeploymentState = "active" | "paused" | "cancelled" | "completed";
@@ -79,6 +85,8 @@ export type NewDeployment = {
   health_checks: HealthCheck[];
   // v1.2 (default "install"; "rollback" requires a justification)
   operation?: DeploymentOperation;
+  // P1: when true the next stage starts by itself once the current one finished without too many failures
+  auto_advance?: boolean;
 };
 export type Deployment = NewDeployment & {
   deployment_id: string; state: DeploymentState; current_ring: number; state_reason: string;
@@ -170,11 +178,14 @@ export type Reconciliation = {
 };
 
 // ---- v1.1: reporting (C5) ----
-export type SeverityStats = { targets: number; verified: number; outstanding: number; overdue: number; exceptions: number; pct_compliant: number };
+// P2: the denominator is the machines that NEED a package (targeted or not); outstanding includes needed machines without a target.
+// `needed` (when the server sends it) is that denominator; older servers only send `targets`.
+export type SeverityStats = { targets: number; verified: number; outstanding: number; overdue: number; exceptions: number; pct_compliant: number; needed?: number };
 export type PackageReport = {
   package_id: string; title: string; severity: string; state: string; release_date: string; deadline: string;
   received_at: string; approved_at: string; first_verified_at: string; p90_verified_at: string;
   targets: number; verified: number; outstanding: number; overdue: number; exceptions: number; pct_compliant: number;
+  needed?: number; // P2: machines that need it (denominator), targeted or not
   days_release_to_received: number; days_received_to_approved: number; days_approved_to_first_verified: number;
   days_release_to_90pct_verified: number; /* -1 = not reached */
 };
@@ -190,6 +201,9 @@ export type ComplianceReport = {
 export type Alert = {
   id: number; created_at: string; severity: "info" | "warning" | "critical"; kind: string; message: string;
   object_type: string; object_id: string; acknowledged_by: string; acknowledged_at: string;
+  // P2: alerts about endpoints carry their ids; condition-based alerts close themselves.
+  details?: { endpoint_ids?: string[]; hostnames?: string[] } & Record<string, unknown>;
+  resolved_at?: string; resolved_by?: string;
 };
 
 // ---- Console-only helper types (not part of the API contract) ----
@@ -218,6 +232,8 @@ export type AcquisitionRequest = {
   apps: { winget_id: string; name?: string; version: string; architectures: string[];
     installed?: { product_code?: string; name: string; version: string }[]; endpoints: number }[];
   kbs: { kb: string; product?: string; title?: string; build: number; arch: string; server?: boolean; endpoints: number }[];
+  /** POST response only: where the server queued the request directly ("" = strict one-way, carry the file). */
+  queued_to?: string;
 };
 export type FleetUpdates = {
   intel: IntelSummary | null;
@@ -250,7 +266,9 @@ export type PackageFleet = {
 };
 
 /** Endpoint gains `missing` (null/absent when there is no update intelligence). */
-export type EndpointMissing = { os: number; apps: number; ready: number }; // ready = approved catalog packages it needs
+export type EndpointMissing = { os: number; apps: number; ready: number; catalog?: number; // catalog = approved + awaiting-approval packages it needs
+  os_support?: "supported" | "out_of_support" | ""; os_last_update?: string; // Windows build still receives updates? (date of its newest cumulative update)
+}; // ready = approved catalog packages it needs
 
 /** GET /api/fleet/status (viewer): one row per KB or app across the fleet. */
 export type FleetStatusEndpoint = {
@@ -268,8 +286,11 @@ export type FleetStatusRow = {
 export type FleetStatus = { intel: IntelSummary | null; rows: FleetStatusRow[] };
 
 /** Acquisition request tracking (P2.3). */
-export type AcquisitionRequestRef = { request_id: string; at: string; status: "requested" | "seen" | "fulfilled" };
-export type AcquisitionRequestItem = { kind: "app" | "kb"; key: string; version: string; status: "requested" | "seen" | "fulfilled"; fulfilled_at: string; package_id: string };
+export type AcquisitionStatus = "requested" | "seen" | "fulfilled" | "unsupported" | "failed"
+  | "stale"; // P2: a later acquisition run did not pick the request up (reason says which run)
+/** unsupported = can never be fetched this way; failed = transient, may succeed next run. `reason` explains both. */
+export type AcquisitionRequestRef = { request_id: string; at: string; status: AcquisitionStatus; reason?: string };
+export type AcquisitionRequestItem = { kind: "app" | "kb"; key: string; version: string; status: AcquisitionStatus; fulfilled_at: string; package_id: string; reason?: string };
 export type AcquisitionRequestRecord = {
   request_id: string; created_at: string; created_by: string; intel_generated_at: string;
   seen_at: string; // first acquisition status report that lists it ("" if none)
@@ -282,4 +303,30 @@ export type TargetLive = {
   pct: number;            // 0..100 for downloading, -1 when unknown
   bytes_done: number; bytes_total: number;
   at: string;             // last heartbeat time
+};
+
+// ---- P2: Library (GET /api/library, GET /api/library/{kind}/{id}) ----
+
+export type LibraryKind = "app" | "os";
+export type LibraryView = "available" | "installed" | "catalog" | "all";
+export type LibrarySort = "installed" | "name" | "date";
+export type Importable = "yes" | "no" | "unknown";
+export type LibraryInstaller = {
+  arch: string; type: string; scope?: string; url: string; sha256?: string; product_code?: string;
+};
+export type LibraryItem = {
+  kind: LibraryKind; id: string; name: string; publisher: string; latest_version: string; description: string;
+  /** Untrusted community links (https only, ≤ 2 KB; empty when absent). */
+  links: { homepage?: string; publisher_url?: string; manifest?: string };
+  installers: LibraryInstaller[] | null; resolved_at: string;
+  importable: Importable; importable_reason: string;
+  installed: { endpoints: number; outdated: number };
+  catalog: CatalogLink | null;
+  requested: AcquisitionRequestRef | null;
+};
+export type LibraryPage = {
+  source: string; generated_at: string; total: number; page: number; per_page: number; items: LibraryItem[];
+};
+export type LibraryItemDetail = LibraryItem & {
+  endpoints: { endpoint_id: string; hostname: string; installed_version: string; outdated: boolean }[];
 };

@@ -110,13 +110,17 @@ func (s *Store) sweepAcquisition(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	stale := map[string]bool{}
 	for _, a := range srcs {
 		if a.Stale {
+			stale[a.Source] = true
 			if err := s.RaiseAlert(ctx, "warning", "acquisition_stale", "acquisition", a.Source,
-				"no acquisition status from "+a.Source+" for "+itoa(int(a.AgeHrs))+" h — is the scheduled pmctl auto job running?"); err != nil {
+				"no acquisition status from "+a.Source+" for "+itoa(int(a.AgeHrs))+" h — ask the acquisition team whether the scheduled acquisition run is working"); err != nil {
 				return err
 			}
 		}
 	}
-	return nil
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		return s.resolveAlertsExcept(tx, "acquisition_stale", stale, "a fresh acquisition status report arrived")
+	})
 }

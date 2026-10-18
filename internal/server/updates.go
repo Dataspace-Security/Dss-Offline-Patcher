@@ -148,6 +148,7 @@ type catalogLink struct {
 type catalogIndex struct {
 	byKB           map[string]catalogLink
 	byCode, byName map[string]namedPackage
+	byID           map[string]catalogLink // every package by package_id (Library: pmctl's winget package ids)
 }
 
 type namedPackage struct {
@@ -160,7 +161,7 @@ func (s *Server) catalogIndex(ctx context.Context) (*catalogIndex, error) {
 	if err != nil {
 		return nil, err
 	}
-	ci := &catalogIndex{byKB: map[string]catalogLink{}, byCode: map[string]namedPackage{}, byName: map[string]namedPackage{}}
+	ci := &catalogIndex{byKB: map[string]catalogLink{}, byCode: map[string]namedPackage{}, byName: map[string]namedPackage{}, byID: map[string]catalogLink{}}
 	// keep the newest version per product; on a tie, the approved one.
 	keep := func(m map[string]namedPackage, k string, p store.Package) {
 		cur, ok := m[k]
@@ -170,6 +171,7 @@ func (s *Server) catalogIndex(ctx context.Context) (*catalogIndex, error) {
 		}
 	}
 	for _, p := range pkgs {
+		ci.byID[p.PackageID] = catalogLink{PackageID: p.PackageID, State: p.State}
 		if p.KB != "" {
 			if cur, ok := ci.byKB[strings.ToUpper(p.KB)]; !ok || cur.State != "approved" {
 				ci.byKB[strings.ToUpper(p.KB)] = catalogLink{PackageID: p.PackageID, State: p.State}
@@ -222,14 +224,19 @@ func (ci *catalogIndex) forCurrentApp(u intel.AppUpdate) *catalogLink {
 	return nil
 }
 
+// Requested is the latest acquisition request listing the update (with
+// its status and, for unsupported / failed, the reason), as on GET
+// /api/updates.
 type osUpdateView struct {
 	intel.OSUpdate
-	Catalog *catalogLink `json:"catalog"`
+	Catalog   *catalogLink         `json:"catalog"`
+	Requested *store.AcqRequestRef `json:"requested"`
 }
 
 type appUpdateView struct {
 	intel.AppUpdate
-	Catalog *catalogLink `json:"catalog"`
+	Catalog   *catalogLink         `json:"catalog"`
+	Requested *store.AcqRequestRef `json:"requested"`
 }
 
 type endpointUpdates struct {
@@ -258,13 +265,18 @@ func (s *Server) endpointUpdates(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, err)
 			return
 		}
+		refs, err := s.acqRefs(r.Context())
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
 		res := ix.Match(toIntelEndpoint(e.Endpoint, e.Inventory))
 		out.Current, out.Unmatched = res.Current, res.Unmatched
 		for _, u := range res.OS {
-			out.OS = append(out.OS, osUpdateView{OSUpdate: u, Catalog: ci.forOS(u.KB)})
+			out.OS = append(out.OS, osUpdateView{OSUpdate: u, Catalog: ci.forOS(u.KB), Requested: refFor(refs, "os", u.KB)})
 		}
 		for _, u := range res.Apps {
-			out.Apps = append(out.Apps, appUpdateView{AppUpdate: u, Catalog: ci.forApp(u)})
+			out.Apps = append(out.Apps, appUpdateView{AppUpdate: u, Catalog: ci.forApp(u), Requested: refFor(refs, "app", u.AppID)})
 		}
 	}
 	writeJSON(w, 200, out)
@@ -310,6 +322,9 @@ type fleetSnapshot struct {
 	missing []*fleetUpdate // updates some endpoint is missing (GET /api/updates)
 	all     []*fleetUpdate // missing plus updates matched endpoints already have
 	perEP   map[string]store.EndpointMissing
+	cat     *catalogIndex // the catalog the snapshot was built with (Library)
+	// byKey: kind+"/"+key -> entry of all (Library overlay).
+	byKey map[string]*fleetUpdate
 }
 
 // fleet returns every update the fleet is missing (nil without usable
@@ -352,6 +367,7 @@ func (s *Server) fleetSnap(ctx context.Context, eps []store.Endpoint) (*intake.I
 		return nil, nil, err
 	}
 	snap := buildFleet(ix, ci, eps)
+	snap.cat = ci
 	s.intel.mu.Lock()
 	s.intel.fleet, s.intel.fleetGen, s.intel.fleetStoreGen, s.intel.fleetAt = snap, sum.GeneratedAt, gen, time.Now()
 	s.intel.mu.Unlock()
@@ -387,8 +403,10 @@ func buildFleet(ix *intel.Index, ci *catalogIndex, eps []store.Endpoint) *fleetS
 		if e.RetiredAt != "" {
 			continue
 		}
-		res := ix.Match(toIntelEndpoint(e, e.InventoryItems()))
-		snap.perEP[e.EndpointID] = store.EndpointMissing{OS: len(res.OS), Apps: len(res.Apps)}
+		ie := toIntelEndpoint(e, e.InventoryItems())
+		res := ix.Match(ie)
+		support, last := ix.OSSupport(ie)
+		snap.perEP[e.EndpointID] = store.EndpointMissing{OS: len(res.OS), Apps: len(res.Apps), OSSupport: support, OSLastUpdate: last}
 		for _, o := range res.OS {
 			u := get("os", o.KB, o.Title, o.KB, ci.forOS(o.KB))
 			if cur, ok := u.releases[o.Arch]; ok && cur.Build != o.Build {
@@ -421,6 +439,7 @@ func buildFleet(ix *intel.Index, ci *catalogIndex, eps []store.Endpoint) *fleetS
 			u.current = append(u.current, fleetNeed{EndpointID: e.EndpointID, Hostname: e.Hostname, Installed: a.InstalledVersion, arch: e.Arch})
 		}
 	}
+	snap.byKey = agg
 	for _, u := range agg {
 		snap.all = append(snap.all, u)
 	}

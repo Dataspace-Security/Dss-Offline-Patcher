@@ -9,7 +9,10 @@ import { CopyBox, Empty, ErrorBanner, Modal, PageHeader, Pill, RelTime, Time } f
 import type { Endpoint, EndpointStatus, EnrollmentToken } from "../types";
 import { fmtBytes, relTime, splitList, useLoad, useNow } from "../util";
 
-const STATUSES: EndpointStatus[] = ["lost_after_install", "offline", "stale", "failed", "pending_reboot", "exception", "noncompliant", "compliant", "retired"];
+const STATUSES: EndpointStatus[] = [
+  "lost_after_install", "offline", "stale", "failed", "out_of_support", "pending_reboot", "exception", "noncompliant",
+  "updates_available", "awaiting_checkin", "compliant", "retired",
+];
 
 export default function Endpoints() {
   const canEdit = useCan("operator");
@@ -153,7 +156,7 @@ export default function Endpoints() {
                 <td>{e.owner || <span className="muted">—</span>}</td>
                 <td className="nowrap"><RelTime value={e.last_seen} /></td>
                 <td className="nowrap" title={e.inventory_at}>{relTime(e.inventory_at, now).replace(/ ago$/, "")}</td>
-                <td>{e.reboot_pending ? <Pill state="pending_reboot" label="pending" /> : <span className="muted">no</span>}</td>
+                <td>{e.reboot_pending ? <Pill state="pending_reboot" /> : <span className="muted">no</span>}</td>
               </tr>
             ))}
           </tbody>
@@ -377,11 +380,18 @@ function OutdatedCell({ e }: { e: Endpoint }) {
   const m = e.missing;
   if (!m) return <span className="muted" title="No update intelligence for this endpoint yet">unknown</span>;
   const total = missingTotal(e);
-  if (total === 0) return <Pill state="verified" label="up to date" />;
+  const unsupported = m.os_support === "out_of_support"
+    ? <div className="cell-sub"><Pill state="failed" label="Windows no longer updated" /> <span className="muted" title="Microsoft stopped shipping updates for this Windows version; upgrade Windows to keep it secure">last update {m.os_last_update}</span></div>
+    : null;
+  if (total === 0) return <>
+    <Pill state="verified" label="up to date" />
+    {unsupported}
+  </>;
   return (
     <span title={`${m.os} Windows update(s), ${m.apps} application update(s) missing; ${m.ready} approved package(s) ready to deploy`}>
       <b className="text-amber">{total}</b> <span className="muted">missing</span>
       <div className="cell-sub">OS {m.os} · apps {m.apps}{m.ready ? <> · <b>{m.ready} ready</b></> : null}</div>
+      {unsupported}
     </span>
   );
 }

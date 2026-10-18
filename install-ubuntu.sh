@@ -51,6 +51,7 @@ AGENT_STATE=/var/lib/offpatch        # local agent identity
 SVC_USER=offpatch                    # runs pmserver
 ACQ_USER=offpatch-acq                # runs pmctl auto (internet + bundle signing key)
 XFER_GROUP=offpatch-inbox            # may drop files into the server inbox
+ACQ_REQ_DIR=$ACQ_DATA/requests       # acquisition requests (role all: the server queues them here directly)
 STATE_FILE=$ETC/install.state        # choices remembered for re-runs
 DEFAULT_BACKUP_DIR=/var/lib/offpatch-backup
 DEFAULT_BACKUP_KEEP=14
@@ -152,6 +153,9 @@ if [ $STATUS = 1 ]; then
   echo "pmserver:          $(svc_state offpatch-server 'offpatch/bin/pmserver')"
   echo "agent:             $(svc_state offpatch-agent 'offpatch/bin/pmagent run')"
   echo "acquisition timer: $( [ $HAVE_SYSTEMD = 1 ] && systemctl is-active offpatch-acquire.timer 2>/dev/null || echo 'cron/manual')"
+  if [ $HAVE_SYSTEMD = 1 ] && [ -f /etc/systemd/system/offpatch-acquire-requests.path ]; then
+    echo "request watcher:   $(systemctl is-active offpatch-acquire-requests.path 2>/dev/null || true) (offpatch-acquire-requests.path, lab)"
+  fi
   echo "backup timer:      $( [ $HAVE_SYSTEMD = 1 ] && systemctl is-active offpatch-backup.timer 2>/dev/null || echo 'cron/manual')"
   [ -f "$BACKUP_DIR/last-success" ] && echo "last good backup:  $(head -n 1 "$BACKUP_DIR/last-success")"
   [ -f "$BACKUP_DIR/last-failure" ] && echo "last FAILED backup: $(cat "$BACKUP_DIR/last-failure")"
@@ -181,10 +185,10 @@ if [ $UNINSTALL = 1 ]; then
   fi
   step "Stopping and removing offpatch services"
   if [ $HAVE_SYSTEMD = 1 ]; then
-    systemctl disable --now offpatch-server offpatch-acquire.timer offpatch-backup.timer 2>/dev/null || true
-    systemctl stop offpatch-acquire.service offpatch-backup.service 2>/dev/null || true
+    systemctl disable --now offpatch-server offpatch-acquire.timer offpatch-acquire-requests.path offpatch-backup.timer 2>/dev/null || true
+    systemctl stop offpatch-acquire.service offpatch-acquire-requests.service offpatch-backup.service 2>/dev/null || true
     [ -x $PREFIX/bin/pmagent ] && $PREFIX/bin/pmagent service uninstall 2>/dev/null || true
-    for u in offpatch-server.service offpatch-acquire.service offpatch-acquire.timer offpatch-backup.service offpatch-backup.timer offpatch-backup-failed.service; do
+    for u in offpatch-server.service offpatch-acquire.service offpatch-acquire.timer offpatch-acquire-requests.path offpatch-acquire-requests.service offpatch-backup.service offpatch-backup.timer offpatch-backup-failed.service; do
       rm -f "/etc/systemd/system/$u"
     done
     systemctl daemon-reload
@@ -309,6 +313,21 @@ if [ $IS_ACQ = 1 ]; then
   ensure_user "$ACQ_USER" "$ACQ_DATA"
   [ "$ROLE" = all ] && usermod -aG "$XFER_GROUP" "$ACQ_USER"
 fi
+# Lab (role all) only: pmserver queues acquisition requests straight into the acquisition
+# requests folder (acquisition_requests_dir). The work dir is traversable (not listable) by
+# group offpatch-inbox; the requests folder is offpatch-inbox 2770 (setgid) so the server can
+# create files and offpatch-acq can read and move them. It must exist before the server
+# starts: the unit's ReadWritePaths only covers paths that exist at start.
+lab_requests_dir() {
+  [ "$ROLE" = all ] || return 0
+  [ -d "$ACQ_DATA" ] || install -d -o "$ACQ_USER" -g "$XFER_GROUP" "$ACQ_DATA"
+  chgrp "$XFER_GROUP" "$ACQ_DATA"; chmod 0710 "$ACQ_DATA"
+  install -d -o "$ACQ_USER" -g "$XFER_GROUP" "$ACQ_REQ_DIR"
+  chgrp -R "$XFER_GROUP" "$ACQ_REQ_DIR"
+  chmod 2770 "$ACQ_REQ_DIR"
+  find "$ACQ_REQ_DIR" -mindepth 1 -type d -exec chmod g+s {} +
+}
+lab_requests_dir
 
 # ---------------------------------------------------------------- before upgrading
 if [ -d "$PREFIX/bin" ]; then
@@ -483,6 +502,7 @@ write_server_unit() {
   if [ "$PORT" -lt 1024 ]; then caps=$'CapabilityBoundingSet=CAP_NET_BIND_SERVICE\nAmbientCapabilities=CAP_NET_BIND_SERVICE'
   else caps='CapabilityBoundingSet='; fi
   case "$AUDIT_DIR" in ""|"$SRV_DATA"/*) ;; *) rw="$rw -$AUDIT_DIR" ;; esac
+  if [ "$ROLE" = all ]; then rw="$rw -$ACQ_REQ_DIR"; fi
   cat > /etc/systemd/system/offpatch-server.service <<EOF
 [Unit]
 Description=offpatch management server
@@ -697,6 +717,28 @@ EOF
   else
     ok "keeping existing $ETC/pmserver.json (listen port $PORT, $SCHEME)"
   fi
+  # Lab (role all), fresh install and upgrades: direct hand-off of acquisition requests.
+  # Production roles keep it unset: strict one-way transfer, the operator carries the file.
+  if [ "$ROLE" = all ]; then
+    if command -v python3 >/dev/null; then
+      if msg=$(python3 - "$ETC/pmserver.json" "$ACQ_REQ_DIR" <<'PY'
+import json, sys
+p, d = sys.argv[1], sys.argv[2]
+c = json.load(open(p))
+if c.get("acquisition_requests_dir") != d:
+    c["acquisition_requests_dir"] = d
+    json.dump(c, open(p, "w"), indent=2)
+    print("acquisition requests are queued directly to " + d)
+PY
+); then
+        if [ -n "$msg" ]; then ok "$ETC/pmserver.json: $msg"; fi
+      else
+        warn "could not set acquisition_requests_dir in $ETC/pmserver.json; set it to $ACQ_REQ_DIR by hand"
+      fi
+    else
+      warn "python3 not found: set \"acquisition_requests_dir\": \"$ACQ_REQ_DIR\" in $ETC/pmserver.json by hand"
+    fi
+  fi
   chown root:"$SVC_USER" "$ETC/pmserver.json"; chmod 0640 "$ETC/pmserver.json"
 
   # Offer agent binaries for download in the console (Agent setup page and the
@@ -738,6 +780,59 @@ EOF
     warn "ufw is not active: restrict port $PORT to endpoint and admin networks in your firewall"
   fi
 fi
+
+# Lab (role all): run `pmctl auto -only-requests` as soon as the server queues a request.
+# pmctl moves handled requests into done/ or rejected/, so the glob only matches pending ones.
+# A request that keeps failing stays there: after a failed or partial run the service waits
+# 10 min in ExecStopPost (still deactivating, so the path unit cannot retrigger it), and the
+# path unit is trigger-limited as a backstop, so failures never spin. Anything the watcher
+# misses is still handled by the daily run.
+write_request_units() {
+  cat > /etc/systemd/system/offpatch-acquire-requests.path <<EOF
+[Unit]
+Description=Watch for queued offpatch acquisition requests (lab)
+
+[Path]
+PathExistsGlob=$ACQ_REQ_DIR/*.json
+Unit=offpatch-acquire-requests.service
+TriggerLimitIntervalSec=10min
+TriggerLimitBurst=10
+
+[Install]
+WantedBy=paths.target
+EOF
+  cat > /etc/systemd/system/offpatch-acquire-requests.service <<EOF
+[Unit]
+Description=offpatch acquisition of queued requests (lab)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=$ACQ_USER
+Group=$ACQ_USER
+SupplementaryGroups=$XFER_GROUP
+ExecStart=$PREFIX/bin/pmctl auto -config $ETC/acquire.json -only-requests
+# Back off after a failed or partial run (exit 2 = an item failed; the request stays).
+ExecStopPost=/bin/sh -c 'test "\$\$EXIT_STATUS" = 0 || sleep 600'
+SuccessExitStatus=2
+TimeoutStartSec=4h
+TimeoutStopSec=15min
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths=$ACQ_DATA $DROP
+UMask=0027
+EOF
+}
 
 # ---------------------------------------------------------------- acquisition (connected zone)
 if [ $IS_ACQ = 1 ]; then
@@ -811,8 +906,13 @@ PY
     fi
   fi
   chown root:"$ACQ_USER" "$ETC/acquire.json"; chmod 0640 "$ETC/acquire.json"
-  # Acquisition requests exported from the console's Updates page go here.
-  install -d -m 0770 -o "$ACQ_USER" -g "$ACQ_USER" "$ACQ_DATA/requests"
+  # Acquisition requests exported from the console's Updates page go here (role all: the
+  # server queues them here itself; re-apply the shared group after the chown above).
+  if [ "$ROLE" = all ]; then
+    lab_requests_dir
+  else
+    install -d -m 0770 -o "$ACQ_USER" -g "$ACQ_USER" "$ACQ_REQ_DIR"
+  fi
   if [ $HAVE_SYSTEMD = 1 ]; then
     groups_line=""; [ "$ROLE" = all ] && groups_line="SupplementaryGroups=$XFER_GROUP"
     cat > /etc/systemd/system/offpatch-acquire.service <<EOF
@@ -855,9 +955,16 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
+    if [ "$ROLE" = all ]; then write_request_units; fi
     systemctl daemon-reload
     systemctl enable --now offpatch-acquire.timer >/dev/null 2>&1
     ok "daily acquisition at 07:00 as $ACQ_USER (systemd timer offpatch-acquire.timer)"
+    if [ "$ROLE" = all ]; then
+      systemctl enable offpatch-acquire-requests.path >/dev/null 2>&1
+      systemctl reset-failed offpatch-acquire-requests.path offpatch-acquire-requests.service 2>/dev/null || true
+      systemctl restart offpatch-acquire-requests.path
+      ok "lab: queued acquisition requests are fetched right away (offpatch-acquire-requests.path watches $ACQ_REQ_DIR)"
+    fi
     # First update-intelligence run now, so the console's Updates page fills
     # immediately (needs internet; harmless if it fails — the timer retries).
     if [ "$ROLE" = all ]; then
@@ -993,6 +1100,9 @@ EOF
 fi
 if [ $IS_ACQ = 1 ]; then
   echo "  Acquisition:    edit $ETC/acquire.json, test with: sudo -u $ACQ_USER $PREFIX/bin/pmctl auto -config $ETC/acquire.json -dry-run"
+fi
+if [ "$ROLE" = all ]; then
+  echo "  Requests:       console requests are queued to $ACQ_REQ_DIR and fetched right away (lab; production carries the file)"
 fi
 if [ "$ROLE" = acquisition ]; then
   cat <<EOF

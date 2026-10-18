@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"archive/tar"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,5 +131,35 @@ func TestExtractSafeRejects(t *testing.T) {
 	}
 	if ex.Files["payload/a.msu"].Size != 5 {
 		t.Error("payload not extracted")
+	}
+}
+
+// expected_ubr is optional (omitempty: manifests without it marshal exactly
+// as before) and only valid on msu packages.
+func TestExpectedUBR(t *testing.T) {
+	m := validManifest(t)
+	b, _ := json.Marshal(m.Packages[0])
+	if strings.Contains(string(b), "expected_ubr") {
+		t.Errorf("zero expected_ubr marshalled: %s", b)
+	}
+	m.Packages[0].ExpectedUBR = 9711
+	if err := m.ValidateSchema(time.Now()); err != nil {
+		t.Fatalf("msu with expected_ubr: %v", err)
+	}
+	b, _ = json.Marshal(m)
+	p, err := Parse(b)
+	if err != nil || p.Packages[0].ExpectedUBR != 9711 {
+		t.Fatalf("parse: %v %+v", err, p)
+	}
+	for _, mut := range []func(*Package){
+		func(p *Package) { p.ExpectedUBR = -1 },
+		func(p *Package) { p.Kind, p.ProductCode = "msi", "{11111111-2222-3333-4444-555555555555}" },
+	} {
+		m := validManifest(t)
+		m.Packages[0].ExpectedUBR = 9711
+		mut(&m.Packages[0])
+		if err := m.ValidateSchema(time.Now()); err == nil {
+			t.Errorf("accepted: %+v", m.Packages[0])
+		}
 	}
 }

@@ -1,6 +1,13 @@
 package server
 
-import "testing"
+import (
+	"encoding/json"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 // The shipped example must stay loadable as the config schema evolves.
 func TestExampleConfigLoads(t *testing.T) {
@@ -43,5 +50,56 @@ func TestSizeLimitDefaults(t *testing.T) {
 	}
 	if c.MaxFileBytes < 4775050195 || c.MaxBundleBytes < 2*c.MaxFileBytes {
 		t.Fatalf("max_file_bytes %d, max_bundle_bytes %d", c.MaxFileBytes, c.MaxBundleBytes)
+	}
+}
+
+func TestAcquisitionRequestsDirConfig(t *testing.T) {
+	write := func(extra string) (*Config, error) {
+		dir := t.TempDir()
+		p := filepath.Join(dir, "pmserver.json")
+		cfg := `{"insecure_http": true, ` + extra + `"trusted_keys":[{"public_key":"x","sources":["a"]}],
+			"admin_tokens":[{"user":"u","role":"admin","token_sha256":"` + strings.Repeat("a", 64) + `"}]}`
+		if err := os.WriteFile(p, []byte(cfg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return LoadConfig(p)
+	}
+	if c, err := write(""); err != nil || c.AcquisitionRequestsDir != "" {
+		t.Fatalf("unset: %v %q", err, c.AcquisitionRequestsDir)
+	}
+	if _, err := write(`"acquisition_requests_dir": "requests",`); err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("relative path accepted: %v", err)
+	}
+	abs, _ := json.Marshal(t.TempDir())
+	c, err := write(`"acquisition_requests_dir": ` + string(abs) + `,`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckAcquisitionRequestsDir(c.AcquisitionRequestsDir); err != nil {
+		t.Errorf("writable dir reported unwritable: %v", err)
+	}
+	if CheckAcquisitionRequestsDir(filepath.Join(c.AcquisitionRequestsDir, "missing")) == nil {
+		t.Error("missing dir reported writable")
+	}
+}
+
+// The startup line says whether static tokens work, and warns when
+// configured tokens are switched off.
+func TestLogAuthMode(t *testing.T) {
+	oidcCfg := `"oidc": {"issuer": "https://idp.corp", "client_id": "pm", "redirect_url": "https://pm/auth/callback"},`
+	for _, c := range []struct{ extra, want string }{
+		{"", "static admin tokens only"},
+		{oidcCfg, "ENABLED as break-glass"},
+		{oidcCfg + ` "allow_static_tokens": false,`, "level=WARN"},
+	} {
+		cfg, err := LoadConfig(writeConfig(t, t.TempDir(), c.extra))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var buf strings.Builder
+		cfg.LogAuthMode(slog.New(slog.NewTextHandler(&buf, nil)))
+		if !strings.Contains(buf.String(), c.want) {
+			t.Errorf("%q: log %q, want %q", c.extra, buf.String(), c.want)
+		}
 	}
 }

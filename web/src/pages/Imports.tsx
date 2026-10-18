@@ -1,14 +1,13 @@
-import { Mono, PageHeader } from "../components/ui";
+import { PageHeader } from "../components/ui";
 import { useLoad } from "../util";
 import { DownloadsSection, fetchAcqRequests, fetchAcquisition } from "./Acquisition";
 import { ReceivedSection, fetchBundles, fetchReconciliation } from "./Intake";
 
 /**
- * Patches → Transfers: both ends of the one-way transfer on one page —
- * what the acquisition zone downloaded (and the tracked requests), and what
- * arrived through the transfer (reconciliation and bundles).
+ * Patches → Imports (was Transfers): what was asked for, what the
+ * acquisition zone downloaded, and what arrived through the one-way transfer.
  */
-export default function Transfers() {
+export default function Imports() {
   const acq = useLoad(fetchAcquisition, [], 30000);
   const requests = useLoad(fetchAcqRequests, [], 30000);
   const bundles = useLoad(fetchBundles, [], 15000);
@@ -17,17 +16,17 @@ export default function Transfers() {
 
   return (
     <>
-      <PageHeader title="Transfers" sub="Downloads in the connected acquisition zone and the signed bundles that arrived through the one-way transfer.">
+      <PageHeader title="Imports" sub="What you asked for, what the acquisition zone downloaded, and what arrived through the one-way transfer.">
         <button className="btn" onClick={refresh}>Refresh</button>
       </PageHeader>
       <div className="banner banner-info">
-        The isolated server cannot contact the acquisition host (one-way transfer by design), so it cannot start a run.
-        Each <Mono>pmctl auto</Mono> run sends a signed status report inward; this page shows the latest one.
-        To run now, on the acquisition host: <Mono>pmctl auto -config acquire.json</Mono> (or <Mono>launchctl kickstart gui/$(id -u)/com.offpatch.acquire</Mono>).
+        This server cannot reach the acquisition zone (one-way transfer by design), so it cannot start a download run. Downloads run on a
+        schedule there, and each run sends a report back with the next transfer. If something is urgent, ask the acquisition team to run it now.
       </div>
       <section className="section">
         <h2>Downloaded in the acquisition zone</h2>
-        <DownloadsSection data={acq.data} error={acq.error} requests={requests.data} requestsError={requests.error} />
+        <DownloadsSection data={acq.data} error={acq.error} requests={requests.data} requestsError={requests.error}
+                          onChanged={() => void requests.reload()} />
       </section>
       <section className="section">
         <h2>Arrived through the transfer</h2>

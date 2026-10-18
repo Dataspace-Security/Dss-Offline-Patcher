@@ -8,11 +8,18 @@ package main
 // Microsoft Update Catalog like pmctl fetch. Everything lands in the same
 // signed bundle as the rest of the run, in quarantine on the isolated side.
 //
+// A request is explicit: its items are fetched and sent again even if
+// state.json says an earlier run (or the regular feeds) sent them, e.g. so
+// a package rejected on the isolated side can be imported again. Only the
+// items this very request already got sent (st.RequestSent, when a request
+// with a failed item is retried) are not sent twice.
+//
 // Items offpatch cannot package (no MSI installer, no product code, not in
-// the winget repository) are warnings, not failures: retrying will not help.
-// A request whose items all succeeded or were warned about moves to
-// <requests>/done after the run; one with failures stays and is retried.
-// Files that are not valid requests move to <requests>/rejected.
+// the winget repository, KB not in the catalog) are warnings, not failures:
+// retrying will not help. A request whose items all succeeded or were warned
+// about moves to <requests>/done after the run; one with failures stays and
+// is retried. Files that are not valid requests move to <requests>/rejected.
+// Every item's outcome goes into the status report (see itemresults.go).
 
 import (
 	"context"
@@ -24,8 +31,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,12 +41,9 @@ import (
 	"offpatch/internal/acquire"
 )
 
-// Hooks overridable in tests: reading ProductCode from an .msi needs the
-// Windows Installer API.
-var (
-	msiCodeAvailable = runtime.GOOS == "windows"
-	readMSICode      = msiProductCode
-)
+// readMSICode reads ProductCode from a downloaded .msi when the winget
+// manifest does not state it (pure Go, any OS); overridable in tests.
+var readMSICode = msiProductCode
 
 var (
 	// The manifest's rule for an msi package_name (Apps & features display name).
@@ -49,9 +53,10 @@ var (
 )
 
 type loadedRequest struct {
-	path string
-	req  *acqrequest.Request
-	ids  []string // package ids this request asked for
+	path  string
+	req   *acqrequest.Request
+	ids   []string // package ids this request asked for
+	items []requestItem
 }
 
 type requestRun struct {
@@ -65,7 +70,7 @@ type requestRun struct {
 	rep       *autoReport
 	fail      func(id string, err error)
 	added     func(id string)
-	handled   map[string]bool
+	outcomes  map[string]itemOutcome // package id → result of this run's attempt
 	cat       *acquire.Catalog
 	ms        *acquire.MSRC
 }
@@ -97,6 +102,7 @@ func processRequests(r *requestRun, dir string) []*loadedRequest {
 			continue
 		}
 		lr := &loadedRequest{path: p, req: req}
+		recordRequested(r.st, req)
 		r.one(lr)
 		out = append(out, lr)
 	}
@@ -115,43 +121,39 @@ func readRequest(p string) (*acqrequest.Request, error) {
 func (r *requestRun) one(lr *loadedRequest) {
 	req := lr.req
 	var warned []string
-	item := func(id string, fetch func() error) {
+	part := func(arch, id string, fetch func() error) itemPart {
 		lr.ids = append(lr.ids, id)
-		if r.handled[id] {
-			return
+		p := itemPart{arch: arch, id: id}
+		if b, sent := r.st.RequestSent[req.RequestID][id]; sent {
+			if _, done := r.st.Done[id]; done {
+				r.rep.Skipped++
+				p.out = itemOutcome{result: acqstatus.ItemAlreadySent, reason: "sent for this request in bundle " + b}
+				return p
+			}
 		}
-		r.handled[id] = true
-		if _, done := r.st.Done[id]; done {
-			r.rep.Skipped++
-			return
+		if o, ok := r.outcomes[id]; ok {
+			p.out = o // another request of this run, or a prerequisite
+			return p
 		}
-		if r.dry {
-			r.added(id)
-			return
-		}
-		err := fetch()
-		var un *acquire.UnsupportedError
-		switch {
-		case err == nil:
-			r.added(id)
-		case errors.As(err, &un):
-			msg := fmt.Sprintf("request %s: %s skipped: %s", req.RequestID, id, un.Reason)
-			r.rep.Warnings = append(r.rep.Warnings, msg)
+		p.out = r.attempt(req.RequestID, id, fetch)
+		r.outcomes[id] = p.out
+		if p.out.result == acqstatus.ItemUnsupported {
 			warned = append(warned, id)
-			delete(r.st.Failed, id)
-		default:
-			r.fail(id, err)
 		}
+		return p
 	}
 	for _, a := range req.Apps {
+		it := requestItem{kind: "app", key: a.WingetID, version: a.Version}
 		for _, arch := range a.Architectures {
 			a, arch := a, arch
-			item(wingetPackageID(a.WingetID, a.Version, arch), func() error { return r.fetchWinget(a, arch) })
+			it.parts = append(it.parts, part(arch, wingetPackageID(a.WingetID, a.Version, arch), func() error { return r.fetchWinget(a, arch) }))
 		}
+		lr.items = append(lr.items, it)
 	}
 	for _, k := range req.KBs {
 		k := k
-		item(k.KB+"-"+k.Arch, func() error { return r.fetchKB(k) })
+		lr.items = append(lr.items, requestItem{kind: "kb", key: k.KB, version: k.Arch,
+			parts: []itemPart{part(k.Arch, k.KB+"-"+k.Arch, func() error { return r.fetchKB(k) })}})
 	}
 
 	f := acqstatus.Feed{Type: "request", Name: req.RequestID, Status: "up_to_date",
@@ -182,6 +184,33 @@ func (r *requestRun) one(lr *loadedRequest) {
 	r.rep.Feeds = append(r.rep.Feeds, f)
 }
 
+// attempt fetches one package, unless this run already has it (the
+// Microsoft feed fetched the same KB) or already failed it.
+func (r *requestRun) attempt(rid, id string, fetch func() error) itemOutcome {
+	switch {
+	case slices.Contains(r.rep.New, id):
+		return itemOutcome{result: acqstatus.ItemFetched}
+	case r.rep.Failures[id] != "":
+		return itemOutcome{result: acqstatus.ItemFailed, reason: shortReason(r.rep.Failures[id])}
+	case r.dry:
+		r.added(id)
+		return itemOutcome{result: acqstatus.ItemFetched}
+	}
+	err := fetch()
+	if err == nil {
+		r.added(id)
+		return itemOutcome{result: acqstatus.ItemFetched}
+	}
+	o := classify(err)
+	if o.result == acqstatus.ItemUnsupported {
+		r.rep.Warnings = append(r.rep.Warnings, fmt.Sprintf("request %s: %s skipped: %s", rid, id, err.Error()))
+		delete(r.st.Failed, id)
+		return o
+	}
+	r.fail(id, err)
+	return o
+}
+
 // wingetPackageID: <winget id>-<version>[-<arch>], within the manifest's
 // package_id rule (64 chars of [A-Za-z0-9._-]).
 func wingetPackageID(id, version, arch string) string {
@@ -203,22 +232,24 @@ func wingetPackageID(id, version, arch string) string {
 func (r *requestRun) fetchWinget(a acqrequest.App, arch string) error {
 	m, murl, err := acquire.FetchWingetManifest(r.ctx, r.hc, r.c.WingetManifestsURL, a.WingetID, a.Version)
 	if errors.Is(err, acquire.ErrWingetNotFound) {
-		return &acquire.UnsupportedError{Reason: fmt.Sprintf("%s %s is not in the winget repository (newer version published, or package renamed)", a.WingetID, a.Version)}
+		return unsupportedItem(fmt.Sprintf("winget no longer lists version %s", a.Version),
+			fmt.Sprintf("%s %s is not in the winget repository (newer version published, or package renamed)", a.WingetID, a.Version))
 	}
 	if err != nil {
 		return fmt.Errorf("winget manifest: %w", err)
 	}
 	in, err := m.PickMSI(arch)
 	if err != nil {
+		var un *acquire.UnsupportedError
+		if errors.As(err, &un) {
+			return unsupportedItem(pickMSIReason(un.Reason, arch), un.Reason)
+		}
 		return err
 	}
 	if in.Architecture != arch && in.Architecture != "neutral" {
 		autoWarn(fmt.Sprintf("%s %s: no %s MSI; using the %s MSI for %s endpoints", a.WingetID, m.Version, arch, in.Architecture, arch))
 	}
-	code := in.MSIProductCode()
-	if code == "" && !msiCodeAvailable {
-		return &acquire.UnsupportedError{Reason: fmt.Sprintf("%s %s: the winget manifest states no ProductCode; run pmctl auto on a Windows acquisition host to read it from the MSI", a.WingetID, m.Version)}
-	}
+	code := in.MSIProductCode() // else read from the MSI once downloaded
 	ver := m.Version
 	if v := in.ARPVersion(); acqrequest.ValidVersion(v) {
 		ver = v // what Apps & features will show, compared with endpoint inventory
@@ -230,7 +261,8 @@ func (r *requestRun) fetchWinget(a acqrequest.App, arch string) error {
 	}
 	if code == "" {
 		if code, err = readMSICode(dl.Path); err != nil || !acqrequest.ValidProductCode(code) {
-			return &acquire.UnsupportedError{Reason: fmt.Sprintf("%s %s: could not read ProductCode from the MSI: %v", a.WingetID, m.Version, err)}
+			return unsupportedItem("MSI has no ProductCode",
+				fmt.Sprintf("%s %s: could not read ProductCode from the MSI: %v", a.WingetID, m.Version, err))
 		}
 	}
 	name := msiDisplayName(in, a, m)
@@ -306,7 +338,7 @@ func (r *requestRun) fetchKB(k acqrequest.KB) error {
 		prod = k.Product
 	}
 	if prod == "" {
-		return &acquire.UnsupportedError{Reason: k.KB + ": the request names no product"}
+		return unsupportedItem("the request names no Windows product", k.KB+": the request names no product")
 	}
 	if r.cat == nil {
 		r.cat, r.ms = acquire.NewCatalog(), acquire.NewMSRC()
@@ -319,20 +351,19 @@ func (r *requestRun) fetchKB(k acqrequest.KB) error {
 		}
 	}
 	res, err := acquire.FetchKB(r.ctx, r.cat, r.ms, acquire.FetchKBOptions{KB: k.KB, Product: prod, Arch: k.Arch, MinBuild: k.Build, MaxBuild: k.Build,
-		PackageID: k.KB + "-" + k.Arch, OutDir: r.downloads, SpecPath: r.spec,
+		PackageID: k.KB + "-" + k.Arch, OutDir: r.downloads, SpecPath: r.spec, RecordUBR: r.c.ExpectedUBR, ExpectedUBR: r.st.WindowsUBR[k.KB+"/"+strconv.Itoa(k.Build)],
 		SkipPrerequisite: func(id string) bool {
 			_, done := r.st.Done[id]
 			return done || slices.Contains(r.rep.New, id)
 		}})
 	if err != nil {
-		return err
+		return kbCatalogError(k, err)
 	}
 	for _, w := range res.Warnings {
 		autoWarn(k.KB + ": " + w)
 	}
 	for _, pe := range res.Prerequisites {
-		r.handled[pe.PackageID] = true
-		r.added(pe.PackageID)
+		r.added(pe.PackageID) // a request naming it later in the run finds it in rep.New
 	}
 	return nil
 }
@@ -340,7 +371,7 @@ func (r *requestRun) fetchKB(k acqrequest.KB) error {
 // archiveRequests moves requests with no failed item to <dir>/done.
 func archiveRequests(dir string, reqs []*loadedRequest, rep *autoReport) {
 	for _, lr := range reqs {
-		if slices.ContainsFunc(lr.ids, func(id string) bool { return rep.Failures[id] != "" }) {
+		if requestHasFailure(lr, rep) {
 			continue
 		}
 		moveInto(lr.path, filepath.Join(dir, "done"))

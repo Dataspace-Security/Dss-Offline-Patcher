@@ -208,7 +208,9 @@ hand with a value above the last bundle sent.
 
    For `.pkg` files, pmctl reads the version **inside the installer** and labels the package with it, because vendor feeds can run ahead of a fixed download link. A mismatch is reported as a warning. Set `label_from_pkg: true` when the feed value is only a change trigger (a release tag or build number such as Office `16.114.26101123` or Brave `1.97.59`); the package then takes the app version from the installer without a warning.
 
-   An app without any of these is refused at config load; unverified downloads are never accepted. For `.msi` installers whose product code changes per version, set `product_code_from_msi: true` (Windows host), or give a fixed `product_code`.
+   An app without any of these is refused at config load; unverified downloads are never accepted. For `.msi` installers whose product code changes per version, set `product_code_from_msi: true`, or give a fixed `product_code`. pmctl reads the product code from the MSI's Property table itself (pure Go, `internal/msi`), on Linux, macOS and Windows alike.
+
+   An app with a winget package id can also set `"winget_id": "Vendor.App"`: the app is then listed in the console's Library (see [The Library](#the-library-update-intelligence)).
 3. **Each package is checked on its own** before building: the payload must exist, the manifest schema must pass, and on a Windows acquisition host its Authenticode status must not be invalid (e.g. `NotSigned`). A package that fails is left out with the reason under `failures` (retried next run); the rest is still built and sent. Without this, one bad package would make the server refuse the whole bundle.
 4. It builds signed bundles from everything new, named after their bundle IDs: **one bundle, or several** when the pending packages exceed `max_bundle_bytes` (default 28 GiB, below the server's 32 GiB) or `max_bundle_packages` (default 450, below the server's `max_files` 500). Packages keep their order (checkpoint prerequisites first). Each bundle gets its own sequence. A single package larger than `max_bundle_bytes` is a failure. Before building, the run directory's volume must hold twice the pending bytes plus a 2 GiB reserve.
 5. Each bundle is **sent automatically** through the configured adapter (`send.via`: `dropdir` or `command`) with a signed receipt, and the receipt is appended to `send.log`. If a send fails, the remaining bundles are not sent; their packages are retried next run.
@@ -236,6 +238,7 @@ Other behaviour:
 | `send.timeout` | `"2h"` | `command` adapter: kill the gateway command after this long |
 | `keep_runs_days` | `14` | delete run directories older than this (negative: keep) |
 | `keep_downloads_days` | `14` | delete downloads of packages sent longer ago than this (negative: keep) |
+| `expected_ubr` | `false` | record `expected_ubr` in Windows cumulative update packages (server verifies by build revision). Enable only after every agent runs 0.6.5 or later: agents up to 0.6.2 refuse bundles with the field. `pmctl fetch -expected-ubr` is the manual equivalent. |
 
 `send.command` and `exec:` signer commands are split on spaces; quote a path that contains spaces:
 `"command": "\"C:\\Program Files\\Gateway\\push.exe\" --to outbound {file}"`.
@@ -250,6 +253,30 @@ Tested:
 - `cmd/pmctl/robust_test.go`: sequence state (only grows, `-seq` checks, corrupt file refused, warnings, `build -config`), splitting into several bundles, checkpoint packages end to end, a package with an invalid signature left out, receipt/log failure after delivery, MSRC failure → partial, corrupt `state.json`, retention, lock takeover and refresh, quoted commands, signer timeout, supersedence only when the superseding KB is available.
 - `internal/acquire/robust_test.go`: checkpoint packaging from a synthetic two-file download dialog (`testdata/downloaddialog-checkpoint.html`), stale same-name file replaced, mismatched `.part` dropped, retries on 503, 404 detection. `internal/transfer/robust_test.go`: stale `.part` in the drop directory, gateway command timeout.
 - A live **dry run** (read-only) against the real MSRC feed and the Firefox/Chrome version feeds listed the expected KBs and versions, and skipped three superseded September CUs. No live payload was downloaded.
+
+### The Library (update intelligence)
+
+Besides the newest version of every winget package (`apps`), update intelligence carries `resolved`: installer and description details for a chosen set of packages, so the console's **Library** can show what can be imported, and how, before anyone requests it. For each package pmctl reads the newest version's winget installer manifest and its defaultLocale manifest (`<id>.locale.en-US.yaml`, else the `DefaultLocale` the version manifest names) and records:
+
+- `publisher`, `homepage` (PackageUrl), `publisher_url`, `license`, `description` (ShortDescription). Community text: control characters dropped, length capped, https links only.
+- `installers`: every installer pmctl could fetch (`arch`, `type` msi/wix/exe/inno/nullsoft/burn/msix/zip/portable, `scope`, `url`, `sha256`, `product_code` for MSIs when the manifest states it). Installers without an https URL, and MSIs without a SHA-256, are left out: pmctl could not fetch them.
+
+**Which packages:** the configured ones (`intel.library` and the `winget_id` of `apps` entries), every app id an acquisition request ever asked for (kept in `state.json` `requested_apps`; on the first run also read from `<requests>/done/`), and a built-in list of 288 common enterprise packages (browsers, archivers, PDF readers, meeting clients, Java runtimes, Python, Git, PuTTY, WinSCP, KeePass, Wireshark, VS Code, Visual C++ runtimes, ...; `cmd/pmctl/library_common.go`). Ids missing from the winget index are skipped (a warning for configured and requested ones).
+
+**Cost:** each package version is looked up once: entries are cached by `id@version` in `state.json` (`library`; only the newest version of each id is kept). At most 300 new lookups happen per run (configured first, then requested, newest first, then the built-in list); the rest follow on the next runs. A failed lookup is a warning (at most 10 listed, then "+N more") and is retried next run; it never marks the intelligence feed failed. The feed shows e.g. `..., 212 in the library` and `library: 212 packages (131 importable), 37 looked up`.
+
+**Importable** (the rule the console shows; `acquire.LibraryImportable`): "yes" if there is an MSI-type installer (`msi`, `wix`) for the architecture needed (for an app nobody has installed yet: any architecture), matched as when fetching: a neutral MSI fits x64 and x86, a 32-bit MSI fits x64. The manifest need not state a product code; pmctl reads it from the MSI. Otherwise "no" with the reason, e.g. `EXE installer only (nullsoft)` or `no MSI installer (only msix)`. Not resolved yet: unknown.
+
+`intel` keys in `acquire.json` (all optional):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `library` | `[]` | extra winget ids to describe |
+| `no_library` | `false` | send no `resolved` section |
+| `library_no_common` | `false` | only configured and requested ids, not the built-in list |
+| `library_max_lookups` | `300` | new manifest lookups per run (at most 300) |
+
+`pmctl intel` (manual) resolves the built-in list too, without a cache; `-no-library` skips it, `-library a.b,c.d` adds ids and `-winget-manifests-url` points at a mirror.
 
 ### Status reports and the console
 
@@ -273,19 +300,22 @@ The console's **Server** page (`GET /api/system`) shows the management server's 
 
 The console's **Updates** page lists everything the fleet is missing according to update intelligence: newer winget application versions and Windows cumulative updates. This includes updates that are not in the catalog yet ("not imported"). An acquisition request turns that list into work for `pmctl auto`, so nobody has to hand-write `fetch-url` specs or `apps` entries.
 
-**The boundary stays one-way.** The isolated server never sends anything out. The request leaves only as a file the operator downloads in the browser and carries to the acquisition zone on approved media.
+**The boundary stays one-way.** The isolated server never sends anything out. In production the request leaves only as a file the operator downloads in the browser and carries to the acquisition zone on approved media.
+
+**Direct when co-located.** With `acquisition_requests_dir` set in `pmserver.json` (absolute path), the server also writes each exported request into that folder (`<request_id>.json`, temp file + fsync + rename, mode 0640) and the response says `queued_to`. Production with separate hosts keeps it **unset** (strict one-way: carry the file). Set it only when acquisition runs on the same machine — the `--role all` lab sets it to `/var/lib/offpatch-acq/requests` — or the organisation approves an outbound folder. See [07-admin-guide.md](07-admin-guide.md) §3.9.
 
 ### Workflow
 
 1. **Select and export (isolated zone, role `operator`).** On **Updates**, tick the outdated apps and missing KBs that are not imported yet. "Select all" ticks every visible row that is not in the catalog. Click **Export acquisition request**. The browser saves `acq-request-<time>-<id>.json` (`POST /api/acquisition-requests`, see [05-api.md](05-api.md)). Every export is written to the audit log as `acquisition.request_exported`, with the user, the request id, every `winget_id@version` and every `KB/arch`.
-2. **Carry it across.** Move the file on approved media into the requests directory on the acquisition host: `"requests": "requests"` in `acquire.json`, or `pmctl auto -requests <dir>`.
+2. **Carry it across.** Move the file on approved media into the requests directory on the acquisition host: `"requests": "requests"` in `acquire.json`, or `pmctl auto -requests <dir>`. With `acquisition_requests_dir` (co-located only) the server has already put it there.
+   - `pmctl auto -only-requests` handles just the requests directory: no Microsoft feeds, configured apps or update intelligence. Bundles, retention, the run lock and the status report work as usual; the report carries the warning "requests-only run" and only `request` feeds. The `--role all` lab runs it from `offpatch-acquire-requests.path` as soon as a request appears; the daily run still does everything.
 3. **Fetch (acquisition zone).** The next `pmctl auto` run reads every `*.json` in that directory:
-   - **Apps:** for each `winget_id` and each requested architecture (`x64`, `x86`, `arm64`, taken from the endpoints that have the app):
+   - **Apps:** for each `winget_id` and each requested architecture (`x64`, `x86`, `arm64`, taken from the endpoints that have the app; for an app no endpoint has, the architecture the operator chose when importing it from the Library):
      - pmctl downloads the per-version installer manifest from the winget community repository (`manifests/<l>/<Publisher>/<Name>/<version>/<id>.installer.yaml`, falling back to the singleton `<id>.yaml`) over HTTPS.
      - It picks the **MSI** installer for that architecture (`InstallerType` `msi` or `wix`; machine scope and a neutral or en-US locale preferred).
      - x64 endpoints fall back to a 32-bit MSI, with a warning, when no x64 MSI exists.
      - It downloads the installer over HTTPS and accepts it only if it matches the manifest's `InstallerSha256`.
-     - It adds a spec entry: `kind: msi`, `product_code` from the manifest, `version` (the Apps & features `DisplayVersion` if the manifest gives one, else the winget version), and `package_name`.
+     - It adds a spec entry: `kind: msi`, `product_code` from the manifest or, when the manifest states none (Microsoft Edge, for example), read from the downloaded MSI on any OS, `version` (the Apps & features `DisplayVersion` if the manifest gives one, else the winget version), and `package_name`.
      - `package_name` is the Apps & features name: the manifest's `DisplayName` if present. Otherwise it is the name the endpoints report, when they agree and it contains no version. Otherwise it is the winget name.
      - The package id is `<winget id>-<version>` (`-<arch>` when not x64).
      - Ids with characters outside `[A-Za-z0-9._-]` (`Notepad++`) or longer than 64 characters get a short hash suffix, so two packages never share an id.
@@ -293,6 +323,7 @@ The console's **Updates** page lists everything the fleet is missing according t
      - The request lists a KB once per architecture that misses it (x64 and arm64 machines can need the same KB number).
      - The catalog title from the intelligence selects the row.
      - The build pins applicability, unless one KB serves several builds: then the build is left open (`build: 0`).
+     - `expected_ubr` (**only with `"expected_ubr": true` in `acquire.json`, default off; enable only after every agent runs 0.6.5 or later**: agents up to 0.6.2 refuse a bundle whose manifest has the field, with a critical alert): the build revision the update brings that build to (the `6899` of `26100.6899`), from the catalog title or, when the title does not state it, from the last update intelligence (`state.json` `windows_ubr`). The server then also confirms the update by the endpoint's build revision when Windows does not list the KB. The Microsoft feed (`microsoft.products`) fills it the same way for `min_build`.
    - The packages join the same signed bundle as the rest of the run and are sent automatically.
 4. **Approve (isolated zone).** The bundle arrives through intake. Its packages wait in the **Catalog** as quarantined, and the Updates page's **Catalog** column changes from "not imported" to "in catalog · awaiting approval". Approval and deployment work as for any other package.
 
@@ -300,8 +331,9 @@ The console's **Updates** page lists everything the fleet is missing according t
 
 - **Warnings, not failures:** items offpatch cannot package are listed under `warnings` in the run report and status report, and are not retried. Examples:
   - EXE, Inno, Nullsoft, Burn, MSIX or zip installers. offpatch deploys MSI packages only; there is no `exe` package kind.
-  - A manifest with no `ProductCode`. On a Windows acquisition host, pmctl reads it from the MSI instead.
+  - An MSI whose Property table has no valid `ProductCode` (`MSI has no ProductCode`). A manifest without one is fine: pmctl reads it from the downloaded MSI, on any OS.
   - A version that is no longer in the winget repository.
+  - A KB the Update Catalog does not list for the requested product, build and architecture.
 - **Failures (retried next run):**
   - Network errors.
   - Installers that do not match `InstallerSha256`.
@@ -312,7 +344,18 @@ The console's **Updates** page lists everything the fleet is missing according t
   - A file that is not a valid request is moved to `<requests>/rejected/` with a warning.
   - `-dry-run` lists the candidate packages and moves nothing.
 - **Status report:** each request appears as a feed of type `request` on the console's **Acquisition** page.
-- **Duplicates are fetched once:** packages already in `state.json`, or listed by more than one request, are not fetched again.
+- **Per-item results:** the status report also lists every requested item under `items` (one entry per app, all its architectures folded together, and one per KB/arch), so the console can show the outcome on the row the operator clicked:
+
+  | `result` | Meaning | Example `reason` |
+  |---|---|---|
+  | `fetched` | Downloaded and carried by a bundle sent this run. | |
+  | `already_sent` | Sent for this same request by an earlier run (the request was kept because another item failed). | `sent for this request in bundle b-20261017-0003` |
+  | `unsupported` | Can never be fetched this way; not retried. Console: "Can't import: <reason>". | `no MSI installer for x86 in winget (only exe)`, `winget no longer lists version 1.2.3`, `MSI has no ProductCode`, `KB5044273 not in the Microsoft Update Catalog for build 22000 x64` |
+  | `failed` | Transient; the request stays and the next run retries it. Console: "Import failed: <reason>". | `SHA-256 mismatch: the download does not match the published hash`, `GET https://...: HTTP 503`, `downloaded but not sent: ...`, `the run reached its time limit before this finished; retried next run` |
+
+  A package fetched this run counts as `fetched` only if a sent bundle carried it; a failed send or a package left out at build time makes it `failed`. For an app with several architectures, any failed architecture makes the item `failed`, else any fetched one `fetched`; reasons are prefixed with the architecture (`x86: no MSI installer for x86 in winget`). The full error text stays under `failures` and `warnings`.
+- **A request is explicit:** its items are fetched and sent again even if `state.json` says an earlier run, or the regular Microsoft/app feeds, already sent them. This is how a package that was rejected on the isolated side is imported again: export a new request for it. Only what was already sent for *this* request (while it is retried because of a failed item) is not sent twice; that is kept in `state.json` under `request_sent` and dropped once the request moves to `done/` or its file is gone.
+- **Duplicates within a run are fetched once:** an item listed by more than one request, or also brought by the Microsoft feed in the same run, is downloaded once and travels in the same bundle.
 
 ### The request file
 
@@ -351,5 +394,10 @@ The file contains no host names or endpoint ids. It carries only the ids, versio
 
 Tested:
 - `internal/acquire/winget_test.go`: recorded winget-pkgs manifests for Chrome, 7-Zip, VLC, Notepad++ and VS Code (MSI selection, root defaults, EXE/Inno-only warnings, manifest URLs, 404 fallback, https only).
-- `cmd/pmctl/requests_test.go`: a full `pmctl auto` run with a request. Chrome and 7-Zip MSIs and a KB go into one signed bundle. VS Code (Inno only) and an unknown id become warnings. The request is archived and a garbage file is rejected. A repeat is a no-op. A tampered installer fails and its request is kept. The tests use no live network.
+- `internal/msi/msi_test.go`: the pure-Go MSI reader on synthetic compound files built in the test (512- and 4096-byte sectors, mini stream and regular sectors, 2- and 3-byte string references, a string over 64 KiB) and broken ones (not an MSI, truncated, looping sector chain, no or invalid ProductCode, no string pool). `OFFPATCH_MSI_DIR=<dir>` (optionally `OFFPATCH_MSI_EXPECT="file=CODE;..."`) reads real MSIs: checked against the Windows Installer API on 168 MSIs (24 version 3, 144 version 4) and the Microsoft Edge enterprise MSI 155.0.4283.62 from winget (`{6E669770-C655-388E-835E-C146C8EC6A2E}`).
+- `internal/acquire/library_test.go` and `cmd/pmctl/library_test.go`: the Library from the recorded Edge manifests (no ProductCode, still importable), locale fallbacks and free text the YAML reader refuses, the import rule, the lookup order, the `id@version` cache, the per-run budget and warnings; a request for Edge with no endpoint having it becomes an MSI package whose product code is read from the (synthetic) MSI.
+- `cmd/pmctl/onlyrequests_test.go`: `pmctl auto -only-requests` fetches only the request (no configured app, no Microsoft feed), sends the bundle and status report, archives the request, honours the run lock, and refuses to run without a requests directory.
+- `internal/e2e/acq_queue_test.go`: with `acquisition_requests_dir`, the export is queued as exactly the parsed document (0640, no temp file left), audited with `queued_to`; a failed write still returns 200 and is audited with `queued_error`.
+- `cmd/pmctl/requests_test.go`: a full `pmctl auto` run with a request. Chrome and 7-Zip MSIs and a KB go into one signed bundle. VS Code (Inno only) and an unknown id become warnings and `unsupported` items with short reasons. The request is archived and a garbage file is rejected. The same request carried again is fetched and sent again. A tampered installer fails (`failed`, "SHA-256 mismatch") and its request is kept. The tests use no live network.
+- `cmd/pmctl/requestitems_test.go`: per-item results. A KB not in the catalog for the build/arch is `unsupported`; on the retry of a request with a failed item, the item already sent for it is `already_sent` and not sent again, and `request_sent` is cleared once the request is done. A KB the Microsoft feed sent earlier is sent again when a request names it, and fetched once when feed and request bring it in the same run. Unit tests cover error classification (hash, timeout, network, catalog), MSI reasons, folding architectures, and "downloaded but not sent".
 - `internal/e2e/acq_request_test.go`: export permissions, an audit record with who and what, a file that pmctl parses with no host names, unknown selections refused, and the Catalog link for winget-sourced Chrome (by product code) and 7-Zip (by name).

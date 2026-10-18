@@ -87,9 +87,10 @@ func (s *Store) ListWindows(ctx context.Context) ([]MaintenanceWindow, error) {
 	return listWindows(ctx, s.db)
 }
 
-// windowState: whether the endpoint has any windows, and whether one is open
-// now (and allows reboots).
-type windowState struct{ has, open, reboot bool }
+// windowState: whether the endpoint has any windows, whether one is open
+// now (and allows reboots), and whether any of its windows ever allows
+// reboots (anyReboot: false = an in-window restart can never happen).
+type windowState struct{ has, open, reboot, anyReboot bool }
 
 func endpointWindows(all []MaintenanceWindow, groups []string, now time.Time) windowState {
 	var ws windowState
@@ -98,6 +99,9 @@ func endpointWindows(all []MaintenanceWindow, groups []string, now time.Time) wi
 			continue
 		}
 		ws.has = true
+		if w.AllowReboot {
+			ws.anyReboot = true
+		}
 		if w.Open(now) {
 			ws.open = true
 			if w.AllowReboot {

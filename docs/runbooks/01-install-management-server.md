@@ -189,7 +189,7 @@ All keys (`internal/server/config.go`, `internal/oidc/oidc.go`, `internal/server
 | `trusted_keys[]` | required | `public_key_file` or `public_key` (PEM), `sources[]`. Once a signed trust document has been accepted, it replaces this list for intake (runbook 03). |
 | `root_public_key_file` | — | Enables signed trust documents (key rotation / revocation). |
 | `admin_tokens[]` | — | `user`, `role` (`viewer`/`operator`/`approver`/`admin`), `token_sha256`. |
-| `allow_static_tokens` | `true` | `false` disables all bearer admin tokens. |
+| `allow_static_tokens` | `true` (also with `oidc`) | `false` disables all bearer admin tokens. Configuring `oidc` does not change the default. At startup pmserver logs `admin sign-in: ...` saying which methods work; a warning if `admin_tokens` are configured but disabled. |
 | `oidc` | — | See step 6. |
 | `session_ttl` | `8h` | SSO session lifetime. |
 | `require_mfa` | `false` | Refuse SSO logins and sessions without MFA. By design it does not apply to static (break-glass) tokens. |
@@ -343,7 +343,22 @@ curl --cacert /etc/offpatch-server/pki/ca.pem -H "Authorization: Bearer <metrics
 - Agent setup page lists the trusted key, `ca.pem` and the staged files.
 - After the first `audit_checkpoint_interval`, `checkpoints.jsonl` exists in `audit_export_dir`.
 - Send a test bundle (runbook 02) and see it `validated`.
+- After the first update intelligence arrives: `GET /api/summary` shows `intel.stale: false`, and
+  **Patches → Library** lists apps (`GET /api/library?view=all` returns a non-zero `total`).
 - Take the first backup and verify it (runbook 05).
+
+### Upgrading to the P2 release (Library, evidence, alerts that close themselves)
+
+- Upgrade **pmserver before pmctl**: the new pmctl adds a signed `resolved` section to the update
+  intelligence and `expected_ubr` to cumulative-update packages; an older server rejects both
+  (strict parsing). The database migrates by itself on start (new columns on `alerts`, `packages`
+  and `targets`).
+- **Upgrade the agents before** bundles carrying `expected_ubr` are deployed: older agents parse
+  the signed manifest strictly and refuse it ("manifest verification failed", a critical alert).
+  Until the fleet runs the new agent, keep pmctl from filling `expected_ubr` (ask the acquisition
+  team) or deploy the agent upgrade first (runbook 08).
+- After the upgrade, open alerts that describe a condition that has already cleared close
+  themselves at the next alert sweep (resolved by `system:scheduler`).
 
 ## Rollback / escape hatch
 

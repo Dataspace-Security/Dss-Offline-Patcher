@@ -14,7 +14,7 @@ import type { Deployment, DeploymentDetail, Endpoint, Package, Target } from "..
 import { parseTime, relTime, useLoad } from "../util";
 import { ClockProvider, useClock } from "../components/Clock";
 import { REBOOT_POLICIES } from "./Deployments";
-import { stageLabel } from "../components/deployLabels";
+import { AUTO_NEXT_HINT, stageGroupsText, stageLabel } from "../components/deployLabels";
 import "../ops.css";
 
 type Action = "pause" | "resume" | "cancel" | "advance" | "retry_failed";
@@ -87,6 +87,8 @@ export default function DeploymentDetailPage() {
   const exhausted = exhaustedInCurrentRing(d);
   const rings = ringSummaries(d);
   const ready = readyToAdvance(d);
+  // auto_advance: the server starts the next stage by itself once the current one finished without too many failures.
+  const autoNext = !!d.auto_advance && total > 1;
   const isLive = isLiveDeployment(d);
   const liveCount = (d.targets ?? []).filter((t) => t.live).length;
   const p = pkg.data;
@@ -131,7 +133,17 @@ export default function DeploymentDetailPage() {
           <b>{d.state}:</b> {d.state_reason}
         </div>
       )}
-      {ready && (
+      {ready && autoNext && !ready.empty && (
+        <div className="banner banner-ok next-step">
+          <div>
+            <b>{stageLabel(ready.name, ready.index)} finished:</b>{" "}
+            {ready.verified} verified, {ready.failed} failed{ready.skipped ? `, ${ready.skipped} not applicable / excepted` : ""}.
+            {" "}<b>{ringName(ready.index + 1)}</b> starts automatically in a moment.
+          </div>
+          {canOperate && <button className="btn" onClick={() => setAction("advance")}>Start it now…</button>}
+        </div>
+      )}
+      {ready && !(autoNext && !ready.empty) && (
         <div className="banner banner-ok next-step">
           <div>
             <b>{ready.empty ? `${stageLabel(ready.name, ready.index)} has no endpoints.` : `${stageLabel(ready.name, ready.index)} finished:`}</b>{" "}
@@ -203,10 +215,11 @@ export default function DeploymentDetailPage() {
       <div className="grid-2">
         <section className="card">
           <h2>Progress</h2>
-          <CountsBar counts={d.counts ?? {}} rollback={rollback} />
+          <CountsBar counts={d.counts ?? {}} rollback={rollback} running={d.state === "active" || d.state === "paused"} />
           <div className="ring-summaries">
             {rings.map((r) => <RingRow key={r.index} r={r} d={d} />)}
           </div>
+          {autoNext && d.current_ring < total - 1 && (d.state === "active" || d.state === "paused") && <div className="hint">{AUTO_NEXT_HINT}</div>}
         </section>
         <section className="card">
           <h2>Settings</h2>
@@ -214,6 +227,7 @@ export default function DeploymentDetailPage() {
             ["Package", <Link to={paths.catalog(d.package_id)}><Mono>{d.package_id}</Mono></Link>],
             ["Operation", rollback ? <Pill state="failed" label="rollback (uninstall)" /> : "install"],
             ["Current stage", total ? `${ringName(Math.min(Math.max(d.current_ring, 0), total - 1))} (of ${total})` : "—"],
+            ...(total > 1 && d.current_ring < total - 1 ? [["Next stage", autoNext ? "starts automatically once the current stage succeeds" : "started by an operator"] as [string, string]] : []),
             ["Max failure", `${d.max_failure_pct}%`],
             ["Max retries", String(d.max_retries)],
             ["Window (UTC)", d.window_start || d.window_end ? `${d.window_start || "?"} – ${d.window_end || "?"}` : "always"],
@@ -327,13 +341,15 @@ function RingRow({ r, d }: { r: RingSummary; d: DeploymentDetail }) {
       <div className="ring-sum-body">
         <div className="ring-sum-head">
           <span className="ring-name">{stageLabel(r.name, r.index)}</span>
-          <span className="cell-sub">{r.groups.join(", ")}</span>
+          <span className="cell-sub" title={r.groups.join(", ")}>{stageGroupsText(r.groups)}</span>
           <span className="spacer" />
           {r.finished && <Pill state="verified" label="finished" />}
           {cls === "current" && !r.finished && !r.empty && d.state === "active" && <Pill state="active" label="in progress" />}
         </div>
         {r.empty
-          ? <div className="cell-sub">{reached ? "no endpoints in this stage (yet)" : "not reached yet"}</div>
+          ? <div className="cell-sub">{reached ? "no endpoints in this stage (yet)"
+              : d.auto_advance && d.state !== "cancelled" ? `not reached yet · starts automatically once ${stageLabel(d.rings?.[r.index - 1]?.name, r.index - 1)} succeeds`
+              : "not reached yet"}</div>
           : (
             <>
               <div className="countbar ring-bar" title={`${r.verified} verified, ${r.failed} failed, ${r.inProgress} in progress, ${r.waiting} waiting, ${r.skipped} skipped`}

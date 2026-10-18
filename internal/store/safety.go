@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 )
@@ -227,31 +226,34 @@ func (s *Store) sweepStuck(ctx context.Context, after time.Duration) error {
 // alertLost raises (or, while one is open, updates and re-sends) the
 // critical alert listing every endpoint currently lost in the deployment.
 func (s *Store) alertLost(tx *sql.Tx, d Deployment) error {
-	rows, err := tx.Query(`SELECT e.hostname FROM targets t JOIN endpoints e ON e.endpoint_id=t.endpoint_id WHERE t.deployment_id=? AND t.state='lost_after_install' ORDER BY e.hostname`, d.DeploymentID)
+	rows, err := tx.Query(`SELECT t.endpoint_id, e.hostname FROM targets t JOIN endpoints e ON e.endpoint_id=t.endpoint_id WHERE t.deployment_id=? AND t.state='lost_after_install' ORDER BY e.hostname`, d.DeploymentID)
 	if err != nil {
 		return err
 	}
-	var hosts []string
+	var hosts []HostRef
 	for rows.Next() {
-		var h string
-		rows.Scan(&h)
+		var h HostRef
+		if err := rows.Scan(&h.EndpointID, &h.Hostname); err != nil {
+			rows.Close()
+			return err
+		}
 		hosts = append(hosts, h)
 	}
 	rows.Close()
-	sort.Strings(hosts)
 	verb := "installing"
 	if d.Operation == "rollback" {
 		verb = "rolling back"
 	}
-	msg := fmt.Sprintf("%s: %d endpoint(s) stopped checking in after %s %s: %s. Check these machines (boot failure?) before resuming.", d.Name, len(hosts), verb, d.PackageID, strings.Join(hosts, ", "))
-	res, err := tx.Exec(`UPDATE alerts SET message=?, delivered=0 WHERE kind='lost_after_install' AND object_id=? AND acknowledged_at=''`, msg, d.DeploymentID)
+	det, list := hostDetails(hosts)
+	msg := fmt.Sprintf("%s: %d endpoint(s) stopped checking in after %s %s: %s. Check these machines (boot failure?) before resuming.", d.Name, len(hosts), verb, d.PackageID, list)
+	res, err := tx.Exec(`UPDATE alerts SET message=?, details=?, delivered=0 WHERE kind='lost_after_install' AND object_id=? AND acknowledged_at=''`, msg, mustJSON(det), d.DeploymentID)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n > 0 {
 		return nil
 	}
-	return s.raiseAlert(tx, "critical", "lost_after_install", "deployment", d.DeploymentID, msg)
+	return s.raiseAlertWith(tx, "critical", "lost_after_install", "deployment", d.DeploymentID, msg, det)
 }
 
 // recoverLost: a lost endpoint checked in again but inventory does not (yet)

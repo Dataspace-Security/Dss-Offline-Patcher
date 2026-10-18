@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Item is one installed thing reported by an endpoint (store.InventoryItem).
@@ -69,6 +70,10 @@ type Index struct {
 	normNames [][]string // per app, Normalize(Names[i]) computed once
 	windows   map[int][]WindowsRelease
 	memo      sync.Map // Item ID+name -> lookupResult
+
+	// Doc.Resolved by lower-case app id (built on first use, ResolvedFor).
+	resolvedOnce sync.Once
+	resolved     map[string][]Resolved
 }
 
 type memoKey struct{ id, name string }
@@ -140,7 +145,16 @@ func (ix *Index) Match(ep Endpoint) Result {
 		res.OS = append(res.OS, OSUpdate{WindowsRelease: w, InstalledUBR: ubr, Basis: basis})
 	}
 
-	seenApp := map[string]bool{}
+	// An app can be installed more than once on one machine (an old EXE
+	// install next to a newer MSI, a per-user and a machine-wide copy). Per
+	// matched app only the highest installed version counts: that is what
+	// the endpoint effectively runs, and it is classified once.
+	type matched struct {
+		it Item
+		by string
+	}
+	best := map[int]matched{}
+	var order []int
 	for _, it := range ep.Inventory {
 		if it.Kind != "product" || it.Name == "" {
 			continue
@@ -150,16 +164,24 @@ func (ix *Index) Match(ep Endpoint) Result {
 			res.Unmatched++
 			continue
 		}
-		a := ix.Doc.Apps[i]
-		if seenApp[a.ID+"\x00"+it.ID] {
+		prev, ok := best[i]
+		if !ok {
+			order = append(order, i)
+			best[i] = matched{it, by}
 			continue
 		}
-		seenApp[a.ID+"\x00"+it.ID] = true
+		if CompareVersions(it.Version, prev.it.Version) > 0 {
+			best[i] = matched{it, by}
+		}
+	}
+	for _, i := range order {
+		m := best[i]
+		a, it := ix.Doc.Apps[i], m.it
 		target := a.Version
 		if a.ARPMax != "" {
 			target = a.ARPMax
 		}
-		u := AppUpdate{AppID: a.ID, Name: a.Name, InstalledName: it.Name, InstalledVersion: it.Version, LatestVersion: a.Version, MatchedBy: by}
+		u := AppUpdate{AppID: a.ID, Name: a.Name, InstalledName: it.Name, InstalledVersion: it.Version, LatestVersion: a.Version, MatchedBy: m.by}
 		if strings.HasPrefix(it.ID, "{") {
 			u.ProductCode = it.ID
 		}
@@ -321,4 +343,43 @@ func CompareVersions(a, b string) int {
 
 func splitVersion(v string) []string {
 	return strings.FieldsFunc(strings.TrimSpace(v), func(r rune) bool { return r == '.' || r == '-' || r == '_' || r == '+' || r == ' ' })
+}
+
+// OutOfSupportAfter: a Windows build whose newest cumulative update is older
+// than this (relative to the intelligence document) no longer gets monthly
+// security updates from Microsoft.
+const OutOfSupportAfter = 75 * 24 * time.Hour
+
+// OSSupport says whether the endpoint's Windows build still receives
+// updates: "supported", "out_of_support" (newest cumulative update older
+// than OutOfSupportAfter; lastUpdate is its release date) or "" when the
+// build is unknown to the intelligence or the endpoint is not Windows.
+func (ix *Index) OSSupport(ep Endpoint) (status, lastUpdate string) {
+	if ix == nil || ep.OS != "windows" {
+		return "", ""
+	}
+	server := strings.Contains(strings.ToLower(ep.OSVersion), "server")
+	for _, w := range ix.windows[ep.Build] {
+		if w.Server != server || !strings.EqualFold(w.Arch, ep.Arch) || w.ReleaseDate == "" {
+			continue
+		}
+		if w.ReleaseDate > lastUpdate {
+			lastUpdate = w.ReleaseDate
+		}
+	}
+	if lastUpdate == "" {
+		return "", ""
+	}
+	asOf, err := time.Parse(time.RFC3339, ix.Doc.GeneratedAt)
+	if err != nil {
+		asOf = time.Now()
+	}
+	last, err := time.Parse("2006-01-02", lastUpdate)
+	if err != nil {
+		return "", ""
+	}
+	if asOf.Sub(last) > OutOfSupportAfter {
+		return "out_of_support", lastUpdate
+	}
+	return "supported", lastUpdate
 }

@@ -22,19 +22,19 @@ export const fetchAcquisition = () => api.get<AcquisitionStatus>("/api/acquisiti
 export const fetchAcqRequests = () => api.get<AcquisitionRequestRecord[]>("/api/acquisition-requests");
 
 /**
- * Transfers → "Downloaded in the acquisition zone": status of the unattended
+ * Imports → "Downloaded in the acquisition zone": status of the unattended
  * downloader (pmctl auto) from its signed status reports, plus the tracked
  * acquisition requests.
  */
-export function DownloadsSection({ data, error, requests, requestsError }: {
+export function DownloadsSection({ data, error, requests, requestsError, onChanged }: {
   data: AcquisitionStatus | null; error: string | null;
-  requests: AcquisitionRequestRecord[] | null; requestsError: string | null;
+  requests: AcquisitionRequestRecord[] | null; requestsError: string | null; onChanged?: () => void;
 }) {
   return (
     <>
       <ErrorBanner error={error} />
       {data && data.sources.length === 0 && (
-        <Empty>No status report received yet. Run <Mono>pmctl auto</Mono> on the acquisition host; reports arrive with the next transfer.</Empty>
+        <Empty>No report from the acquisition zone yet. Reports arrive with the next transfer; if none comes, ask the acquisition team.</Empty>
       )}
       {data?.sources.map((s) => {
         const r = s.last.report;
@@ -50,12 +50,12 @@ export function DownloadsSection({ data, error, requests, requestsError }: {
             </div>
             {s.stale && (
               <div className="banner banner-warn">
-                No status report for more than {data.stale_after_hours} h. Silence is not success: check that the scheduled job runs on {r.host}.
+                No report for more than {data.stale_after_hours} h. Silence is not success: ask the acquisition team to check the scheduled downloads on {r.host}.
               </div>
             )}
             <div className="acq-kpis">
               <div><div className="tile-label">Last run</div><Time value={r.finished_at} /></div>
-              <div><div className="tile-label">Schedule</div>{r.schedule || <span className="muted">not set (add "schedule" to acquire.json)</span>}</div>
+              <div><div className="tile-label">Schedule</div>{r.schedule || <span className="muted">not set (ask the acquisition team)</span>}</div>
               <div><div className="tile-label">New this run</div><b>{r.new_packages.length}</b></div>
               <div><div className="tile-label">Already sent</div>{r.already_sent}</div>
               <div><div className="tile-label">Bundle</div>{r.bundle_id ? <><Mono>{r.bundle_id}</Mono> {r.sent ? <Pill state="verified" label="sent" /> : <Pill state="failed" label="not sent" />}</> : <span className="muted">none needed</span>}</div>
@@ -87,7 +87,7 @@ export function DownloadsSection({ data, error, requests, requestsError }: {
           </section>
         );
       })}
-      <AcquisitionRequests data={requests} error={requestsError} />
+      <AcquisitionRequests data={requests} error={requestsError} onChanged={onChanged} />
       {data && data.history.length > 0 && (
         <section className="section">
           <h3>Run history <span className="muted">· last {data.history.length}</span></h3>

@@ -145,16 +145,14 @@ func TestMatch(t *testing.T) {
 		t.Error("shared code without a matching name was guessed")
 	}
 	// dup is ambiguous by name, unknown is unknown, "Neither" claims a shared code
-	nameChrome := 0
+	// The second Chrome (older, matched by name) is the same app on the same
+	// machine: only the highest installed version is classified.
 	for _, a := range res.Apps {
-		if a.AppID == "Google.Chrome" && a.MatchedBy == "name" && a.InstalledVersion == "155.0.8059.80" {
-			nameChrome++
+		if a.AppID == "Google.Chrome" && a.InstalledVersion != "155.0.8059.82" {
+			t.Errorf("older duplicate Chrome install listed: %+v", a)
 		}
 	}
-	if nameChrome != 1 {
-		t.Errorf("Chrome by name across package variants not matched: %+v", res.Apps)
-	}
-	if len(res.Apps) != 4 || res.Current != 2 || res.Unmatched != 3 {
+	if len(res.Apps) != 3 || res.Current != 2 || res.Unmatched != 3 {
 		t.Errorf("apps=%d current=%d unmatched=%d", len(res.Apps), res.Current, res.Unmatched)
 	}
 	// The up-to-date apps are listed too (fleet status), with their installed form.
@@ -198,6 +196,29 @@ func TestMatch(t *testing.T) {
 	}
 }
 
+func TestMatchKeepsHighestInstalledVersionPerApp(t *testing.T) {
+	ix := NewIndex(Doc{Apps: []App{
+		{ID: "7zip.7zip", Name: "7-Zip", Version: "26.04", Codes: []string{"7-zip"}, Names: []string{"7-zip"}},
+	}})
+	old := Item{Kind: "product", ID: "7-Zip", Name: "7-Zip 22.01 (x64)", Version: "22.01"}
+	msi := Item{Kind: "product", ID: "{23170F69-40C1-2702-2604-000001000000}", Name: "7-Zip 26.04 (x64 edition)", Version: "26.04.00.0"}
+	for _, inv := range [][]Item{{old, msi}, {msi, old}} {
+		res := ix.Match(Endpoint{OS: "windows", Inventory: inv})
+		if len(res.Apps) != 0 || res.Current != 1 || len(res.CurrentApps) != 1 || res.Unmatched != 0 {
+			t.Fatalf("duplicate install: apps=%+v current=%d unmatched=%d", res.Apps, res.Current, res.Unmatched)
+		}
+		if c := res.CurrentApps[0]; c.InstalledVersion != "26.04.00.0" || c.InstalledName != msi.Name {
+			t.Errorf("kept the wrong install: %+v", c)
+		}
+	}
+	// Both installs outdated: one update entry, for the highest installed version.
+	older := Item{Kind: "product", ID: "7-Zip", Name: "7-Zip 19.00 (x64)", Version: "19.00"}
+	res := ix.Match(Endpoint{OS: "windows", Inventory: []Item{older, old}})
+	if len(res.Apps) != 1 || res.Current != 0 || res.Apps[0].InstalledVersion != "22.01" {
+		t.Errorf("two outdated installs: %+v current=%d", res.Apps, res.Current)
+	}
+}
+
 func TestNormalize(t *testing.T) {
 	for in, want := range map[string]string{
 		"Mozilla Firefox (x64 en-US)":   "mozillafirefox",
@@ -230,5 +251,31 @@ func TestCompareVersions(t *testing.T) {
 		if got := CompareVersions(c.a, c.b); got != c.want {
 			t.Errorf("CompareVersions(%q, %q) = %d, want %d", c.a, c.b, got, c.want)
 		}
+	}
+}
+
+// A Windows build whose newest cumulative update is months old gets no more
+// updates from Microsoft (Windows 11 21H2 ended in October 2024).
+func TestOSSupport(t *testing.T) {
+	ix := NewIndex(Doc{GeneratedAt: "2026-10-17T03:00:00Z", Windows: []WindowsRelease{
+		{Product: "Windows 11 Version 21H2", Build: 22000, Arch: "x64", KB: "KB5044280", ReleaseDate: "2024-10-08"},
+		{Product: "Windows 11 Version 26H2", Build: 26300, Arch: "x64", KB: "KB5127648", ReleaseDate: "2026-10-14"},
+	}})
+	cases := []struct {
+		build                 int
+		osVersion, want, last string
+	}{
+		{22000, "Windows 11 Pro 21H2 (22000.3260)", "out_of_support", "2024-10-08"},
+		{26300, "Windows 11 Pro N 26H2 (26300.9711)", "supported", "2026-10-14"},
+		{19045, "Windows 10 Pro 22H2 (19045.1)", "", ""}, // unknown build
+	}
+	for _, c := range cases {
+		got, last := ix.OSSupport(Endpoint{OS: "windows", OSVersion: c.osVersion, Build: c.build, Arch: "x64"})
+		if got != c.want || last != c.last {
+			t.Errorf("build %d: %q %q, want %q %q", c.build, got, last, c.want, c.last)
+		}
+	}
+	if got, _ := ix.OSSupport(Endpoint{OS: "linux", Build: 22000, Arch: "x64"}); got != "" {
+		t.Errorf("linux: %q", got)
 	}
 }

@@ -32,7 +32,10 @@ type SpecEntry struct {
 	// Prerequisites: KBs that must be installed first, e.g. the checkpoint
 	// cumulative update(s) a Windows 11 24H2+ update builds on. The server
 	// holds the package back on endpoints that lack them.
-	Prerequisites []string               `json:"prerequisites,omitempty"`
+	Prerequisites []string `json:"prerequisites,omitempty"`
+	// ExpectedUBR: for a Windows cumulative update, the build revision the
+	// endpoint reports once installed (manifest.Package.ExpectedUBR).
+	ExpectedUBR   int                    `json:"expected_ubr,omitempty"`
 	Applicability manifest.Applicability `json:"applicability"`
 	SourceURL     string                 `json:"source_url"`
 	Path          string                 `json:"path"`
@@ -81,6 +84,7 @@ func ValidateEntry(e SpecEntry, size int64, sha256hex string) error {
 			ReleaseDate:     e.ReleaseDate,
 			Supersedes:      sup,
 			Prerequisites:   e.Prerequisites,
+			ExpectedUBR:     e.ExpectedUBR,
 			Applicability:   e.Applicability,
 			File:            manifest.FileRef{Name: "payload/" + filepath.Base(filepath.FromSlash(e.Path)), Size: size, SHA256: sha256hex},
 			SourceURL:       e.SourceURL,

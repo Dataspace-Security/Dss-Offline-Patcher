@@ -64,7 +64,7 @@ Other options: `--status`; `--uninstall` (it lists the secrets left on disk; `--
 sudo ./install-ubuntu.sh --role all --hosts 192.168.88.129 [--with-agent]
 ```
 
-Server, acquisition, signing key and root key on one machine, for evaluation only. It prints a warning to that effect. Acquisition still runs as its own user `offpatch-acq`, which can only drop files into the server inbox. The break-glass token is kept in `/etc/offpatch/admin-token.txt` (root only, 0600). `--with-agent` also enrolls the machine itself. Older lab installs, where everything ran as `offpatch`, are moved to this layout when you re-run with `--role all`.
+Server, acquisition, signing key and root key on one machine, for evaluation only. It prints a warning to that effect. Acquisition still runs as its own user `offpatch-acq`, which can only drop files into the server inbox. The break-glass token is kept in `/etc/offpatch/admin-token.txt` (root only, 0600). `--with-agent` also enrolls the machine itself. Older lab installs, where everything ran as `offpatch`, are moved to this layout when you re-run with `--role all`. The lab queues console acquisition requests straight into `/var/lib/offpatch-acq/requests` (`acquisition_requests_dir`) and `offpatch-acquire-requests.path` fetches them right away with `pmctl auto -only-requests`; production roles keep the carried file (runbook 02).
 
 ## Quick start (single machine, simulated endpoints)
 

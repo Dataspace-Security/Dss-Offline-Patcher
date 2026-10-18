@@ -457,6 +457,14 @@ func (a *Agent) maybeRenew(ctx context.Context) error {
 	return nil
 }
 
+// serverError is a non-2xx answer from the server.
+type serverError struct {
+	Code int
+	Msg  string
+}
+
+func (e *serverError) Error() string { return fmt.Sprintf("server %d: %s", e.Code, e.Msg) }
+
 func apiError(resp *http.Response) error {
 	var e struct{ Error string }
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -464,7 +472,7 @@ func apiError(resp *http.Response) error {
 	if e.Error == "" {
 		e.Error = strings.TrimSpace(string(b))
 	}
-	return fmt.Errorf("server %d: %s", resp.StatusCode, e.Error)
+	return &serverError{Code: resp.StatusCode, Msg: e.Error}
 }
 
 // sameOrigin resolves a server-supplied path and refuses anything that is
@@ -641,6 +649,9 @@ func (a *Agent) Cycle(ctx context.Context) error {
 		}
 		return fmt.Errorf("%w; sent a heartbeat instead of a check-in", err)
 	}
+	// Before the check-in: the check-in verifies targets, after which the
+	// server takes no more reports for them.
+	a.postRebootHealth(ctx, reboot)
 	inv = append(inv, store.InventoryItem{Kind: "agent", ID: "offpatch-agent", Name: "offpatch agent", Version: a.agentVersion()})
 	var resp struct {
 		Assignments            []store.Assignment      `json:"assignments"`
@@ -851,6 +862,7 @@ func (a *Agent) afterInstall(ctx context.Context, as store.Assignment, res Resul
 		return
 	}
 	a.rememberReboot(as, size)
+	a.rememberRebootHealth(as, res)
 	p := a.awaitingReboot[rebootKey(as)]
 	if err := a.heartbeat(ctx, &p); err != nil {
 		a.log.Debug("waiting_reboot heartbeat failed", "err", err)

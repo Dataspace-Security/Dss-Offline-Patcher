@@ -48,7 +48,7 @@ func needs(p Package, e Endpoint, inv []InventoryItem, sup map[string]bool) (boo
 	if ok, _ := applicable(p, e); !ok {
 		return false, "", ""
 	}
-	if ok, _ := presentIn(inv, p, sup); ok {
+	if ok, _, _ := presentOn(inv, osFacts(e.OSVersion, e.Build), p, sup); ok {
 		return false, "", ""
 	}
 	if appStoreManaged(inv, p) {

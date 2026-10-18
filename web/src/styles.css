@@ -38,6 +38,7 @@ code, .mono { font-family: var(--mono); font-size: 12px; }
 .right { text-align: right; }
 .break { word-break: break-all; }
 .text-red { color: var(--red); } .text-green { color: var(--green); } .text-amber { color: var(--amber); }
+.text-blue { color: var(--blue); }
 .spacer { flex: 1; }
 .boot { padding: 40px; color: var(--text-2); }
 

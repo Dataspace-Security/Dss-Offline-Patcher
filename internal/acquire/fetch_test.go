@@ -102,6 +102,9 @@ func TestFetchKB(t *testing.T) {
 	if _, ok := g["version"]; ok {
 		t.Errorf("version should be omitted when catalog shows n/a")
 	}
+	if _, ok := g["expected_ubr"]; ok {
+		t.Errorf("expected_ubr without a UBR in the title or a hint: %v", g["expected_ubr"])
+	}
 	if !reflect.DeepEqual(g["applicability"], map[string]any{"os": "windows", "arch": "x64", "min_build": 19045.0, "max_build": 19045.0}) {
 		t.Errorf("applicability = %v", g["applicability"])
 	}
@@ -115,14 +118,17 @@ func TestFetchKB(t *testing.T) {
 	}
 
 	// Explicit -severity wins; re-run replaces the entry and reuses the file.
-	o.Severity, o.MSRCMonth = "low", ""
+	// The build revision known from update intelligence becomes expected_ubr.
+	// (Only with RecordUBR: older agents refuse the field.)
+	o.Severity, o.MSRCMonth, o.ExpectedUBR, o.RecordUBR = "low", "", 6456, true
 	res, err = FetchKB(context.Background(), cat, ms, o)
 	if err != nil || !res.Replaced || !res.Download.Reused {
 		t.Fatalf("rerun: %+v %v", res, err)
 	}
-	if got := readSpec(t, o.SpecPath); len(got) != 1 || got[0]["severity"] != "low" {
+	if got := readSpec(t, o.SpecPath); len(got) != 1 || got[0]["severity"] != "low" || got[0]["expected_ubr"] != 6456.0 {
 		t.Fatalf("spec after rerun = %v", got)
 	}
+	o.ExpectedUBR, o.RecordUBR = 0, false
 
 	// No severity source except the catalog details: taken from there, with a warning.
 	o.Severity = ""

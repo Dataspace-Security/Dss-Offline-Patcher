@@ -33,8 +33,10 @@ import (
 	"syscall"
 	"time"
 
+	"offpatch/internal/acqrequest"
 	"offpatch/internal/acqstatus"
 	"offpatch/internal/acquire"
+	"offpatch/internal/intel"
 	"offpatch/internal/manifest"
 )
 
@@ -75,6 +77,11 @@ type autoConfig struct {
 	// Requests: directory of acquisition requests exported from the
 	// console's Updates page (see requests.go). Overridden by -requests.
 	Requests string `json:"requests"`
+	// ExpectedUBR: record expected_ubr (the build revision a Windows
+	// cumulative update brings) in KB packages. Default off: agents up to
+	// 0.6.2 refuse bundles with the field; enable only after every agent
+	// runs 0.6.5 or later.
+	ExpectedUBR bool `json:"expected_ubr"`
 
 	// Advanced: alternative endpoints (tests, or an internal mirror).
 	CatalogURL         string `json:"catalog_url"`
@@ -127,10 +134,13 @@ type autoApp struct {
 	// version inside the .pkg, without a mismatch warning.
 	LabelFromPkg       bool   `json:"label_from_pkg"`
 	ProductCode        string `json:"product_code"`          // msi: fixed product code
-	ProductCodeFromMSI bool   `json:"product_code_from_msi"` // msi: read it from the file (Windows host)
+	ProductCodeFromMSI bool   `json:"product_code_from_msi"` // msi: read it from the file
 	PackageName        string `json:"package_name"`          // deb/rpm/pkg
 	MinBuild           int    `json:"min_build"`
 	MaxBuild           int    `json:"max_build"`
+	// WingetID: the app's winget package id, if it has one: lists it in the
+	// console's Library (update intelligence) with its winget details.
+	WingetID string `json:"winget_id"`
 }
 
 // Duration parses "720h"-style strings in JSON.
@@ -152,6 +162,19 @@ type autoState struct {
 	// FeedSeen: app → "feedVersion=realVersion" when a vendor feed announced a
 	// version the download link did not (yet) serve.
 	FeedSeen map[string]string `json:"feed_seen,omitempty"`
+	// RequestSent: acquisition request id → package id → bundle id, for the
+	// requests still waiting (one with a failed item is retried): what was
+	// already sent for that request, so a retry does not send it again.
+	RequestSent map[string]map[string]string `json:"request_sent,omitempty"`
+	// Library: winget id@version → installer and description details (see
+	// library.go); only the newest version of each package is kept.
+	Library map[string]intel.Resolved `json:"library,omitempty"`
+	// Requested: every winget id an acquisition request asked for → the
+	// newest such request's created_at (the Library keeps describing it).
+	Requested map[string]string `json:"requested_apps,omitempty"`
+	// WindowsUBR: "<KB>/<build>" → build revision, from update intelligence,
+	// for expected_ubr when the catalog title of a KB does not state it.
+	WindowsUBR map[string]int `json:"windows_ubr,omitempty"`
 }
 
 type autoDone struct {
@@ -162,21 +185,22 @@ type autoDone struct {
 }
 
 type autoReport struct {
-	StartedAt  string            `json:"started_at"`
-	Finished   string            `json:"finished_at"`
-	DryRun     bool              `json:"dry_run"`
-	New        []string          `json:"new_packages"`
-	Skipped    int               `json:"already_sent"`
-	Superseded []string          `json:"skipped_superseded,omitempty"`
-	Failures   map[string]string `json:"failures"`
-	Bundle     string            `json:"bundle,omitempty"`    // last bundle sent
-	BundleID   string            `json:"bundle_id,omitempty"` // every bundle sent, comma-separated
-	Bundles    []string          `json:"bundles,omitempty"`
-	Sent       bool              `json:"sent"`
-	Warnings   []string          `json:"warnings,omitempty"`
-	Feeds      []acqstatus.Feed  `json:"feeds"`
-	Error      string            `json:"error,omitempty"`
-	StatusSent bool              `json:"status_report_sent"`
+	StartedAt  string                 `json:"started_at"`
+	Finished   string                 `json:"finished_at"`
+	DryRun     bool                   `json:"dry_run"`
+	New        []string               `json:"new_packages"`
+	Skipped    int                    `json:"already_sent"`
+	Superseded []string               `json:"skipped_superseded,omitempty"`
+	Failures   map[string]string      `json:"failures"`
+	Bundle     string                 `json:"bundle,omitempty"`    // last bundle sent
+	BundleID   string                 `json:"bundle_id,omitempty"` // every bundle sent, comma-separated
+	Bundles    []string               `json:"bundles,omitempty"`
+	Sent       bool                   `json:"sent"`
+	Warnings   []string               `json:"warnings,omitempty"`
+	Feeds      []acqstatus.Feed       `json:"feeds"`
+	Items      []acqstatus.ItemResult `json:"items,omitempty"` // per requested item
+	Error      string                 `json:"error,omitempty"`
+	StatusSent bool                   `json:"status_report_sent"`
 }
 
 // Hooks overridable in tests.
@@ -199,12 +223,13 @@ func autoCmd(args []string) error {
 	cfgPath := fs.String("config", "acquire.json", "auto-acquisition config")
 	dry := fs.Bool("dry-run", false, "list what would be fetched; download and send nothing")
 	reqDir := fs.String("requests", "", "directory of acquisition requests exported from the console (default: \"requests\" in the config)")
+	onlyReq := fs.Bool("only-requests", false, "handle only the acquisition requests (skip Microsoft, apps and intelligence); bundles and the status report are sent as usual")
 	fs.Parse(args)
 	// SIGINT/SIGTERM (systemd stop, Ctrl-C): stop fetching, keep what was
 	// delivered recorded in state.json, and still send the status report.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	rep, err := runAutoRequests(ctx, *cfgPath, *dry, *reqDir)
+	rep, err := runAutoRequests(ctx, *cfgPath, *dry, *reqDir, *onlyReq)
 	b, _ := json.MarshalIndent(rep, "", "  ")
 	fmt.Println(string(b))
 	if err != nil {
@@ -312,7 +337,10 @@ func loadAutoConfig(path string) (*autoConfig, error) {
 			return nil, fmt.Errorf("config: apps[%d] (%s) needs a sha256 checksum source, authenticode_signer or pkg_signer — unverified downloads are never accepted", i, a.Name)
 		}
 		if a.Kind == "msi" && !a.ProductCodeFromMSI && (a.ProductCode == "" || manifest.IsNilGUID(a.ProductCode)) {
-			return nil, fmt.Errorf("config: apps[%d] (%s) needs the MSI's real product_code (not a placeholder), or product_code_from_msi on a Windows acquisition host", i, a.Name)
+			return nil, fmt.Errorf("config: apps[%d] (%s) needs the MSI's real product_code (not a placeholder), or product_code_from_msi", i, a.Name)
+		}
+		if a.WingetID != "" && !acqrequest.ValidWingetID(a.WingetID) {
+			return nil, fmt.Errorf("config: apps[%d] (%s): winget_id %q is not a winget package id", i, a.Name, a.WingetID)
 		}
 	}
 	return c, nil
@@ -350,6 +378,18 @@ func loadState(path string) (autoState, error) {
 	if st.FeedSeen == nil {
 		st.FeedSeen = map[string]string{}
 	}
+	if st.RequestSent == nil {
+		st.RequestSent = map[string]map[string]string{}
+	}
+	if st.Library == nil {
+		st.Library = map[string]intel.Resolved{}
+	}
+	if st.Requested == nil {
+		st.Requested = map[string]string{}
+	}
+	if st.WindowsUBR == nil {
+		st.WindowsUBR = map[string]int{}
+	}
 	return st, nil
 }
 
@@ -376,12 +416,15 @@ func recentMonths(now time.Time, n int) []string {
 var autoWarn = func(string) {}
 
 func runAuto(ctx context.Context, cfgPath string, dry bool) (autoReport, error) {
-	return runAutoRequests(ctx, cfgPath, dry, "")
+	return runAutoRequests(ctx, cfgPath, dry, "", false)
 }
 
 // runAutoRequests is runAuto with the requests directory overridden
-// (pmctl auto -requests).
-func runAutoRequests(ctx context.Context, cfgPath string, dry bool, requestsDir string) (rep autoReport, err error) {
+// (pmctl auto -requests) and, with onlyRequests (pmctl auto
+// -only-requests), only the acquisition requests handled: no Microsoft
+// updates, configured apps or intelligence. Used by the role-all request
+// watcher so a queued request is served without waiting for the schedule.
+func runAutoRequests(ctx context.Context, cfgPath string, dry bool, requestsDir string, onlyRequests bool) (rep autoReport, err error) {
 	autoWarn = func(s string) { rep.Warnings = append(rep.Warnings, s) }
 	defer func() { autoWarn = func(string) {} }()
 	rep = autoReport{StartedAt: autoNow().UTC().Format(time.RFC3339), DryRun: dry, Failures: map[string]string{}, New: []string{}}
@@ -391,6 +434,9 @@ func runAutoRequests(ctx context.Context, cfgPath string, dry bool, requestsDir 
 	}
 	if requestsDir != "" {
 		c.Requests = requestsDir
+	}
+	if onlyRequests && c.Requests == "" {
+		return rep, fmt.Errorf("-only-requests: no requests directory (set \"requests\" in %s or pass -requests)", cfgPath)
 	}
 	ctx, cancel := context.WithTimeout(ctx, c.RunTimeout.Duration)
 	defer cancel()
@@ -430,13 +476,20 @@ func runAutoRequests(ctx context.Context, cfgPath string, dry bool, requestsDir 
 		delete(st.Failed, id)
 	}
 
+	if onlyRequests {
+		rep.Warnings = append(rep.Warnings, "requests-only run (-only-requests): Microsoft, application and intelligence feeds were not checked")
+	}
+
 	// ---- Microsoft security updates ----
-	if m := c.Microsoft; m != nil && len(m.Products) > 0 {
+	if m := c.Microsoft; !onlyRequests && m != nil && len(m.Products) > 0 {
 		fetchMicrosoft(&msRun{ctx: ctx, c: c, hc: hc, downloads: downloads, spec: spec, st: st, dry: dry, rep: &rep, fail: fail, added: added})
 	}
 
 	// ---- third-party applications ----
 	for _, a := range c.Apps {
+		if onlyRequests {
+			break
+		}
 		id, ver, err := fetchApp(ctx, hc, a, downloads, spec, st, dry)
 		f := acqstatus.Feed{Type: "app", Name: a.Name, Title: a.Title, LatestVersion: ver}
 		switch {
@@ -459,11 +512,15 @@ func runAutoRequests(ctx context.Context, cfgPath string, dry bool, requestsDir 
 	var reqs []*loadedRequest
 	if c.Requests != "" {
 		reqs = processRequests(&requestRun{ctx: ctx, c: c, hc: hc, downloads: downloads, spec: spec, st: st, dry: dry, rep: &rep,
-			fail: fail, added: added, handled: map[string]bool{}}, c.Requests)
+			fail: fail, added: added, outcomes: map[string]itemOutcome{}}, c.Requests)
 	}
 
 	defer func() {
 		rep.Finished = autoNow().UTC().Format(time.RFC3339)
+		// Done with a request once its packages are on their way (or there
+		// was nothing new to send); failed items keep it for the next run.
+		requestsDone := !dry && err == nil && (rep.Sent || len(rep.New) == 0)
+		rep.Items = finishItems(reqs, st, &rep, dry, err, requestsDone)
 		// State first: whatever happens below, delivered packages stay done.
 		if serr := saveJSON(statePath, st); serr != nil && err == nil {
 			err = fmt.Errorf("state not saved: %w", serr)
@@ -471,13 +528,16 @@ func runAutoRequests(ctx context.Context, cfgPath string, dry bool, requestsDir 
 		if err != nil {
 			rep.Error = err.Error()
 		}
-		// Done with a request once its packages are on their way (or there
-		// was nothing new to send); failed items keep it for the next run.
-		if !dry && err == nil && (rep.Sent || len(rep.New) == 0) {
+		if requestsDone {
 			archiveRequests(c.Requests, reqs, &rep)
 		}
-		if !dry && c.Intel != nil && !c.Intel.Disabled {
-			rep.Feeds = append(rep.Feeds, intelFeed(ctx, c, &rep))
+		if !dry && !onlyRequests && c.Intel != nil && !c.Intel.Disabled {
+			rep.Feeds = append(rep.Feeds, intelFeed(ctx, c, &rep, &st))
+			// The Library cache and Windows build revisions it updated.
+			if serr := saveJSON(statePath, st); serr != nil && err == nil {
+				err = fmt.Errorf("state not saved: %w", serr)
+				rep.Error = err.Error()
+			}
 		}
 		if !dry {
 			applyRetention(c, st, runDir, specFiles(spec), &rep)
@@ -501,16 +561,23 @@ func runAutoRequests(ctx context.Context, cfgPath string, dry bool, requestsDir 
 // intelFeed sends update intelligence and reports it as a feed: failed if
 // nothing could be sent or it is incomplete (a feed that was not read must
 // not look up to date).
-func intelFeed(ctx context.Context, c *autoConfig, rep *autoReport) acqstatus.Feed {
-	d, ierr := sendIntel(ctx, c)
+func intelFeed(ctx context.Context, c *autoConfig, rep *autoReport, st *autoState) acqstatus.Feed {
+	d, lib, ierr := sendIntel(ctx, c, st)
 	rep.Warnings = append(rep.Warnings, d.Warnings...)
+	rep.Warnings = append(rep.Warnings, lib.warnings...) // never fail the feed: the Library only describes
 	f := acqstatus.Feed{Type: "intel", Name: "update intelligence", Status: "up_to_date", Detail: d.AppsSource}
+	if lib.ran {
+		f.Detail = strings.TrimPrefix(f.Detail+"; "+lib.summary(), "; ")
+	}
 	switch {
 	case ierr != nil:
 		rep.Warnings = append(rep.Warnings, "update intelligence not sent: "+ierr.Error())
 		f.Status, f.Detail = "failed", "not sent: "+ierr.Error()
 	default:
 		f.LatestVersion = fmt.Sprintf("%d Windows builds, %d apps", len(d.Windows), len(d.Apps))
+		if lib.ran {
+			f.LatestVersion += fmt.Sprintf(", %d in the library", len(d.Resolved))
+		}
 		if len(d.Warnings) > 0 {
 			f.Status, f.Detail = "failed", "sent incomplete: "+strings.Join(d.Warnings, "; ")
 		}
@@ -883,7 +950,7 @@ func sendStatus(c *autoConfig, rep *autoReport) error {
 	}
 	r := acqstatus.Report{Source: src, Host: host, Schedule: c.Schedule, StartedAt: rep.StartedAt, FinishedAt: fin, Outcome: outcome,
 		Error: rep.Error, New: rep.New, Skipped: rep.Skipped, Superseded: rep.Superseded, Failures: rep.Failures, Warnings: rep.Warnings,
-		BundleID: rep.BundleID, Sent: rep.Sent, Feeds: rep.Feeds}
+		BundleID: rep.BundleID, Sent: rep.Sent, Feeds: rep.Feeds, Items: rep.Items}
 	if r.Feeds == nil {
 		r.Feeds = []acqstatus.Feed{}
 	}

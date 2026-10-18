@@ -16,6 +16,10 @@ type InventoryItem struct {
 	Version string `json:"version"`
 	// Source is "appstore" for macOS apps installed from the Mac App Store.
 	Source string `json:"source,omitempty"`
+	// Scope is "user" for a per-user install found in a loaded user hive
+	// (HKU\<SID>\...\Uninstall), empty for a machine-wide install. Both
+	// count the same for needs, targeting and verification.
+	Scope string `json:"scope,omitempty"`
 }
 
 type Endpoint struct {
@@ -55,6 +59,15 @@ type EndpointMissing struct {
 	OS    int `json:"os"`
 	Apps  int `json:"apps"`
 	Ready int `json:"ready"`
+	// Catalog: approved or quarantined catalog packages it needs (Ready
+	// counts the approved ones). An endpoint is fully up to date only with
+	// os, apps and catalog all 0.
+	Catalog int `json:"catalog"`
+	// OSSupport: "supported", "out_of_support" (Microsoft no longer ships
+	// updates for this Windows build) or "" (unknown); OSLastUpdate is the
+	// release date of its newest cumulative update.
+	OSSupport    string `json:"os_support,omitempty"`
+	OSLastUpdate string `json:"os_last_update,omitempty"`
 }
 
 // InventoryItems is the endpoint's last reported inventory (loaded by
@@ -134,6 +147,10 @@ type Thresholds struct {
 	StuckAfter time.Duration
 }
 
+// AwaitingCheckinFor: how long after enrollment an endpoint that never sent
+// an inventory is awaiting_checkin before it counts as offline.
+const AwaitingCheckinFor = 24 * time.Hour
+
 var DefaultThresholds = Thresholds{OfflineAfter: 30 * time.Minute, StaleAfter: 24 * time.Hour, LostAfterInstall: 2 * time.Hour}
 
 func (s *Store) deriveStatus(e Endpoint, targets []Target, th Thresholds) string {
@@ -151,6 +168,15 @@ func (s *Store) deriveStatus(e Endpoint, targets []Target, th Thresholds) string
 	// An endpoint that went silent right after an install is the loudest signal.
 	if has["lost_after_install"] {
 		return "lost_after_install"
+	}
+	if e.InventoryAt == "" {
+		// Enrolled but never checked in with an inventory: a new machine
+		// whose agent is still starting, not a silent one. Not compliant, not
+		// alerted on; after AwaitingCheckinFor it is offline.
+		if now.Sub(parseTime(e.EnrolledAt)) <= AwaitingCheckinFor {
+			return "awaiting_checkin"
+		}
+		return "offline"
 	}
 	if now.Sub(parseTime(e.LastSeen)) > th.OfflineAfter {
 		return "offline"
@@ -170,6 +196,12 @@ func (s *Store) deriveStatus(e Endpoint, targets []Target, th Thresholds) string
 	}
 	return "compliant"
 }
+
+// EndpointStatuses lists every status an active endpoint can have (the
+// summary reports each, zero or not). updates_available and out_of_support
+// are set by the API from update intelligence (they refine compliant).
+var EndpointStatuses = []string{"compliant", "updates_available", "out_of_support", "noncompliant", "pending_reboot", "failed", "exception",
+	"stale", "offline", "lost_after_install", "awaiting_checkin"}
 
 // relevantTargets: targets in deployments that still matter (not cancelled).
 func relevantTargets(ctx context.Context, q querier, endpointID string) ([]Target, error) {

@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -20,8 +22,12 @@ import (
 // never sends anything out. Every export is audited with what it listed.
 
 type acqRequestBody struct {
-	Apps []string `json:"apps"` // winget ids from GET /api/updates
+	Apps []string `json:"apps"` // winget ids from GET /api/updates or the Library
 	KBs  []string `json:"kbs"`
+	// AppArchs: winget id -> architecture (x64 | x86 | arm64) for apps that
+	// no endpoint has installed (a Library import of something new); used
+	// only then (default x64). Installed apps take the fleet's architectures.
+	AppArchs map[string]string `json:"app_archs,omitempty"`
 }
 
 func (s *Server) exportAcqRequest(w http.ResponseWriter, r *http.Request) {
@@ -46,9 +52,22 @@ func (s *Server) exportAcqRequest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "no usable update intelligence: nothing to request")
 		return
 	}
-	req, missing := buildAcqRequest(updates, body)
+	if len(body.AppArchs) > acqrequest.MaxItems {
+		writeErr(w, http.StatusBadRequest, "too many app_archs entries")
+		return
+	}
+	li, err := s.libraryIndex(r.Context())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	req, missing, err := buildAcqRequest(updates, li, body)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if len(missing) > 0 {
-		writeErr(w, http.StatusBadRequest, "not currently needed by any endpoint (reload the page): "+strings.Join(missing, ", "))
+		writeErr(w, http.StatusBadRequest, "not in the update intelligence (reload the page): "+strings.Join(missing, ", "))
 		return
 	}
 	var rnd [3]byte
@@ -79,20 +98,44 @@ func (s *Server) exportAcqRequest(w http.ResponseWriter, r *http.Request) {
 	for _, k := range req.KBs {
 		rec.Items = append(rec.Items, store.AcqRequestItem{Kind: "kb", Key: k.KB, Version: k.Arch})
 	}
+	// Direct hand-off when configured. The file is written before the audit
+	// record so the record says where it went; it is removed again if the
+	// record cannot be written (no audit record, no export).
+	queuedTo, queuedErr := "", ""
+	if dir := s.cfg.AcquisitionRequestsDir; dir != "" {
+		if err := queueAcqRequest(dir, req); err != nil {
+			s.log.Error("acquisition request not queued (operator must carry the file)", "request_id", req.RequestID, "dir", dir, "err", err)
+			queuedErr = err.Error()
+		} else {
+			queuedTo = dir
+		}
+	}
+	details := map[string]any{"apps": apps, "kbs": kbs, "intel_generated_at": req.IntelGeneratedAt, "queued_to": queuedTo}
+	if queuedErr != "" {
+		details["queued_error"] = queuedErr
+	}
 	// Tracked (seen / fulfilled) and audited in one transaction.
 	if err := s.store.RecordAcqRequest(r.Context(), rec, store.Ev{Actor: req.CreatedBy, Action: "acquisition.request_exported", ObjectType: "acquisition_request",
-		ObjectID: req.RequestID, Details: map[string]any{"apps": apps, "kbs": kbs, "intel_generated_at": req.IntelGeneratedAt}}); err != nil {
+		ObjectID: req.RequestID, Details: details}); err != nil {
+		if queuedTo != "" {
+			if rmErr := os.Remove(filepath.Join(queuedTo, req.RequestID+".json")); rmErr != nil {
+				s.log.Error("unaudited acquisition request left queued", "request_id", req.RequestID, "err", rmErr)
+			}
+		}
 		s.fail(w, err) // no audit record, no export
 		return
 	}
 	w.Header().Set("Content-Disposition", `attachment; filename="`+req.RequestID+`.json"`)
-	writeJSON(w, 200, req)
+	writeJSON(w, 200, queuedRequest{Request: req, QueuedTo: queuedTo})
 }
 
 // buildAcqRequest fills a request from the fleet view for the selected keys
-// (only what the server itself knows is written out). missing lists keys
-// that no endpoint currently needs.
-func buildAcqRequest(updates []*fleetUpdate, body acqRequestBody) (*acqrequest.Request, []string) {
+// (only what the server itself knows is written out). Keys no endpoint
+// needs are taken from the update intelligence (li; a Library import): an
+// app with the architecture from app_archs and no installed forms, a KB
+// with every architecture the intelligence lists for it. missing lists
+// keys that are in neither.
+func buildAcqRequest(updates []*fleetUpdate, li *libIndex, body acqRequestBody) (*acqrequest.Request, []string, error) {
 	byKey := map[string]*fleetUpdate{}
 	for _, u := range updates {
 		byKey[u.Kind+"\x00"+strings.ToLower(u.Key)] = u
@@ -103,7 +146,21 @@ func buildAcqRequest(updates []*fleetUpdate, body acqRequestBody) (*acqrequest.R
 	for _, id := range body.Apps {
 		u := byKey["app\x00"+strings.ToLower(strings.TrimSpace(id))]
 		if u == nil {
-			missing = append(missing, id)
+			e := li.entry("app", strings.TrimSpace(id))
+			if e == nil {
+				missing = append(missing, id)
+				continue
+			}
+			if seen["app\x00"+e.item.ID] {
+				continue
+			}
+			seen["app\x00"+e.item.ID] = true
+			arch, err := libraryArchFor(body.AppArchs, e.item.ID)
+			if err != nil {
+				return nil, nil, err
+			}
+			req.Apps = append(req.Apps, acqrequest.App{WingetID: e.item.ID, Name: acqrequest.CleanText(e.item.Name), Version: e.appVer,
+				Architectures: []string{arch}})
 			continue
 		}
 		if seen["app\x00"+u.Key] {
@@ -147,7 +204,22 @@ func buildAcqRequest(updates []*fleetUpdate, body acqRequestBody) (*acqrequest.R
 	for _, kb := range body.KBs {
 		u := byKey["os\x00"+strings.ToLower(strings.TrimSpace(kb))]
 		if u == nil {
-			missing = append(missing, kb)
+			e := li.entry("os", strings.TrimSpace(kb))
+			if e == nil {
+				missing = append(missing, kb)
+				continue
+			}
+			if seen["os\x00"+e.item.ID] {
+				continue
+			}
+			seen["os\x00"+e.item.ID] = true
+			for _, rel := range e.kbs {
+				if !acqrequest.ValidArch(strings.ToLower(rel.Arch)) {
+					continue
+				}
+				req.KBs = append(req.KBs, acqrequest.KB{KB: strings.ToUpper(rel.KB), Product: acqrequest.CleanText(rel.Product), Title: acqrequest.CleanText(rel.Title),
+					Build: rel.Build, Arch: strings.ToLower(rel.Arch), Server: rel.Server})
+			}
 			continue
 		}
 		if seen["os\x00"+u.Key] {
@@ -174,5 +246,5 @@ func buildAcqRequest(updates []*fleetUpdate, body acqRequestBody) (*acqrequest.R
 				Build: rel.Build, Arch: strings.ToLower(rel.Arch), Server: rel.Server, Endpoints: n})
 		}
 	}
-	return req, missing
+	return req, missing, nil
 }

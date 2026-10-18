@@ -73,7 +73,7 @@ export default function ServerPage() {
                 ["Content scanner", yes(s.intake.content_scanner)],
                 ["Max bundle size", fmtBytes(s.intake.max_bundle_bytes)],
               ]} />
-              <p><Link to={paths.transfers}>Transfers: acquisition status, intake &amp; reconciliation →</Link></p>
+              <p><Link to={paths.imports}>Imports: downloads, arrivals and reconciliation →</Link></p>
             </section>
             <section className="card">
               <h2>Signing keys</h2>

@@ -50,3 +50,9 @@
 
 .cat-filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .advanced > summary { cursor: pointer; font-weight: 600; font-size: 12px; }
+
+/* Library (Patches → Library) */
+.lib-pager { display: flex; align-items: center; gap: 10px; justify-content: center; margin: 12px 0; }
+.lib-link { margin: 8px 0; }
+.lib-link-head { margin-bottom: 4px; }
+.lib-desc { white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0 8px; }

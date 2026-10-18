@@ -46,6 +46,35 @@ type Doc struct {
 	Windows    []WindowsRelease `json:"windows"`
 	Apps       []App            `json:"apps"`
 	Warnings   []string         `json:"warnings,omitempty"`
+	// Resolved: installer and description details pmctl looked up in the
+	// winget manifests for configured, requested and commonly used apps (the
+	// Library). Community-supplied text: data only, never trusted for
+	// deployment (the signed bundle is what gets installed).
+	Resolved []Resolved `json:"resolved,omitempty"`
+}
+
+// Resolved is one winget package version's installer details.
+type Resolved struct {
+	ID           string              `json:"id"`
+	Version      string              `json:"version"`
+	Publisher    string              `json:"publisher,omitempty"`
+	Homepage     string              `json:"homepage,omitempty"`
+	PublisherURL string              `json:"publisher_url,omitempty"`
+	License      string              `json:"license,omitempty"`
+	Description  string              `json:"description,omitempty"`
+	Installers   []ResolvedInstaller `json:"installers"`
+	ResolvedAt   string              `json:"resolved_at"`
+}
+
+// ResolvedInstaller is one installer entry of a winget manifest.
+type ResolvedInstaller struct {
+	Arch string `json:"arch"`
+	// Type: msi|wix|exe|inno|nullsoft|burn|msix|zip|portable…
+	Type        string `json:"type"`
+	Scope       string `json:"scope,omitempty"` // machine | user
+	URL         string `json:"url"`
+	SHA256      string `json:"sha256,omitempty"`
+	ProductCode string `json:"product_code,omitempty"`
 }
 
 // WindowsRelease is the newest cumulative update for one Windows build.

@@ -296,7 +296,7 @@ Remove-Item -Recurse -Force C:\\ProgramData\\offpatch`,
               <CodeBlock lang="PowerShell" code={winCmds.service} />
               <div className="hint">
                 The service starts automatically at boot, checks in every {data?.checkin_interval_seconds ?? 60}s and logs to{" "}
-                <Mono>C:\ProgramData\offpatch\agent.log</Mono>. It reboots only when a deployment's reboot policy allows it (inside a maintenance window or at the deadline); otherwise it reports <i>pending reboot</i>.
+                <Mono>C:\ProgramData\offpatch\agent.log</Mono>. It reboots only when a deployment's reboot policy allows it (inside a maintenance window or at the deadline); otherwise the machine shows <i>Restart needed</i>.
               </div>
             </li>
           </>

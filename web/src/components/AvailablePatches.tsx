@@ -2,10 +2,14 @@ import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { api, enc } from "../api";
 import { paths } from "../paths";
-import type { CatalogLink, EndpointUpdates } from "../types";
+import { useCan } from "../auth";
+import type { AcquisitionRequestRecord, AcquisitionRequestRef, CatalogLink, EndpointUpdates } from "../types";
 import { useLoad } from "../util";
+import { acqStatusPill } from "./AcqRequestStatus";
 import { PatchThis } from "./PatchThis";
-import { PipelineAction } from "./PipelineAction";
+import { PipelineAction, isRequestable } from "./PipelineAction";
+import { RequestResultBanner } from "./RequestResultBanner";
+import { latestRequests, useImportRequest, type ImportItems } from "./useImportRequest";
 import { IntelSource } from "./UpdatesAvailable";
 import { ErrorBanner, Mono, Pill } from "./ui";
 import "../patch.css";
@@ -28,14 +32,22 @@ type Row = {
   link: CatalogLink | null;
   deploymentId: string;
   targetState: string;
+  /** What Import asks for (intelligence rows only; catalog-only rows are already imported). */
+  importItems: ImportItems | null;
+  /** Key into the tracked acquisition requests ("app:<winget id>" / "kb:<KB>"). */
+  requestKey: string;
 };
 
-/** Where an update stands: not imported → awaiting approval → ready → deploying (target state). */
-function Pipeline({ r }: { r: Row }) {
+/** Where an update stands: to import → importing → awaiting approval → ready → deploying (target state). */
+function Pipeline({ r, requested }: { r: Row; requested: AcquisitionRequestRef | undefined }) {
   if (r.deploymentId) {
     return <Link to={paths.deployment(r.deploymentId)}><Pill state={r.targetState || "pending"} label={`deploying: ${(r.targetState || "pending").replace(/_/g, " ")}`} /></Link>;
   }
-  if (!r.link) return <span className="muted" title="Must be acquired: select it on Patches → Updates and export an acquisition request">not imported</span>;
+  if (!r.link) {
+    if (!requested) return <span className="muted" title="Not in the catalog yet: Import downloads it in the acquisition zone">not in the catalog yet</span>;
+    const s = acqStatusPill(requested.status);
+    return <Pill state={s.pill} label={s.label} />;
+  }
   const label = { approved: "ready", quarantined: "awaiting approval" }[r.link.state] ?? r.link.state;
   return <Link to={paths.catalog(r.link.package_id)}><Pill state={r.link.state} label={label} /></Link>;
 }
@@ -57,6 +69,7 @@ function mergeRows(intel: EndpointUpdates | null, avail: Available[] | null): Ro
       installed: <Mono>{u.build}.{u.installed_ubr || "?"}</Mono>,
       available: <><Mono>{u.kb}</Mono>{u.ubr ? <> → <Mono>{u.build}.{u.ubr}</Mono></> : null}</>,
       severity: a?.severity, link: u.catalog, deploymentId: a?.deployment_id ?? "", targetState: a?.target_state ?? "",
+      importItems: { apps: [], kbs: [u.kb] }, requestKey: `kb:${u.kb.toLowerCase()}`,
     });
   }
   for (const u of intel?.apps ?? []) {
@@ -66,6 +79,7 @@ function mergeRows(intel: EndpointUpdates | null, avail: Available[] | null): Ro
       sub: <><Mono>{u.app_id}</Mono>{u.matched_by === "name" && <span title="Matched by display name, not by product code"> · matched by name</span>}</>,
       installed: <Mono>{u.installed_version}</Mono>, available: <b><Mono>{u.latest_version}</Mono></b>,
       severity: a?.severity, link: u.catalog, deploymentId: a?.deployment_id ?? "", targetState: a?.target_state ?? "",
+      importItems: { apps: [u.app_id], kbs: [] }, requestKey: `app:${u.app_id.toLowerCase()}`,
     });
   }
   // Catalog packages the intelligence does not list (other OSes, agent, no intel yet).
@@ -77,7 +91,7 @@ function mergeRows(intel: EndpointUpdates | null, avail: Available[] | null): Ro
       installed: a.kb ? <span className="muted">missing</span> : <Mono>{a.installed_version || "—"}</Mono>,
       available: a.kb ? <Mono>{a.kb}</Mono> : <b><Mono>{a.version}</Mono></b>,
       severity: a.severity, link: { package_id: a.package_id, state: a.package_state },
-      deploymentId: a.deployment_id, targetState: a.target_state,
+      deploymentId: a.deployment_id, targetState: a.target_state, importItems: null, requestKey: "",
     });
   }
   return rows;
@@ -92,8 +106,14 @@ export function EndpointUpdatesTable({ endpointId, hostname, os }: { endpointId:
   const windows = os === "windows";
   const intel = useLoad(() => (windows ? api.get<EndpointUpdates>(`/api/endpoints/${enc(endpointId)}/updates`) : Promise.resolve(null)), [endpointId, windows], 30000);
   const avail = useLoad(() => api.get<Available[]>(`/api/endpoints/${enc(endpointId)}/available`), [endpointId], 15000);
+  const canImport = useCan("operator");
+  // Tracked acquisition requests: "Importing… requested 5m ago" on the rows already asked for.
+  const reqs = useLoad(() => api.get<AcquisitionRequestRecord[]>("/api/acquisition-requests"), [endpointId], 30000);
   const [patching, setPatching] = useState<string | null>(null);
+  const imp = useImportRequest(() => { void reqs.reload(); void intel.reload(); void avail.reload(); });
+  const requestedBy = latestRequests(reqs.data);
   const rows = mergeRows(intel.data, avail.data);
+  const importable = (r: Row) => !r.deploymentId && !!r.importItems && isRequestable(r.link, r.requestKey ? requestedBy.get(r.requestKey) : undefined);
   const loaded = avail.data !== null && (!windows || intel.data !== null || !!intel.error);
   const info = intel.data;
 
@@ -104,13 +124,15 @@ export function EndpointUpdatesTable({ endpointId, hostname, os }: { endpointId:
         <IntelSource intel={info?.intel} />
       </div>
       <ErrorBanner error={intel.error || avail.error} />
+      {imp.error && <div className="banner banner-error">Import failed: {imp.error}</div>}
+      {imp.result && <RequestResultBanner req={imp.result} onDismiss={imp.dismiss} />}
       {info?.intel?.error && (
-        <div className="banner banner-error">The stored update intelligence cannot be used: {info.intel.error}. Send a new document from the acquisition zone.</div>
+        <div className="banner banner-error">The stored update intelligence cannot be used: {info.intel.error}. Ask the acquisition team to send a new one.</div>
       )}
       {windows && info && !info.intel && (
         <div className="hint">
-          No update intelligence received yet, so only catalog packages are checked. Enable <Mono>"intel": {"{}"}</Mono> in the acquisition
-          config (or run <Mono>pmctl intel</Mono>) to see every missing Windows and application update.
+          No update intelligence received yet, so only catalog packages are checked. Ask the acquisition team to send update
+          intelligence; then every missing Windows and application update shows here.
         </div>
       )}
       {loaded && rows.length === 0 && (
@@ -137,20 +159,24 @@ export function EndpointUpdatesTable({ endpointId, hostname, os }: { endpointId:
                 <td>{r.severity ? <span className={`sev sev-${r.severity}`}>{r.severity}</span> : <span className="muted">—</span>}</td>
                 <td className="nowrap">{r.installed}</td>
                 <td className="nowrap">{r.available}</td>
-                <td><Pipeline r={r} /></td>
+                <td><Pipeline r={r} requested={r.link ? undefined : requestedBy.get(r.requestKey)} /></td>
                 <td className="right">
                   {r.deploymentId
                     ? <Link className="btn btn-sm" to={paths.deployment(r.deploymentId)}>Deployment →</Link>
-                    : <PipelineAction link={r.link} onPatch={setPatching} />}
+                    : <PipelineAction link={r.link} requested={r.requestKey ? requestedBy.get(r.requestKey) : undefined} onPatch={setPatching}
+                                      onRequest={importable(r) ? () => void imp.send(r.importItems!, r.key) : undefined}
+                                      requesting={imp.busy === r.key} disabled={imp.busy !== null} />}
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       )}
-      {rows.some((r) => !r.link) && (
+      {rows.some(importable) && (
         <div className="hint">
-          Updates marked <i>not imported</i> must be acquired first: select them on <Link to={paths.updates()}>Patches → Updates</Link> and export an acquisition request.
+          {canImport
+            ? <>Import downloads the update in the acquisition zone (it is verified, signed and comes back here for approval); then <b>Patch this</b> installs it.</>
+            : <>Updates not in the catalog yet must be imported by an operator (here or on <Link to={paths.needed()}>Patches → Needed</Link>); then they can be approved and installed.</>}
         </div>
       )}
       {patching && (

@@ -3,14 +3,14 @@ import { Link, useNavigate } from "react-router-dom";
 import { api, ApiError, enc, errMsg } from "../api";
 import { useCan, useMe } from "../auth";
 import { paths } from "../paths";
-import type { Deployment, NewDeployment, Package, PackageFleet } from "../types";
+import type { Deployment, Endpoint, NewDeployment, Package, PackageFleet } from "../types";
 import { fmtTime, useLoad } from "../util";
 import { REBOOT_LABELS, STAGES_HINT, stageLabel } from "./deployLabels";
 import {
-  approvalsRequired, approvedBy, buildPreset, customHref, fetchEndpoints, fetchFleet, fetchPolicy,
-  groupSize, humanDuration, policyDeadline, ringCounts, type PresetKind,
+  approvalsRequired, approvedBy, buildPreset, customHref, fetchEndpoints, fetchFleet, fetchPolicy, fetchWindows,
+  groupSize, humanDuration, isFirstWavePlan, pickFirstWave, policyDeadline, ringCounts, windowsAllowReboot, type PresetKind,
 } from "./patchPlan";
-import { TargetPreview } from "./TargetPreview";
+import { TargetPreview, nothingToDo, type TargetSummary } from "./TargetPreview";
 import { CopyBox, ErrorBanner, Modal, Mono, Pill } from "./ui";
 import "../patch.css";
 
@@ -43,10 +43,42 @@ export type PatchThisProps = {
 };
 
 const PRESETS: { kind: PresetKind; label: string; hint: string }[] = [
-  { kind: "standard", label: "Standard", hint: "test machines first, then all machines; policy deadline, reboot in window" },
-  { kind: "emergency", label: "Emergency", hint: "one stage, ignores windows, 24 h deadline" },
-  { kind: "endpoint", label: "This endpoint only", hint: "one stage with just this endpoint" },
+  { kind: "one_ring", label: "Every compatible machine that needs it", hint: "policy deadline; pauses above 10 % failures" },
+  { kind: "standard", label: "Test machines first, then all", hint: "group pilot installs first; you check it, then start the rest" },
+  { kind: "endpoint", label: "This endpoint only", hint: "just this machine" },
+  { kind: "emergency", label: "Emergency", hint: "all machines now, ignores windows, 24 h deadline" },
 ];
+
+/** Plain-words explanation of the two automatic stages. */
+export function firstWaveText(first: number): string {
+  return `Starts on ${first} machine${first === 1 ? "" : "s"} first. The rest follow automatically once they succeed; it pauses if too many fail.`;
+}
+
+/** Shown when no maintenance window allows restarts (reboot policy "never"). */
+export const NO_REBOOT_WINDOW_NOTE = "Machines that need a restart will show 'Restart needed' until someone restarts them.";
+
+/** "2 machines" / "nothing to do" from the live preview (machines decided at check-in count as possible installs). */
+function willInstallText(s: TargetSummary): string {
+  if (nothingToDo(s)) return "nothing to do";
+  const n = s.willInstall + s.unknown;
+  return `${n} machine${n === 1 ? "" : "s"}`;
+}
+
+/** Server 409 for a second deployment of the same package: "deployment <id> of this package is already running; ...". */
+export function runningDeploymentFrom(message: string): string {
+  return /deployment (\S+) of this package is already running/.exec(message)?.[1] ?? "";
+}
+
+/** "A deployment of this package is already running -> Open it" (instead of offering Create). */
+export function AlreadyRunning({ deploymentId, onOpen }: { deploymentId: string; onOpen?: () => void }) {
+  return (
+    <div className="banner banner-info">
+      <b>A deployment of this package is already running</b> (<Mono>{deploymentId}</Mono>) →{" "}
+      <Link className="btn btn-sm btn-primary" to={`/deployments/${enc(deploymentId)}`} onClick={onOpen}>Open it</Link>
+      <div className="small">It already targets every machine that needs the package. Wait for it to finish, or cancel it there first.</div>
+    </div>
+  );
+}
 
 /** Guided drawer: approve (if needed) → choose a preset → preview → create. */
 export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThisProps) {
@@ -58,7 +90,11 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
   const policyL = useLoad(fetchPolicy, []);
   const fleetL = useLoad(fetchFleet, [packageId]);
   const epsL = useLoad(fetchEndpoints, []);
-  const [preset, setPreset] = useState<PresetKind>(endpoint ? "endpoint" : "standard");
+  const winL = useLoad(fetchWindows, []);
+  // Default plan: all machines at once (the organisation has no test machines).
+  const [preset, setPreset] = useState<PresetKind>("one_ring");
+  const [summary, setSummary] = useState<TargetSummary | null>(null);
+  const [runningFromServer, setRunningFromServer] = useState("");
   const [justification, setJustification] = useState("");
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
@@ -97,8 +133,12 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
       const d = await api.post<Deployment>("/api/deployments", body);
       navigate(`/deployments/${enc(d.deployment_id)}`);
     } catch (e) {
-      setErr(errMsg(e));
-      setConflict(e instanceof ApiError && e.status === 409);
+      const msg = errMsg(e);
+      const is409 = e instanceof ApiError && e.status === 409;
+      const running = is409 ? runningDeploymentFrom(msg) : "";
+      setRunningFromServer(running);
+      setErr(running ? null : msg);
+      setConflict(is409 && !running);
       setBusy(false);
     }
   };
@@ -121,23 +161,32 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
   const approved = pkg.state === "approved";
   const eps = epsL.data ?? [];
   const pilotN = groupSize("pilot", eps);
-  const draft = buildPreset(preset, pkg, { policy, endpointId: endpoint?.id, hostname: endpoint?.hostname, justification });
+  const pilotEmpty = !!epsL.data && pilotN === 0;
+  const runningId = fleet?.active_deployment_id || runningFromServer;
+  // Many machines need it: start on a few first, the rest follow by themselves.
+  const firstWave = preset === "one_ring" && fleet && epsL.data ? pickFirstWave(fleet.endpoint_ids ?? [], epsL.data) : [];
+  // No window lets machines restart: don't promise restarts that never happen.
+  const rebootInWindow = winL.data ? windowsAllowReboot(winL.data) : true;
+  const draft = buildPreset(preset, pkg, { policy, endpointId: endpoint?.id, hostname: endpoint?.hostname, justification, firstWave, rebootInWindow });
   const counts = ringCounts(draft.rings, eps);
   const dl = policyDeadline(pkg, policy);
-  const pilotEmpty = (preset === "standard") && !!epsL.data && pilotN === 0;
 
   const problems: string[] = [];
   if (!approved) problems.push("The package must be approved first.");
-  if (pilotEmpty) problems.push("No test machines: no endpoint is in group pilot. Deploy in one stage, or put 2–5 machines in group pilot first.");
+  if (preset === "standard" && pilotEmpty) problems.push("No test machines: no endpoint is in group pilot. Choose Every compatible machine that needs it, or put 2–5 machines in group pilot first.");
   if (preset === "emergency" && !justification.trim()) problems.push("Emergency deployments require a justification.");
   if (epsL.data && counts.every((c) => c === 0)) problems.push("No endpoint is in these stages.");
+  else if (nothingToDo(summary)) problems.push("Nothing to do: every machine is already up to date or doesn't need it.");
   // The plan (deadline, stage sizes) depends on the policy and the endpoint
   // list: never create from a half-loaded plan (e.g. silently without the
   // policy deadline).
-  const planLoaded = !!policyL.data && !!epsL.data;
+  // Maintenance windows (restart default) and the machines that need it
+  // (first machines) refine the plan; if they fail to load the plan falls
+  // back to restarts in a window / one stage rather than blocking.
+  const planLoaded = !!policyL.data && !!epsL.data && (!!winL.data || !!winL.error) && (!!fleetL.data || !!fleetL.error);
   const planError = [policyL.error && `policy: ${policyL.error}`, epsL.error && `endpoints: ${epsL.error}`].filter(Boolean).join(" · ");
-  const retryPlan = () => { void policyL.reload(); void epsL.reload(); };
-  const canCreate = approved && canDeploy && !sodBlocks && planLoaded && problems.length === 0;
+  const retryPlan = () => { void policyL.reload(); void epsL.reload(); void winL.reload(); void fleetL.reload(); };
+  const canCreate = approved && canDeploy && !sodBlocks && !runningId && planLoaded && problems.length === 0;
 
   const visiblePresets = PRESETS.filter((p) => p.kind !== "endpoint" || endpoint);
   const ringsForPreview = draft.rings.map((r) => ({ name: r.name, groups: r.groups.join(", ") }));
@@ -146,7 +195,10 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
   const footer: ReactNode = (
     <>
       <button className="btn" onClick={onClose} disabled={busy}>Cancel</button>
-      {approved && canDeploy && !sodBlocks && (
+      {approved && canDeploy && !sodBlocks && runningId && (
+        <Link className="btn btn-primary" to={`/deployments/${enc(runningId)}`} onClick={onClose}>Open the running deployment</Link>
+      )}
+      {approved && canDeploy && !sodBlocks && !runningId && (
         <button className={`btn ${preset === "emergency" ? "btn-danger" : "btn-primary"}`} disabled={!canCreate || busy}
                 onClick={() => void create(draft)}>
           {busy ? "Creating…" : preset === "emergency" ? "Create emergency deployment" : "Create deployment"}
@@ -165,12 +217,7 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
           <span className="muted"> · released {pkg.release_date || "—"} · <Link to={paths.catalog(pkg.package_id)} onClick={onClose}><Mono>{pkg.package_id}</Mono></Link></span>
         </div>
         <div className="patch-fleet"><FleetLine fleet={fleet} /></div>
-        {fleet?.active_deployment_id && (
-          <div className="banner banner-info">
-            Already deploying in <Link to={`/deployments/${enc(fleet.active_deployment_id)}`}><Mono>{fleet.active_deployment_id}</Mono></Link>.
-            A second deployment of the same package is usually not needed.
-          </div>
-        )}
+        {runningId && <AlreadyRunning deploymentId={runningId} onOpen={onClose} />}
         {pkg.superseded_by && (
           <div className="banner banner-warn">Superseded by <Link to={paths.catalog(pkg.superseded_by)} onClick={onClose}><Mono>{pkg.superseded_by}</Mono></Link>; prefer the newer package.</div>
         )}
@@ -226,32 +273,30 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
               </div>
             ) : !canDeploy ? (
               <div className="banner banner-info">Deploying requires the operator role.</div>
+            ) : runningId ? (
+              <div className="hint">No new deployment is offered while one is running: open it to follow it.</div>
             ) : (
               <>
-                <div className="preset-row" role="radiogroup" aria-label="Preset">
-                  {visiblePresets.map((p) => (
-                    <button key={p.kind} type="button" role="radio" aria-checked={preset === p.kind}
-                            className={`preset ${preset === p.kind ? "preset-on" : ""} ${p.kind === "emergency" ? "preset-danger" : ""}`}
-                            onClick={() => setPreset(p.kind)}>
-                      <b>{p.label}</b><span>{p.hint}</span>
-                    </button>
-                  ))}
+                <div className="preset-row" role="radiogroup" aria-label="How to roll it out">
+                  {visiblePresets.map((p) => {
+                    const noPilot = p.kind === "standard" && pilotEmpty;
+                    return (
+                      <button key={p.kind} type="button" role="radio" aria-checked={preset === p.kind} disabled={noPilot}
+                              title={noPilot ? "No machine is in group pilot yet (Endpoints → select → Edit groups)" : undefined}
+                              className={`preset ${preset === p.kind ? "preset-on" : ""} ${p.kind === "emergency" ? "preset-danger" : ""}`}
+                              onClick={() => setPreset(p.kind)}>
+                        <b>{p.label}{preset === p.kind && summary && <span className="muted"> → {willInstallText(summary)}</span>}</b>
+                        <span>{noPilot ? "no test machines yet: put 2–5 machines in group pilot"
+                          : p.kind === "one_ring" && firstWave.length > 0 ? `${firstWave.length} machines first, then the rest by themselves; ${p.hint}`
+                          : p.hint}</span>
+                      </button>
+                    );
+                  })}
                   <button type="button" className="preset" onClick={() => navigate(customHref(draft))}>
                     <b>Custom…</b><span>full form, prefilled</span>
                   </button>
                 </div>
 
-                {pilotEmpty && (
-                  <div className="banner banner-warn">
-                    <b>No test machines:</b> no endpoint is in group <span className="tag">pilot</span>, so stage 1 would be empty.
-                    Deploy in one stage, or <Link to="/endpoints" onClick={onClose}>put 2–5 machines in group pilot</Link> first
-                    (Endpoints → select → Edit groups).{" "}
-                    <button className="btn btn-sm" onClick={() => setPreset("one_ring")}>Deploy in one stage (all machines)</button>
-                  </div>
-                )}
-                {preset === "one_ring" && (
-                  <div className="hint">One stage with every endpoint (no test machines first). <button className="btn-link" onClick={() => setPreset("standard")}>Back to Standard</button></div>
-                )}
 
                 {!planLoaded && (planError ? (
                   <div className="banner banner-error">
@@ -261,9 +306,11 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
                 ) : (
                   <div className="hint">Loading the policy and the endpoint list…</div>
                 ))}
-                <div className="hint">{STAGES_HINT}</div>
+                {preset === "standard" && <div className="hint">{STAGES_HINT}</div>}
+                {isFirstWavePlan(draft) && <div className="banner banner-info">{firstWaveText(firstWave.length)}</div>}
                 <PlanSummary draft={draft} counts={epsL.data ? counts : null} policyDeadline={policy?.deadlines?.[pkg.severity]}
-                             policyMissing={!!policyL.error} dlFromPolicy={dl} />
+                             policyMissing={!!policyL.error} dlFromPolicy={dl} endpoints={eps}
+                             noRebootWindow={!!winL.data && !rebootInWindow && draft.reboot_policy === "never"} />
 
                 {preset === "emergency" && (
                   <label className="field">
@@ -274,7 +321,7 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
 
                 <details className="patch-preview">
                   <summary>Preview who receives it</summary>
-                  <TargetPreview pkg={pkg} rings={ringsForPreview} endpoints={epsL.data} fleet={fleetL.data} />
+                  <TargetPreview pkg={pkg} rings={ringsForPreview} endpoints={epsL.data} fleet={fleetL.data} onSummary={setSummary} />
                 </details>
 
                 {problems.length > 0 && <ul className="problems">{problems.map((p) => <li key={p}>{p}</li>)}</ul>}
@@ -296,8 +343,27 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
   );
 }
 
-function PlanSummary({ draft, counts, policyDeadline: policyDur, policyMissing, dlFromPolicy }: {
+const GROUP_TAGS_SHOWN = 5;
+
+/** Group tags of a stage; "endpoint:<id>" groups read as host names. */
+function StageGroups({ groups, endpoints }: { groups: string[]; endpoints: Endpoint[] }) {
+  const host = (g: string) => {
+    if (!g.toLowerCase().startsWith("endpoint:")) return g;
+    const id = g.slice("endpoint:".length);
+    return endpoints.find((e) => e.endpoint_id === id)?.hostname ?? id;
+  };
+  const names = groups.map(host);
+  return (
+    <>
+      {names.slice(0, GROUP_TAGS_SHOWN).map((g, i) => <span key={`${g}-${i}`} className="tag">{g}</span>)}
+      {names.length > GROUP_TAGS_SHOWN && <span className="muted" title={names.join(", ")}>+{names.length - GROUP_TAGS_SHOWN} more </span>}
+    </>
+  );
+}
+
+function PlanSummary({ draft, counts, policyDeadline: policyDur, policyMissing, dlFromPolicy, endpoints, noRebootWindow }: {
   draft: NewDeployment; counts: number[] | null; policyDeadline: string | undefined; policyMissing: boolean; dlFromPolicy: Date | null;
+  endpoints: Endpoint[]; noRebootWindow: boolean;
 }) {
   const deadline = draft.deadline ? new Date(draft.deadline) : null;
   const overdue = !!deadline && deadline.getTime() < Date.now();
@@ -310,10 +376,11 @@ function PlanSummary({ draft, counts, policyDeadline: policyDur, policyMissing, 
             {draft.rings.map((r, i) => (
               <span key={i} className="plan-ring">
                 {i > 0 && <span className="muted"> → </span>}
-                <b>{stageLabel(r.name, i)}</b> {r.groups.map((g) => <span key={g} className="tag">{g}</span>)}
+                <b>{stageLabel(r.name, i)}</b> <StageGroups groups={r.groups} endpoints={endpoints} />
                 {counts && <span className={counts[i] === 0 ? "text-red" : "muted"}>({counts[i]} endpoint{counts[i] === 1 ? "" : "s"})</span>}
               </span>
             ))}
+            {draft.auto_advance && draft.rings.length > 1 && <div className="small muted">The next stage starts automatically once the previous one succeeds.</div>}
           </td>
         </tr>
         <tr>
@@ -325,7 +392,18 @@ function PlanSummary({ draft, counts, policyDeadline: policyDur, policyMissing, 
             {overdue && <div className="text-amber small">Already past: maintenance windows no longer hold installs back.</div>}
           </td>
         </tr>
-        <tr><th>Reboot</th><td>{REBOOT_LABELS[draft.reboot_policy]}</td></tr>
+        <tr>
+          <th>Restart</th>
+          <td>
+            {REBOOT_LABELS[draft.reboot_policy]}
+            {noRebootWindow && (
+              <div className="small text-amber">
+                No maintenance window allows automatic restarts. {NO_REBOOT_WINDOW_NOTE}{" "}
+                <Link to={paths.windows}>Maintenance windows</Link>
+              </div>
+            )}
+          </td>
+        </tr>
         <tr><th>Windows</th><td>{draft.ignore_windows ? <span className="text-red">ignored: installs start as soon as assigned</span> : "group maintenance windows apply"}</td></tr>
         <tr><th>Safety</th><td>auto-pause above {draft.max_failure_pct} % failures · {draft.max_retries} retries</td></tr>
       </tbody>

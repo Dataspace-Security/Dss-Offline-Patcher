@@ -73,6 +73,7 @@ func (s *Store) IngestBundle(ctx context.Context, in Intake) (Bundle, error) {
 	}
 	err := s.txChanged(ctx, func(tx *sql.Tx) error {
 		var newPkgs []manifest.Package
+		var again []reimport // rejected packages delivered again: new review
 		if !failed {
 			m := in.Manifest
 			// Replay: sequence must strictly increase per source.
@@ -96,17 +97,30 @@ func (s *Store) IngestBundle(ctx context.Context, in Intake) (Bundle, error) {
 				b.Checks = append(b.Checks, Check{"duplicate_bundle", true, "new bundle_id"})
 			}
 			// Catalog conflicts: same package_id with different content is fatal;
-			// identical content is a harmless duplicate.
+			// identical content is a harmless duplicate. Two exceptions by state:
+			//  - rejected: "Import again" (an operator asked for it explicitly in
+			//    a request). The package goes back to quarantined for a new
+			//    review, with this bundle's content and signed manifest; if the
+			//    content changed, the new content replaces the old. Safe because
+			//    a rejected package was never published or deployed, and the
+			//    new review starts from scratch (earlier approvals are cleared).
+			//  - revoked: a security decision, never undone by a delivery. The
+			//    package is skipped as a duplicate (whatever the content) and
+			//    stays revoked.
 			conflict := false
 			var dups []string
 			for _, p := range m.Packages {
-				var sha string
-				err := tx.QueryRow(`SELECT sha256 FROM packages WHERE package_id=?`, p.PackageID).Scan(&sha)
+				var sha, state, oldBundle string
+				err := tx.QueryRow(`SELECT sha256, state, bundle_id FROM packages WHERE package_id=?`, p.PackageID).Scan(&sha, &state, &oldBundle)
 				switch {
 				case errors.Is(err, sql.ErrNoRows):
 					newPkgs = append(newPkgs, p)
 				case err != nil:
 					return err
+				case state == "rejected":
+					again = append(again, reimport{p: p, prevSHA: sha, prevBundle: oldBundle})
+				case state == "revoked":
+					dups = append(dups, p.PackageID+" (revoked; not imported again)")
 				case sha == p.File.SHA256:
 					dups = append(dups, p.PackageID)
 				default:
@@ -120,6 +134,13 @@ func (s *Store) IngestBundle(ctx context.Context, in Intake) (Bundle, error) {
 				d := "no conflicts"
 				if len(dups) > 0 {
 					d = fmt.Sprintf("identical duplicates skipped: %v", dups)
+				}
+				if len(again) > 0 {
+					ids := make([]string, 0, len(again))
+					for _, r := range again {
+						ids = append(ids, r.p.PackageID)
+					}
+					d += fmt.Sprintf("; rejected packages imported again for a new review: %v", ids)
 				}
 				b.Checks = append(b.Checks, Check{"catalog_conflict", true, d})
 			}
@@ -163,10 +184,10 @@ func (s *Store) IngestBundle(ctx context.Context, in Intake) (Bundle, error) {
 		now := s.now()
 		for _, p := range newPkgs {
 			qpath := filepath.Join(in.QuarantineDir, "payload", filepath.Base(p.File.Name))
-			_, err := tx.Exec(`INSERT INTO packages(package_id,bundle_id,title,vendor,kind,version,kb,product_code,severity,release_date,supersedes,applicability,file_name,size,sha256,source_url,vendor_signature,quarantine_path,state,state_by,state_at,created_at,package_name,prerequisites) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'quarantined','system:intake',?,?,?,?)`,
+			_, err := tx.Exec(`INSERT INTO packages(package_id,bundle_id,title,vendor,kind,version,kb,product_code,severity,release_date,supersedes,applicability,file_name,size,sha256,source_url,vendor_signature,quarantine_path,state,state_by,state_at,created_at,package_name,prerequisites,expected_ubr) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'quarantined','system:intake',?,?,?,?,?)`,
 				p.PackageID, m.BundleID, p.Title, p.Vendor, p.Kind, p.Version, p.KB, p.ProductCode, p.Severity, p.ReleaseDate,
 				mustJSON(nonNil(p.Supersedes)), mustJSON(p.Applicability), filepath.Base(p.File.Name), p.File.Size, p.File.SHA256,
-				p.SourceURL, mustJSON(p.VendorSignature), qpath, now, now, p.PackageName, mustJSON(nonNil(p.Prerequisites)))
+				p.SourceURL, mustJSON(p.VendorSignature), qpath, now, now, p.PackageName, mustJSON(nonNil(p.Prerequisites)), p.ExpectedUBR)
 			if err != nil {
 				return err
 			}
@@ -175,9 +196,46 @@ func (s *Store) IngestBundle(ctx context.Context, in Intake) (Bundle, error) {
 				return err
 			}
 		}
+		for _, r := range again {
+			if err := s.reimportRejected(tx, m.BundleID, in.QuarantineDir, r); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	return b, err
+}
+
+// reimport is a rejected package delivered again in a validated bundle.
+type reimport struct {
+	p                   manifest.Package
+	prevSHA, prevBundle string
+}
+
+// reimportRejected puts a rejected package back in quarantine for a new
+// review: every field comes from the new bundle (its signed manifest is the
+// one endpoints verify against, so bundle_id must point at it), earlier
+// approvals are cleared, and the audit event records what changed.
+func (s *Store) reimportRejected(tx *sql.Tx, bundleID, quarantineDir string, r reimport) error {
+	p, now := r.p, s.now()
+	qpath := filepath.Join(quarantineDir, "payload", filepath.Base(p.File.Name))
+	if _, err := tx.Exec(`UPDATE packages SET bundle_id=?,title=?,vendor=?,kind=?,version=?,kb=?,product_code=?,severity=?,release_date=?,supersedes=?,applicability=?,
+		file_name=?,size=?,sha256=?,source_url=?,vendor_signature=?,quarantine_path=?,state='quarantined',state_reason='',state_by='system:intake',state_at=?,
+		package_name=?,prerequisites=?,expected_ubr=? WHERE package_id=? AND state='rejected'`,
+		bundleID, p.Title, p.Vendor, p.Kind, p.Version, p.KB, p.ProductCode, p.Severity, p.ReleaseDate, mustJSON(nonNil(p.Supersedes)), mustJSON(p.Applicability),
+		filepath.Base(p.File.Name), p.File.Size, p.File.SHA256, p.SourceURL, mustJSON(p.VendorSignature), qpath, now,
+		p.PackageName, mustJSON(nonNil(p.Prerequisites)), p.ExpectedUBR, p.PackageID); err != nil {
+		return err
+	}
+	res, err := tx.Exec(`DELETE FROM package_approvals WHERE package_id=?`, p.PackageID)
+	if err != nil {
+		return err
+	}
+	cleared, _ := res.RowsAffected()
+	return s.audit(tx, Ev{Actor: "system:intake", Action: "package.reimported", ObjectType: "package", ObjectID: p.PackageID, PackageID: p.PackageID,
+		Details: map[string]any{"bundle_id": bundleID, "previous_bundle_id": r.prevBundle, "sha256": p.File.SHA256, "previous_sha256": r.prevSHA,
+			"content_changed": r.prevSHA != p.File.SHA256, "approvals_cleared": cleared, "from": "rejected", "to": "quarantined",
+			"size": p.File.Size, "vendor_signature": p.VendorSignature.Status}})
 }
 
 func nonNil(s []string) []string {
@@ -271,15 +329,18 @@ type Package struct {
 	ApprovalsRequired int                      `json:"approvals_required"`
 	// RollbackUnsupported says why a rollback deployment is impossible ("" = supported).
 	RollbackUnsupported string `json:"rollback_unsupported"`
+	// ExpectedUBR (msu): the build revision once installed (0 = unknown);
+	// targets also verify by revision (presentOn).
+	ExpectedUBR int `json:"expected_ubr,omitempty"`
 }
 
-const packageCols = `package_id,bundle_id,title,vendor,kind,version,kb,product_code,severity,release_date,supersedes,applicability,file_name,size,sha256,source_url,vendor_signature,quarantine_path,state,state_reason,state_by,state_at,created_at,package_name,prerequisites,superseded_by`
+const packageCols = `package_id,bundle_id,title,vendor,kind,version,kb,product_code,severity,release_date,supersedes,applicability,file_name,size,sha256,source_url,vendor_signature,quarantine_path,state,state_reason,state_by,state_at,created_at,package_name,prerequisites,superseded_by,expected_ubr`
 
 func scanPackage(sc interface{ Scan(...any) error }) (Package, error) {
 	var p Package
 	var sup, app, vs, prq string
 	err := sc.Scan(&p.PackageID, &p.BundleID, &p.Title, &p.Vendor, &p.Kind, &p.Version, &p.KB, &p.ProductCode, &p.Severity, &p.ReleaseDate,
-		&sup, &app, &p.FileName, &p.Size, &p.SHA256, &p.SourceURL, &vs, &p.QuarantinePath, &p.State, &p.StateReason, &p.StateBy, &p.StateAt, &p.CreatedAt, &p.PackageName, &prq, &p.SupersededBy)
+		&sup, &app, &p.FileName, &p.Size, &p.SHA256, &p.SourceURL, &vs, &p.QuarantinePath, &p.State, &p.StateReason, &p.StateBy, &p.StateAt, &p.CreatedAt, &p.PackageName, &prq, &p.SupersededBy, &p.ExpectedUBR)
 	if err != nil {
 		return p, err
 	}

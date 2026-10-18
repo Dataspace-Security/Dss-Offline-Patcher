@@ -46,6 +46,7 @@ type Server struct {
 	// Derived fleet views, cached for fleetTTL while store.Generation is unchanged.
 	needsCache genCache[needsView]
 	refsCache  genCache[map[string]store.AcqRequestRef]
+	lib        libCache // Library index, per intelligence generation
 
 	enrollLimit *ipLimiter
 }
@@ -68,6 +69,7 @@ func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger
 		}
 		s.ca = ca
 	}
+	cfg.LogAuthMode(log)
 	return s, nil
 }
 
@@ -151,6 +153,9 @@ func (s *Server) Handler() http.Handler {
 	admin("viewer", "GET /api/endpoints/{id}/updates", s.endpointUpdates)
 	admin("viewer", "GET /api/updates", s.fleetUpdates)
 	admin("viewer", "GET /api/intel", s.intelStatus)
+	admin("viewer", "GET /api/library", s.library)
+	admin("viewer", "GET /api/library/{kind}/{id}", s.libraryItem)
+	admin("viewer", "GET /api/reports/targets.csv", s.targetsCSV)
 	admin("operator", "POST /api/acquisition-requests", s.exportAcqRequest)
 	admin("viewer", "GET /api/packages-needs", s.packageNeeds)
 	admin("viewer", "GET /api/policy", s.policy)
@@ -342,7 +347,7 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) summary(w http.ResponseWriter, r *http.Request) {
-	sm, err := s.store.Summary(r.Context(), s.th)
+	sm, err := s.honestSummary(r.Context())
 	if err != nil {
 		s.fail(w, err)
 		return

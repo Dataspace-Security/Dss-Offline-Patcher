@@ -40,6 +40,11 @@ type NewDeployment struct {
 	// Operation: install (default) | rollback (agents uninstall the package;
 	// msu, msi, deb and rpm only — see RollbackUnsupported).
 	Operation string `json:"operation"`
+	// AutoAdvance: when the current ring is finished and stayed within the
+	// failure threshold, move on to the next ring without an operator
+	// ("first machines, then everything else"). Off by default: rings wait
+	// for an explicit advance.
+	AutoAdvance bool `json:"auto_advance"`
 }
 
 // HealthCheck is a fixed, non-executable post-install check (no arbitrary
@@ -80,20 +85,23 @@ type Target struct {
 	Health       string `json:"health"` // "" | ok | failed
 	HealthDetail string `json:"health_detail"`
 	Operation    string `json:"operation"` // of the deployment: install | rollback
+	// Evidence (verified targets): the inventory line, or OS revision, that
+	// proved the install (see presentOn; GET /api/reports/targets.csv).
+	Evidence string `json:"evidence,omitempty"`
 }
 
-const depCols = `deployment_id,package_id,name,state,emergency,justification,rings,current_ring,max_failure_pct,max_retries,window_start,window_end,created_by,created_at,updated_at,state_reason,deadline,max_concurrent,reboot_policy,ignore_windows,health_checks,operation`
+const depCols = `deployment_id,package_id,name,state,emergency,justification,rings,current_ring,max_failure_pct,max_retries,window_start,window_end,created_by,created_at,updated_at,state_reason,deadline,max_concurrent,reboot_policy,ignore_windows,health_checks,operation,auto_advance`
 
 func scanDeployment(sc interface{ Scan(...any) error }) (Deployment, error) {
 	var d Deployment
-	var em, iw int
+	var em, iw, aa int
 	var rings, hc string
 	err := sc.Scan(&d.DeploymentID, &d.PackageID, &d.Name, &d.State, &em, &d.Justification, &rings, &d.CurrentRing, &d.MaxFailurePct, &d.MaxRetries,
-		&d.WindowStart, &d.WindowEnd, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt, &d.StateReason, &d.Deadline, &d.MaxConcurrent, &d.RebootPolicy, &iw, &hc, &d.Operation)
+		&d.WindowStart, &d.WindowEnd, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt, &d.StateReason, &d.Deadline, &d.MaxConcurrent, &d.RebootPolicy, &iw, &hc, &d.Operation, &aa)
 	if err != nil {
 		return d, err
 	}
-	d.Emergency, d.IgnoreWindows = em == 1, iw == 1
+	d.Emergency, d.IgnoreWindows, d.AutoAdvance = em == 1, iw == 1, aa == 1
 	json.Unmarshal([]byte(rings), &d.Rings)
 	json.Unmarshal([]byte(hc), &d.HealthChecks)
 	if d.HealthChecks == nil {
@@ -137,7 +145,7 @@ func fillCounts(ctx context.Context, q querier, d *Deployment) error {
 }
 
 func queryTargets(ctx context.Context, q querier, where string, args ...any) ([]Target, error) {
-	rows, err := q.QueryContext(ctx, `SELECT t.deployment_id,t.package_id,t.endpoint_id,e.hostname,t.ring,t.state,t.attempts,t.detail,t.exit_code,t.updated_at,t.health,t.health_detail,d.operation
+	rows, err := q.QueryContext(ctx, `SELECT t.deployment_id,t.package_id,t.endpoint_id,e.hostname,t.ring,t.state,t.attempts,t.detail,t.exit_code,t.updated_at,t.health,t.health_detail,d.operation,t.evidence
 		FROM targets t JOIN endpoints e ON e.endpoint_id=t.endpoint_id JOIN deployments d ON d.deployment_id=t.deployment_id
 		WHERE `+where+` ORDER BY t.ring, e.hostname`, args...)
 	if err != nil {
@@ -147,7 +155,7 @@ func queryTargets(ctx context.Context, q querier, where string, args ...any) ([]
 	out := []Target{}
 	for rows.Next() {
 		var t Target
-		if err := rows.Scan(&t.DeploymentID, &t.PackageID, &t.EndpointID, &t.Hostname, &t.Ring, &t.State, &t.Attempts, &t.Detail, &t.ExitCode, &t.UpdatedAt, &t.Health, &t.HealthDetail, &t.Operation); err != nil {
+		if err := rows.Scan(&t.DeploymentID, &t.PackageID, &t.EndpointID, &t.Hostname, &t.Ring, &t.State, &t.Attempts, &t.Detail, &t.ExitCode, &t.UpdatedAt, &t.Health, &t.HealthDetail, &t.Operation, &t.Evidence); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -346,6 +354,15 @@ func (s *Store) CreateDeployment(ctx context.Context, actor string, n NewDeploym
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
+		// One running deployment per package and operation: a second one
+		// would target the same machines again (duplicate work, confusing
+		// progress). Wait for it to finish, or cancel it first.
+		err = tx.QueryRow(`SELECT deployment_id FROM deployments WHERE package_id=? AND state IN ('active','paused') AND operation = ? LIMIT 1`, n.PackageID, n.Operation).Scan(&other)
+		if err == nil {
+			return Errf(ErrConflict, "deployment %s of this package is already running; open it, wait for it to finish, or cancel it first", other)
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
 		if s.Policy.SeparationOfDuties {
 			for _, a := range p.Approvals {
 				if a.By == actor {
@@ -359,9 +376,9 @@ func (s *Store) CreateDeployment(ctx context.Context, actor string, n NewDeploym
 		if n.Emergency {
 			em = 1
 		}
-		if _, err := tx.Exec(`INSERT INTO deployments(`+depCols+`) VALUES(?,?,?,'active',?,?,?,0,?,?,?,?,?,?,?,'',?,?,?,?,?,?)`,
+		if _, err := tx.Exec(`INSERT INTO deployments(`+depCols+`) VALUES(?,?,?,'active',?,?,?,0,?,?,?,?,?,?,?,'',?,?,?,?,?,?,?)`,
 			id, n.PackageID, n.Name, em, n.Justification, mustJSON(n.Rings), n.MaxFailurePct, n.MaxRetries, n.WindowStart, n.WindowEnd, actor, now, now,
-			n.Deadline, n.MaxConcurrent, n.RebootPolicy, boolInt(n.IgnoreWindows), mustJSON(n.HealthChecks), n.Operation); err != nil {
+			n.Deadline, n.MaxConcurrent, n.RebootPolicy, boolInt(n.IgnoreWindows), mustJSON(n.HealthChecks), n.Operation, boolInt(n.AutoAdvance)); err != nil {
 			return err
 		}
 		action := "deployment.created"
@@ -374,16 +391,71 @@ func (s *Store) CreateDeployment(ctx context.Context, actor string, n NewDeploym
 		if err := s.audit(tx, Ev{Actor: actor, Action: action, ObjectType: "deployment", ObjectID: id, PackageID: n.PackageID,
 			Details: map[string]any{"name": n.Name, "rings": n.Rings, "max_failure_pct": n.MaxFailurePct, "max_retries": n.MaxRetries,
 				"window": n.WindowStart + "-" + n.WindowEnd, "emergency": n.Emergency, "justification": n.Justification,
-				"deadline": n.Deadline, "max_concurrent": n.MaxConcurrent, "reboot_policy": n.RebootPolicy, "ignore_windows": n.IgnoreWindows, "health_checks": n.HealthChecks, "operation": n.Operation}}); err != nil {
+				"deadline": n.Deadline, "max_concurrent": n.MaxConcurrent, "reboot_policy": n.RebootPolicy, "ignore_windows": n.IgnoreWindows, "health_checks": n.HealthChecks, "operation": n.Operation,
+				"auto_advance": n.AutoAdvance}}); err != nil {
 			return err
 		}
 		if err := s.ensureTargetsForDeployment(ctx, tx, id); err != nil {
+			return err
+		}
+		// Every target may already be terminal (e.g. verified because the
+		// inventory shows the package): completion is otherwise only
+		// evaluated on agent reports, which will never come.
+		if err := s.evaluateDeployment(ctx, tx, id, false); err != nil {
 			return err
 		}
 		out, err = getDeploymentCounted(ctx, tx, id)
 		return err
 	})
 	return out, err
+}
+
+// sweepDeployments evaluates active deployments whose current ring has no
+// target left in a non-terminal state, so one that has nothing to do
+// completes even though no agent will ever report on it again.
+func (s *Store) sweepDeployments(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT d.deployment_id FROM deployments d WHERE d.state='active'
+		AND EXISTS (SELECT 1 FROM targets t WHERE t.deployment_id=d.deployment_id AND t.ring=d.current_ring)
+		AND NOT EXISTS (SELECT 1 FROM targets t WHERE t.deployment_id=d.deployment_id AND t.ring=d.current_ring
+			AND t.state NOT IN ('not_applicable','exception','verified','failed')
+			AND NOT (d.auto_advance=1 AND t.state='pending_reboot'))`)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		// State and ring: an auto-advance changes the ring, not the state.
+		var before, after string
+		const stateRing = `SELECT state || '/' || current_ring FROM deployments WHERE deployment_id=?`
+		err := s.tx(ctx, func(tx *sql.Tx) error {
+			if err := tx.QueryRowContext(ctx, stateRing, id).Scan(&before); err != nil {
+				return err
+			}
+			if err := s.evaluateDeployment(ctx, tx, id, false); err != nil {
+				return err
+			}
+			return tx.QueryRowContext(ctx, stateRing, id).Scan(&after)
+		})
+		if err != nil {
+			return fmt.Errorf("evaluate deployment %s: %w", id, err)
+		}
+		if before != after {
+			s.Changed()
+		}
+	}
+	return nil
 }
 
 // DeploymentAction applies pause/resume/cancel/advance.
@@ -537,28 +609,79 @@ func supersedingKBs(ctx context.Context, q querier, kb string) (map[string]bool,
 // presentIn reports whether inventory shows p (or a superseding KB, or a
 // same-or-newer package version) installed.
 func presentIn(inv []InventoryItem, p Package, sup map[string]bool) (bool, string) {
+	ok, why, _ := presentOn(inv, OSFacts{}, p, sup)
+	return ok, why
+}
+
+// OSFacts is what verification needs to know about the endpoint's Windows
+// besides inventory: the build and its revision (UBR, the "9711" of
+// "(26300.9711)" in os_version; 0 = unknown).
+type OSFacts struct{ Build, UBR int }
+
+var ubrRe = regexp.MustCompile(`\((\d{4,6})\.(\d+)\)`)
+
+// osFacts parses the UBR out of an os_version such as
+// "Windows 11 Pro 25H2 (26300.9711)"; the build must match the reported one.
+func osFacts(osVersion string, build int) OSFacts {
+	f := OSFacts{Build: build}
+	if m := ubrRe.FindStringSubmatch(osVersion); m != nil {
+		if b, _ := strconv.Atoi(m[1]); b == build || build == 0 {
+			f.UBR, _ = strconv.Atoi(m[2])
+		}
+	}
+	return f
+}
+
+// evidenceLine renders the inventory line that proved an install, for the
+// target detail and the evidence report.
+func evidenceLine(it InventoryItem) string {
+	s := it.Kind + " " + it.ID
+	if it.Name != "" && it.Name != it.ID {
+		s += " \"" + it.Name + "\""
+	}
+	if it.Version != "" {
+		s += " " + it.Version
+	}
+	if it.Scope != "" {
+		s += " (" + it.Scope + ")"
+	}
+	return s
+}
+
+// presentOn is presentIn plus the endpoint's OS revision, and returns the
+// evidence: the matching inventory line, or the OS revision for a Windows
+// cumulative update verified by build revision. A cumulative update with
+// expected_ubr counts as installed when the endpoint runs exactly its
+// min_build at that revision or later, even if Windows does not list the KB
+// (some LCUs never show up in the QFE list). Per-user installs (Scope
+// "user") count like machine-wide ones.
+func presentOn(inv []InventoryItem, os OSFacts, p Package, sup map[string]bool) (bool, string, string) {
 	for _, it := range inv {
 		switch {
 		case p.Kind == "agent" && it.Kind == "agent" && VersionAtLeast(it.Version, p.Version):
-			return true, "agent version " + it.Version
+			return true, "agent version " + it.Version, evidenceLine(it)
 		case p.Kind == "pkg" && it.Kind == "app" && it.ID == p.PackageName && VersionAtLeast(it.Version, p.Version):
-			return true, "inventory shows app " + it.Name + " " + it.Version
+			return true, "inventory shows app " + it.Name + " " + it.Version, evidenceLine(it)
 		case (p.Kind == "deb" || p.Kind == "rpm" || p.Kind == "pkg") && it.Kind == "pkg" && it.ID == p.PackageName && VersionAtLeast(it.Version, p.Version):
-			return true, "inventory shows " + p.PackageName + " " + it.Version
+			return true, "inventory shows " + p.PackageName + " " + it.Version, evidenceLine(it)
 		case p.Kind == "msi" && p.PackageName != "" && it.Kind == "product" && SameAppName(it.Name, p.PackageName) && p.Version != "" && VersionAtLeast(it.Version, p.Version):
-			return true, "inventory shows " + it.Name + " " + it.Version
+			return true, "inventory shows " + it.Name + " " + it.Version, evidenceLine(it)
 		case it.Kind == "kb" && p.KB != "" && strings.EqualFold(it.ID, p.KB):
-			return true, "inventory shows " + p.KB
+			return true, "inventory shows " + p.KB, evidenceLine(it)
 		case it.Kind == "kb" && sup[strings.ToUpper(it.ID)]:
-			return true, "inventory shows superseding " + it.ID
+			return true, "inventory shows superseding " + it.ID, evidenceLine(it)
 		// Some MSIs keep their product code across versions (Chrome's
 		// enterprise MSI): the same code at an older version is not installed.
 		case it.Kind == "product" && p.ProductCode != "" && strings.EqualFold(it.ID, p.ProductCode) &&
 			(p.Version == "" || it.Version == "" || VersionAtLeast(it.Version, p.Version)):
-			return true, "inventory shows product " + p.ProductCode
+			return true, "inventory shows product " + p.ProductCode, evidenceLine(it)
 		}
 	}
-	return false, ""
+	if p.Kind == "msu" && p.ExpectedUBR > 0 && os.UBR > 0 && p.Applicability.MinBuild > 0 && os.Build == p.Applicability.MinBuild && os.UBR >= p.ExpectedUBR {
+		rev := fmt.Sprintf("%d.%d", os.Build, os.UBR)
+		return true, fmt.Sprintf("Windows reports build %s, at or past %d.%d (%s)", rev, os.Build, p.ExpectedUBR, p.KB), "os_version build " + rev
+	}
+	return false, "", ""
 }
 
 func (s *Store) activeException(ctx context.Context, q querier, endpointID, packageID string) (string, error) {
@@ -629,7 +752,7 @@ func (s *Store) ensureTarget(ctx context.Context, tx *sql.Tx, d Deployment, e En
 	if err != nil {
 		return err
 	}
-	state, detail := "pending", ""
+	state, detail, evidence := "pending", "", ""
 	if ok, why := applicable(p, e); !ok {
 		state, detail = "not_applicable", why
 	} else if d.Operation == "rollback" {
@@ -642,8 +765,8 @@ func (s *Store) ensureTarget(ctx context.Context, tx *sql.Tx, d Deployment, e En
 		if err != nil {
 			return err
 		}
-		if ok, why := presentIn(e.inventory, p, sup); ok && e.InventoryAt != "" {
-			state, detail = "verified", "already present: "+why
+		if ok, why, ev := presentOn(e.inventory, osFacts(e.OSVersion, e.Build), p, sup); ok && e.InventoryAt != "" {
+			state, detail, evidence = "verified", "already present: "+withEvidence(why, ev), ev
 		} else if appStoreManaged(e.inventory, p) {
 			state, detail = "not_applicable", appStoreDetail
 		} else if e.InventoryAt != "" && !appInstalled(e.inventory, p) {
@@ -654,12 +777,30 @@ func (s *Store) ensureTarget(ctx context.Context, tx *sql.Tx, d Deployment, e En
 			state, detail = "exception", "covered by exception "+xid
 		}
 	}
-	if _, err := tx.Exec(`INSERT INTO targets(deployment_id,endpoint_id,package_id,ring,state,detail,updated_at) VALUES(?,?,?,?,?,?,?)`,
-		d.DeploymentID, e.EndpointID, d.PackageID, ring, state, detail, s.now()); err != nil {
+	if _, err := tx.Exec(`INSERT INTO targets(deployment_id,endpoint_id,package_id,ring,state,detail,updated_at,evidence) VALUES(?,?,?,?,?,?,?,?)`,
+		d.DeploymentID, e.EndpointID, d.PackageID, ring, state, detail, s.now(), evidence); err != nil {
 		return err
 	}
 	return s.audit(tx, Ev{Actor: "system:scheduler", Action: "target." + state, ObjectType: "target", ObjectID: d.DeploymentID + "/" + e.EndpointID, PackageID: d.PackageID,
 		Details: map[string]any{"hostname": e.Hostname, "ring": ring, "detail": detail}})
+}
+
+// withEvidence appends the evidence line to a verification reason.
+func withEvidence(why, evidence string) string {
+	if evidence == "" {
+		return why
+	}
+	return why + " [" + evidence + "]"
+}
+
+// setVerified marks t verified by inventory (system:verifier) and keeps the
+// evidence: in the detail, and on its own for the evidence report.
+func (s *Store) setVerified(tx *sql.Tx, t Target, why, evidence string) error {
+	if err := s.setTarget(tx, "system:verifier", t, "verified", withEvidence(why, evidence), t.ExitCode, 0); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`UPDATE targets SET evidence=? WHERE deployment_id=? AND endpoint_id=?`, evidence, t.DeploymentID, t.EndpointID)
+	return err
 }
 
 func (s *Store) setTarget(tx *sql.Tx, actor string, t Target, state, detail string, exitCode int, attemptsDelta int) error {
@@ -700,35 +841,58 @@ func (s *Store) evaluate(ctx context.Context, tx *sql.Tx, id string, failRing in
 	}
 	// One indexed aggregate per ring (no per-target rows) so agent reports
 	// stay cheap however large the ring is.
-	count := func(ring int) (total, skipped, verified, exhausted, unhealthy, lost int, err error) {
+	// Unverified installs (UnverifiedDetail, see sweepUnverified) count as
+	// failures for the threshold: an install that inventory never confirms
+	// is not a success, and a package that "installs" everywhere without
+	// effect must stop the rollout like one that fails.
+	count := func(ring int) (total, skipped, verified, exhausted, unhealthy, lost, restart, unverified int, err error) {
 		err = tx.QueryRowContext(ctx, `SELECT COUNT(*),
 		COALESCE(SUM(state IN ('not_applicable','exception')),0),
 		COALESCE(SUM(state='verified'),0),
 		COALESCE(SUM(state='failed' AND attempts > ?),0),
 		COALESCE(SUM(health='failed' AND state NOT IN ('failed','lost_after_install')),0),
-		COALESCE(SUM(state='lost_after_install'),0)
-		FROM targets WHERE deployment_id=? AND ring=?`, d.MaxRetries, id, ring).Scan(&total, &skipped, &verified, &exhausted, &unhealthy, &lost)
+		COALESCE(SUM(state='lost_after_install'),0),
+		COALESCE(SUM(state='pending_reboot'),0),
+		COALESCE(SUM(state='installed' AND detail=? AND health != 'failed'),0)
+		FROM targets WHERE deployment_id=? AND ring=?`, d.MaxRetries, UnverifiedDetail, id, ring).Scan(&total, &skipped, &verified, &exhausted, &unhealthy, &lost, &restart, &unverified)
 		return
 	}
 	now := s.now()
 	if failRing >= 0 {
-		total, skipped, _, exhausted, unhealthy, lost, err := count(failRing)
+		total, skipped, _, exhausted, unhealthy, lost, _, unverified, err := count(failRing)
 		if err != nil {
 			return err
 		}
 		considered := total - skipped
-		if bad := exhausted + unhealthy + lost; considered > 0 && bad*100 > d.MaxFailurePct*considered {
-			return s.autoPause(tx, d, fmt.Sprintf("auto-pause: %d/%d endpoints failed (%d install, %d health check, %d lost after install) in ring %q (threshold %d%%)",
-				bad, considered, exhausted, unhealthy, lost, d.Rings[failRing].Name, d.MaxFailurePct))
+		if bad := exhausted + unhealthy + lost + unverified; considered > 0 && bad*100 > d.MaxFailurePct*considered {
+			return s.autoPause(tx, d, fmt.Sprintf("auto-pause: %d/%d endpoints failed (%d install, %d health check, %d lost after install, %d not confirmed by inventory) in ring %q (threshold %d%%)",
+				bad, considered, exhausted, unhealthy, lost, unverified, d.Rings[failRing].Name, d.MaxFailurePct))
 		}
 	}
-	total, skipped, verified, exhausted, _, _, err := count(d.CurrentRing)
+	total, skipped, verified, exhausted, unhealthy, lost, restart, unverified, err := count(d.CurrentRing)
 	if err != nil {
 		return err
 	}
 	terminal := skipped + verified + exhausted
-	if terminal != total {
+	// For moving on, an install waiting only for a restart succeeded: with
+	// no window allowing restarts it may wait for days, and holding the rest
+	// of the fleet back for that would stall the rollout. The deployment
+	// still completes only once those restarts happened.
+	advanceable := d.AutoAdvance && d.CurrentRing < len(d.Rings)-1 && terminal+restart == total
+	if terminal != total && !advanceable {
 		return nil
+	}
+	// An empty first ring is not "finished" (its endpoints may not have
+	// enrolled yet); an empty later ring is skipped like a finished one.
+	if d.AutoAdvance && (total > 0 || d.CurrentRing > 0) && d.CurrentRing < len(d.Rings)-1 {
+		// The ring is finished. Move on only if it stayed within the failure
+		// threshold (the same test as the auto-pause); otherwise it waits for
+		// an operator, who decides whether to advance anyway.
+		considered := total - skipped
+		if bad := exhausted + unhealthy + lost + unverified; considered > 0 && bad*100 > d.MaxFailurePct*considered {
+			return nil
+		}
+		return s.autoAdvance(ctx, tx, d)
 	}
 	reason := ""
 	if d.CurrentRing == len(d.Rings)-1 && total > 0 {
@@ -755,6 +919,29 @@ func (s *Store) evaluate(ctx context.Context, tx *sql.Tx, id string, failRing in
 			Details: map[string]any{"counts": d.Counts}})
 	}
 	return nil
+}
+
+// autoAdvance moves an auto-advancing deployment to its next ring, targets
+// the endpoints of that ring, and evaluates again (the new ring may already
+// be finished, e.g. every endpoint already has the package; at most one
+// recursion per ring).
+func (s *Store) autoAdvance(ctx context.Context, tx *sql.Tx, d Deployment) error {
+	ring := d.CurrentRing + 1
+	reason := fmt.Sprintf("ring %q finished within the failure threshold; started ring %q automatically", d.Rings[d.CurrentRing].Name, d.Rings[ring].Name)
+	if err := fillCounts(ctx, tx, &d); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE deployments SET current_ring=?, state_reason=?, updated_at=? WHERE deployment_id=? AND state='active'`, ring, reason, s.now(), d.DeploymentID); err != nil {
+		return err
+	}
+	if err := s.audit(tx, Ev{Actor: "system:scheduler", Action: "deployment.advanced", ObjectType: "deployment", ObjectID: d.DeploymentID, PackageID: d.PackageID,
+		Details: map[string]any{"ring": ring, "ring_name": d.Rings[ring].Name, "auto": true, "counts": d.Counts}}); err != nil {
+		return err
+	}
+	if err := s.ensureTargetsForDeployment(ctx, tx, d.DeploymentID); err != nil {
+		return err
+	}
+	return s.evaluate(ctx, tx, d.DeploymentID, -1)
 }
 
 // remainingRingsEmpty reports whether d has targets but no active endpoint
@@ -918,8 +1105,8 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 			}
 			// Verification: fresh inventory evidence, and no outstanding reboot
 			// if the install itself asked for one.
-			if ok, why := presentIn(r.Inventory, p, sup); ok && !rebootWait {
-				if err := s.setTarget(tx, "system:verifier", t, "verified", why, t.ExitCode, 0); err != nil {
+			if ok, why, ev := presentOn(r.Inventory, osFacts(r.OSVersion, r.Build), p, sup); ok && !rebootWait {
+				if err := s.setVerified(tx, t, why, ev); err != nil {
 					return err
 				}
 				touched[t.DeploymentID] = true
@@ -1066,20 +1253,40 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 		}
 		// Reboot: endpoints waiting on a reboot get one only where policy allows,
 		// and at most once per rebootRetry so a slow reboot isn't spammed.
-		pend, err := tx.QueryContext(ctx, `SELECT d.reboot_policy, d.deadline FROM targets t JOIN deployments d ON d.deployment_id=t.deployment_id
+		pend, err := tx.QueryContext(ctx, `SELECT t.deployment_id, t.detail, d.reboot_policy, d.deadline FROM targets t JOIN deployments d ON d.deployment_id=t.deployment_id
 			WHERE t.endpoint_id=? AND t.state='pending_reboot' AND d.state IN ('active','paused')`, endpointID)
 		if err != nil {
 			return err
 		}
 		want := false
+		type detailFix struct{ dep, detail string }
+		var fixes []detailFix
 		for pend.Next() {
-			var pol, dl string
-			pend.Scan(&pol, &dl)
-			if rebootAllowed(pol, ws, dl != "" && !nowT.Before(parseTime(dl))) {
+			var dep, detail, pol, dl string
+			if err := pend.Scan(&dep, &detail, &pol, &dl); err != nil {
+				pend.Close()
+				return err
+			}
+			past := dl != "" && !nowT.Before(parseTime(dl))
+			if rebootAllowed(pol, ws, past) {
 				want = true
+			}
+			// Say why nothing happens when no window can ever allow the restart
+			// the policy waits for (the deadline lifts that for at_deadline).
+			switch never := rebootNeverInWindow(pol, ws, past); {
+			case never && detail != noRebootWindowDetail:
+				fixes = append(fixes, detailFix{dep, noRebootWindowDetail})
+			case !never && detail == noRebootWindowDetail:
+				fixes = append(fixes, detailFix{dep, rebootWaitDetail})
 			}
 		}
 		pend.Close()
+		for _, f := range fixes {
+			if _, err := tx.Exec(`UPDATE targets SET detail=? WHERE deployment_id=? AND endpoint_id=?`, f.detail, f.dep, endpointID); err != nil {
+				return err
+			}
+			changed = true
+		}
 		if want && (e.RebootRequestedAt == "" || nowT.Sub(parseTime(e.RebootRequestedAt)) > rebootRetry) {
 			res.RebootNow = true
 			if _, err := tx.Exec(`UPDATE endpoints SET reboot_requested_at=? WHERE endpoint_id=?`, now, endpointID); err != nil {
@@ -1103,6 +1310,25 @@ const (
 	leaseFor    = 15 * time.Minute
 	rebootRetry = 30 * time.Minute
 )
+
+// Target details for installs waiting on a restart.
+const (
+	noRebootWindowDetail = "installed; waiting for a restart: no maintenance window allows automatic restarts (restart the machine or add a window)"
+	rebootWaitDetail     = "installed; waiting for a restart"
+)
+
+// rebootNeverInWindow: the policy restarts only inside a window that allows
+// reboots, and the endpoint has no such window (and, for at_deadline, the
+// deadline has not passed yet), so no automatic restart will come.
+func rebootNeverInWindow(policy string, ws windowState, pastDeadline bool) bool {
+	switch policy {
+	case "in_window":
+		return !ws.anyReboot
+	case "at_deadline":
+		return !ws.anyReboot && !pastDeadline
+	}
+	return false
+}
 
 func rebootAllowed(policy string, ws windowState, pastDeadline bool) bool {
 	switch policy {
@@ -1167,6 +1393,12 @@ func (s *Store) ReportTarget(ctx context.Context, endpointID string, r Report) e
 			return Errf(ErrNotFound, "no such target for this endpoint")
 		}
 		t := ts[0]
+		if t.State == "verified" && r.State == "installed" && r.Health != "" {
+			// Health checks re-run after the restart the install asked for
+			// (the target may have verified meanwhile): record only the
+			// result, the state stays verified.
+			return s.reportHealth(ctx, tx, endpointID, t, r)
+		}
 		switch t.State {
 		case "verified", "exception", "not_applicable":
 			return Errf(ErrConflict, "target is %s", t.State)
@@ -1175,6 +1407,19 @@ func (s *Store) ReportTarget(ctx context.Context, endpointID string, r Report) e
 			// Re-deferred at every check-in: refresh the reason, don't flood the audit log.
 			_, err := tx.Exec(`UPDATE targets SET detail=?, updated_at=? WHERE deployment_id=? AND endpoint_id=?`, r.Detail, s.now(), r.DeploymentID, endpointID)
 			return err
+		}
+		busy := r.State == "failed" && strings.HasPrefix(r.Detail, installerBusyPrefix)
+		if busy {
+			handled, err := s.installerBusy(ctx, tx, endpointID, t, r)
+			if err != nil || handled {
+				return err
+			}
+			// Past the grace: counts as a normal failure below.
+		} else if r.State != "downloading" && r.State != "downloaded" && r.State != "installing" && r.State != "deferred" {
+			// Any other result ends a run of "installer busy" results.
+			if _, err := tx.Exec(`UPDATE targets SET busy_tries=0 WHERE deployment_id=? AND endpoint_id=? AND busy_tries != 0`, r.DeploymentID, endpointID); err != nil {
+				return err
+			}
 		}
 		delta := attemptDelta(t.State, r.State)
 		if r.State == "failed" && t.State == "failed" && r.Detail == t.Detail && r.ExitCode == t.ExitCode && r.Health == "" {
@@ -1197,29 +1442,110 @@ func (s *Store) ReportTarget(ctx context.Context, endpointID string, r Report) e
 				// trust mismatch until shown otherwise.
 				sev, kind = "critical", "manifest_verification_failed"
 			}
-			if err := s.raiseAlert(tx, sev, kind, "target", r.DeploymentID+"/"+endpointID, t.Hostname+": "+r.PackageID+" failed: "+r.Detail); err != nil {
+			det, _ := hostDetails([]HostRef{{endpointID, t.Hostname}})
+			if err := s.raiseAlertWith(tx, sev, kind, "target", r.DeploymentID+"/"+endpointID, t.Hostname+": "+r.PackageID+" failed: "+r.Detail, det); err != nil {
 				return err
 			}
 		}
 		if r.Health != "" {
-			if r.Health != "ok" && r.Health != "failed" {
-				return Errf(ErrInvalid, "health must be ok or failed")
-			}
-			if _, err := tx.Exec(`UPDATE targets SET health=?, health_detail=? WHERE deployment_id=? AND endpoint_id=?`, r.Health, r.HealthDetail, r.DeploymentID, endpointID); err != nil {
+			if err := s.recordHealth(tx, endpointID, t, r); err != nil {
 				return err
-			}
-			if r.Health == "failed" {
-				if err := s.raiseAlert(tx, "warning", "health_check_failed", "target", r.DeploymentID+"/"+endpointID, t.Hostname+": post-install health check failed: "+r.HealthDetail); err != nil {
-					return err
-				}
-				if err := s.audit(tx, Ev{Actor: "endpoint:" + endpointID, Action: "target.health_failed", ObjectType: "target", ObjectID: r.DeploymentID + "/" + endpointID,
-					PackageID: r.PackageID, Details: map[string]any{"detail": r.HealthDetail}}); err != nil {
-					return err
-				}
 			}
 		}
 		return s.evaluateDeployment(ctx, tx, r.DeploymentID, r.State == "failed" || r.Health == "failed")
 	})
+}
+
+// recordHealth stores a health-check result: a failure raises
+// health_check_failed and is audited; a pass closes an open
+// health_check_failed alert for the target (the condition cleared, e.g.
+// the service came up after the restart).
+func (s *Store) recordHealth(tx *sql.Tx, endpointID string, t Target, r Report) error {
+	if r.Health != "ok" && r.Health != "failed" {
+		return Errf(ErrInvalid, "health must be ok or failed")
+	}
+	if len(r.HealthDetail) > 2000 {
+		r.HealthDetail = r.HealthDetail[:2000]
+	}
+	obj := r.DeploymentID + "/" + endpointID
+	if _, err := tx.Exec(`UPDATE targets SET health=?, health_detail=? WHERE deployment_id=? AND endpoint_id=?`, r.Health, r.HealthDetail, r.DeploymentID, endpointID); err != nil {
+		return err
+	}
+	if r.Health == "ok" {
+		return s.resolveAlert(tx, "health_check_failed", obj, "health checks passed: "+truncate(r.HealthDetail, 300))
+	}
+	det, _ := hostDetails([]HostRef{{endpointID, t.Hostname}})
+	if err := s.raiseAlertWith(tx, "warning", "health_check_failed", "target", obj, t.Hostname+": post-install health check failed: "+r.HealthDetail, det); err != nil {
+		return err
+	}
+	return s.audit(tx, Ev{Actor: "endpoint:" + endpointID, Action: "target.health_failed", ObjectType: "target", ObjectID: obj,
+		PackageID: r.PackageID, Details: map[string]any{"detail": r.HealthDetail}})
+}
+
+// reportHealth handles health results for a target that already verified
+// (checks re-run after the restart): only health is recorded; a failure
+// still counts towards the deployment's failure threshold.
+func (s *Store) reportHealth(ctx context.Context, tx *sql.Tx, endpointID string, t Target, r Report) error {
+	if err := s.recordHealth(tx, endpointID, t, r); err != nil {
+		return err
+	}
+	if r.Health == "ok" {
+		if err := s.audit(tx, Ev{Actor: "endpoint:" + endpointID, Action: "target.health_ok", ObjectType: "target", ObjectID: r.DeploymentID + "/" + endpointID,
+			PackageID: r.PackageID, Details: map[string]any{"detail": r.HealthDetail, "report": r.Detail}}); err != nil {
+			return err
+		}
+	}
+	return s.evaluateDeployment(ctx, tx, r.DeploymentID, r.Health == "failed")
+}
+
+// installerBusyPrefix starts the detail of a failure the agent reports when
+// another installation is running (msiexec 1618, CBS busy, ...).
+const installerBusyPrefix = "retry later: installer busy"
+
+// installerBusyGrace: this many consecutive busy results per target are not
+// counted as attempts (another installer, often Windows Update itself, can
+// run for a while); after that they count normally, so a machine that is
+// always busy still runs out of retries.
+const installerBusyGrace = 10
+
+// installerBusy handles an "installer busy" failure inside the grace: the
+// target is failed (so it is offered again at the next check-in) but the
+// attempt the installer start counted is given back, no alert is raised and
+// the failure threshold is not checked. handled=false: the grace is used
+// up; the caller records an ordinary failure.
+func (s *Store) installerBusy(ctx context.Context, tx *sql.Tx, endpointID string, t Target, r Report) (bool, error) {
+	var tries int
+	if err := tx.QueryRowContext(ctx, `SELECT busy_tries FROM targets WHERE deployment_id=? AND endpoint_id=?`, t.DeploymentID, endpointID).Scan(&tries); err != nil {
+		return false, err
+	}
+	tries++
+	if _, err := tx.Exec(`UPDATE targets SET busy_tries=? WHERE deployment_id=? AND endpoint_id=?`, tries, t.DeploymentID, endpointID); err != nil {
+		return false, err
+	}
+	if tries > installerBusyGrace {
+		return false, nil
+	}
+	// The installer start ("installing") already counted an attempt.
+	delta := 0
+	if t.State == "installing" {
+		delta = -1
+	}
+	detail := fmt.Sprintf("waiting: another installation is running on this machine (try %d)", tries)
+	if tries > 1 {
+		// Repeats are not audited one by one: the first one is, with the
+		// agent's own detail (and exit code).
+		_, err := tx.Exec(`UPDATE targets SET state='failed', detail=?, exit_code=?, attempts=MAX(attempts+?,0), updated_at=? WHERE deployment_id=? AND endpoint_id=?`,
+			detail, r.ExitCode, delta, s.now(), t.DeploymentID, endpointID)
+		return true, err
+	}
+	if t.Attempts+delta < 0 {
+		delta = -t.Attempts
+	}
+	if err := s.setTarget(tx, "endpoint:"+endpointID, t, "failed", detail, r.ExitCode, delta); err != nil {
+		return false, err
+	}
+	return true, s.audit(tx, Ev{Actor: "endpoint:" + endpointID, Action: "target.installer_busy", ObjectType: "target", ObjectID: t.DeploymentID + "/" + endpointID,
+		PackageID: t.PackageID, Details: map[string]any{"agent_detail": r.Detail, "exit_code": r.ExitCode, "try": tries, "grace": installerBusyGrace}})
 }
 
 // attemptDelta: one install attempt is counted when the installer starts,

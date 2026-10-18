@@ -68,16 +68,36 @@ func (s *Server) complianceCSV(w http.ResponseWriter, r *http.Request) {
 	for _, p := range rep.Packages {
 		rows = append(rows, []string{p.PackageID, p.Title, p.Severity, p.State, p.ReleaseDate, p.Deadline, strconv.Itoa(p.Targets), strconv.Itoa(p.Verified),
 			strconv.Itoa(p.Outstanding), strconv.Itoa(p.Overdue), strconv.Itoa(p.Exceptions), f1(p.PctComplete),
-			f1(p.DaysReleaseToReceived), f1(p.DaysReceivedToApproved), f1(p.DaysApprovedToFirst), f1(p.DaysReleaseToP90)})
+			f1(p.DaysReleaseToReceived), f1(p.DaysReceivedToApproved), f1(p.DaysApprovedToFirst), f1(p.DaysReleaseToP90),
+			strconv.Itoa(p.Needed), strconv.Itoa(p.NotTargeted)})
 	}
 	s.store.Audit(r.Context(), store.Ev{Actor: actor(r), Action: "report.exported", ObjectType: "report", ObjectID: "compliance.csv"})
 	writeCSV(w, "compliance-"+time.Now().UTC().Format("20060102")+".csv",
 		[]string{"package_id", "title", "severity", "state", "release_date", "deadline", "targets", "verified", "outstanding", "overdue", "exceptions",
-			"pct_compliant", "days_release_to_received", "days_received_to_approved", "days_approved_to_first_verified", "days_release_to_90pct_verified"}, rows)
+			"pct_compliant", "days_release_to_received", "days_received_to_approved", "days_approved_to_first_verified", "days_release_to_90pct_verified",
+			"needed", "not_targeted"}, rows)
+}
+
+// targetsCSV is the per-endpoint evidence an auditor asks for: every
+// install target with its state, when it verified, the inventory line that
+// proved it, who approved the package and the deployment.
+func (s *Server) targetsCSV(w http.ResponseWriter, r *http.Request) {
+	ts, err := s.store.TargetEvidenceReport(r.Context(), 0)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	rows := make([][]string, 0, len(ts))
+	for _, t := range ts {
+		rows = append(rows, []string{t.EndpointID, t.Hostname, t.PackageID, t.Title, t.State, t.VerifiedAt, t.Evidence, t.ApprovedBy, t.DeploymentID})
+	}
+	s.store.Audit(r.Context(), store.Ev{Actor: actor(r), Action: "report.exported", ObjectType: "report", ObjectID: "targets.csv"})
+	writeCSV(w, "targets-"+time.Now().UTC().Format("20060102")+".csv",
+		[]string{"endpoint", "hostname", "package_id", "title", "state", "verified_at", "evidence", "approved_by", "deployment_id"}, rows)
 }
 
 func (s *Server) endpointsCSV(w http.ResponseWriter, r *http.Request) {
-	eps, err := s.store.ListEndpointsBrief(r.Context(), s.th)
+	eps, err := s.honestEndpoints(r.Context())
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -157,6 +177,9 @@ func (s *Server) RunAlerts(ctx context.Context, every time.Duration) {
 		}
 		if err := s.checkServerCert(ctx, time.Now()); err != nil {
 			s.log.Error("server certificate check", "err", err)
+		}
+		if err := s.SweepIntelAlerts(ctx); err != nil {
+			s.log.Error("update intelligence alert sweep", "err", err)
 		}
 		select { // deliver what the sweep raised; never wait for delivery
 		case kick <- struct{}{}:
@@ -345,7 +368,7 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	sm, err := s.store.Summary(ctx, s.th)
+	sm, err := s.honestSummary(ctx)
 	if err != nil {
 		s.fail(w, err)
 		return

@@ -58,7 +58,7 @@ export function buildSteps(pkg: Package, life: LifecycleExport | null, requests:
   steps.push({
     key: "requested", title: <>Requested{reqs.length > 1 ? <span className="muted"> · {reqs.length} requests</span> : null}</>,
     status: firstReq ? "done" : "pending", at: firstReq?.created_at, actor: firstReq?.created_by,
-    detail: firstReq ? <><Mono>{firstReq.request_id}</Mono> · {item?.status ?? "requested"}{firstReq.seen_at && parseTime(firstReq.seen_at) ? <> · seen by the acquisition zone <Time value={firstReq.seen_at} hideRel /></> : null}</>
+    detail: firstReq ? <><Mono>{firstReq.request_id}</Mono> · {item?.status ?? "requested"}{item?.reason ? <>: {item.reason}</> : null}{firstReq.seen_at && parseTime(firstReq.seen_at) ? <> · seen by the acquisition zone <Time value={firstReq.seen_at} hideRel /></> : null}</>
       : requests === null ? "request tracking unavailable" : "no tracked acquisition request (it may have arrived with a regular feed)",
   });
 

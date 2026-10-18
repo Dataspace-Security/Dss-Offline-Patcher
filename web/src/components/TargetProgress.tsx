@@ -26,7 +26,7 @@ export function targetStage(t: Target, currentRing: number, deploymentLive: bool
       case "installing":
         return { label: `Installing${elapsed ? ` · ${elapsed}` : ""}`, sub: "running the installer on the endpoint", pct: null, tone: "blue", live: true };
       case "waiting_reboot":
-        return { label: "Waiting for reboot", sub: elapsed ? `installed ${elapsed} ago` : undefined, pct: 90, tone: "amber", live: true };
+        return { label: "Restart needed", sub: t.detail || (elapsed ? `installed ${elapsed} ago` : undefined), pct: 90, tone: "amber", live: true };
     }
   }
   switch (t.state) {
@@ -40,9 +40,13 @@ export function targetStage(t: Target, currentRing: number, deploymentLive: bool
     case "installing":
       return { label: `Installing${elapsed ? ` · ${elapsed}` : ""}`, pct: null, tone: "blue", live: false };
     case "installed":
+      // P2: the server flags installs that inventory has not confirmed after 6 h.
+      if (/not confirmed/i.test(t.detail ?? "")) {
+        return { label: "Installed · not confirmed", sub: t.detail, pct: 85, tone: "amber", live: false };
+      }
       return { label: "Installed · confirming by inventory", sub: "verified at the next inventory report", pct: 85, tone: "green", live: false };
     case "pending_reboot":
-      return { label: "Waiting for reboot", sub: elapsed ? `for ${elapsed}` : undefined, pct: 90, tone: "amber", live: false };
+      return { label: "Restart needed", sub: t.detail || (elapsed ? `for ${elapsed}` : undefined), pct: 90, tone: "amber", live: false };
     case "verified":
       return { label: "Verified", sub: t.detail === "already present" ? "already up to date" : "inventory confirms it", pct: 100, tone: "green", live: false };
     case "failed":

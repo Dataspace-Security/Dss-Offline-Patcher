@@ -1,11 +1,12 @@
 import { createContext, useContext, useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { fmtTime, relTime, useNow } from "../util";
 
-const GREEN = ["verified", "compliant", "approved", "validated", "completed", "installed", "downloaded", "success", "active-ok"];
-const AMBER = ["pending_reboot", "paused", "quarantined", "noncompliant", "pending", "downloading", "installing", "received", "deferred"];
-const RED = ["failed", "rejected", "revoked", "offline", "cancelled", "failure", "expired", "lost_after_install"];
+const GREEN = ["verified", "compliant", "approved", "validated", "completed", "success", "active-ok"];
+const AMBER = ["pending_reboot", "paused", "quarantined", "noncompliant", "pending", "received", "deferred", "updates_available"];
+const RED = ["failed", "rejected", "revoked", "offline", "cancelled", "failure", "expired", "lost_after_install", "out_of_support"];
 const MUTED = ["stale", "exception", "not_applicable", "rolled_back"];
-const BLUE = ["active"];
+// Work in progress is blue: green only once confirmed, red only for real failures.
+const BLUE = ["active", "downloading", "downloaded", "installing", "installed"];
 
 export function pillTone(state: string): string {
   if (GREEN.includes(state)) return "green";
@@ -13,11 +14,36 @@ export function pillTone(state: string): string {
   if (RED.includes(state)) return "red";
   if (MUTED.includes(state)) return "purple";
   if (BLUE.includes(state)) return "blue";
-  return "grey";
+  return "grey"; // includes awaiting_checkin
+}
+
+/** Plain words for states whose stored name reads badly. */
+const STATE_LABELS: Record<string, string> = {
+  pending_reboot: "Restart needed",
+  updates_available: "Updates available",
+  out_of_support: "Windows no longer updated",
+  awaiting_checkin: "Waiting for first check-in",
+};
+
+/** Help text (tooltips) for endpoint statuses. */
+export const STATUS_HELP: Record<string, string> = {
+  pending_reboot: "Installed; the machine has to restart to finish. It stays like this until it is restarted.",
+  updates_available: "Checking in and no deployment problem, but Windows or application updates are missing.",
+  out_of_support: "This Windows version no longer receives security updates from Microsoft: upgrade it.",
+  awaiting_checkin: "Enrolled, but the agent has not sent its first inventory yet.",
+};
+
+/** Display name of a state: plain words where defined, else the state with spaces. */
+export function stateLabel(state: string): string {
+  return STATE_LABELS[state] ?? state.replace(/_/g, " ");
 }
 
 export function Pill({ state, label }: { state: string; label?: string }) {
-  return <span className={`pill pill-${pillTone(state)}`}>{(label ?? state).replace(/_/g, " ")}</span>;
+  return (
+    <span className={`pill pill-${pillTone(state)}`} title={label === undefined ? STATUS_HELP[state] : undefined}>
+      {label !== undefined ? label.replace(/_/g, " ") : stateLabel(state)}
+    </span>
+  );
 }
 
 export function Time({ value, hideRel }: { value: string | undefined | null; hideRel?: boolean }) {
@@ -220,13 +246,14 @@ const TARGET_ORDER = [
  * in-flight and done states read as such. */
 export function targetLabel(state: string, operation?: string): string {
   if (operation === "rollback") {
-    const l: Record<string, string> = { installing: "uninstalling", installed: "uninstalled", verified: "verified removed", pending_reboot: "pending reboot" };
+    const l: Record<string, string> = { installing: "uninstalling", installed: "uninstalled", verified: "verified removed" };
     if (l[state]) return l[state];
   }
-  return state.replace(/_/g, " ");
+  return stateLabel(state);
 }
 
 export const TARGET_HELP: Record<string, string> = {
+  pending_reboot: "Installed; the machine has to restart to finish. See the detail for why it has not restarted yet.",
   deferred: "Pre-install check not met (free disk space or battery). Retried at every check-in; not a failure.",
   lost_after_install: "The endpoint stopped checking in after installing. Counts as a failure towards auto-pause; recovers when it checks in again.",
   rolled_back: "Removed by a rollback deployment; no longer counted as patched.",
@@ -236,7 +263,7 @@ export function TargetPill({ state, operation }: { state: string; operation?: st
   return <span title={TARGET_HELP[state]}><Pill state={state} label={targetLabel(state, operation)} /></span>;
 }
 
-export function CountsBar({ counts, compact, rollback }: { counts: Partial<Record<string, number>>; compact?: boolean; rollback?: boolean }) {
+export function CountsBar({ counts, compact, rollback, running }: { counts: Partial<Record<string, number>>; compact?: boolean; rollback?: boolean; running?: boolean }) {
   const entries = TARGET_ORDER
     .map((k) => [k, counts[k] ?? 0] as [string, number])
     .concat(Object.entries(counts).filter(([k]) => !TARGET_ORDER.includes(k)).map(([k, v]) => [k, v ?? 0] as [string, number]))
@@ -245,7 +272,7 @@ export function CountsBar({ counts, compact, rollback }: { counts: Partial<Recor
   if (total === 0) return <span className="muted">no targets</span>;
   return (
     <div className={`counts ${compact ? "counts-compact" : ""}`}>
-      {!compact && <PatchScore counts={counts} rollback={rollback} />}
+      {!compact && <PatchScore counts={counts} rollback={rollback} running={running} />}
       <div className="countbar" title={entries.map(([k, v]) => `${k}: ${v}`).join(", ")}
            role="progressbar" aria-label={rollback ? "Removed" : "Patched"} aria-valuemin={0} aria-valuemax={100}
            aria-valuenow={patchScore(counts).pct} aria-valuetext={entries.map(([k, v]) => `${targetLabel(k, rollback ? "rollback" : undefined)} ${v}`).join(", ")}>
@@ -285,12 +312,19 @@ export function scoreTone(pct: number): "green" | "amber" | "red" {
   return pct >= 95 ? "green" : pct >= 70 ? "amber" : "red";
 }
 
-export function PatchScore({ counts, rollback }: { counts: Partial<Record<string, number>>; rollback?: boolean }) {
+/**
+ * While a deployment is still running the share is progress, not a grade:
+ * blue until it finishes (then the green / amber / red score applies), and
+ * red at once only if something failed.
+ */
+export function PatchScore({ counts, rollback, running }: { counts: Partial<Record<string, number>>; rollback?: boolean; running?: boolean }) {
   const s = patchScore(counts);
   if (s.total === 0) return null;
+  const failed = (counts.failed ?? 0) + (counts.lost_after_install ?? 0);
+  const tone = running && failed === 0 && s.pct < 100 ? "blue" : scoreTone(s.pct);
   return (
     <div className="patch-score">
-      <span className={`patch-score-pct text-${scoreTone(s.pct)}`}>{s.pct}%</span>
+      <span className={`patch-score-pct text-${tone}`}>{s.pct}%</span>
       <span className="patch-score-label">
         {rollback ? "removed" : "patched"} — <b>{s.patched}</b> of <b>{s.applicable}</b> endpoint{s.applicable === 1 ? "" : "s"} verified{rollback ? " without the package" : ""}
         {s.total !== s.applicable && <span className="muted"> ({s.total - s.applicable} not applicable / excepted)</span>}

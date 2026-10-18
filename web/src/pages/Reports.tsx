@@ -31,6 +31,12 @@ function pctTone(p: number): string {
   return "red";
 }
 
+/** Machines counted for a package or severity: those that need it (P2), else the targets (older servers). */
+function base(x: { needed?: number; targets: number; verified: number; outstanding: number; exceptions: number }): number {
+  if (typeof x.needed === "number") return x.needed;
+  return Math.max(x.targets, x.verified + x.outstanding);
+}
+
 function today(): string {
   return new Date().toISOString().slice(0, 10);
 }
@@ -68,6 +74,10 @@ export default function Reports() {
           <button className="btn" disabled={!!dl} onClick={() => void download("/api/reports/endpoints.csv", `offpatch-endpoints-${today()}.csv`)}>
             {dl?.includes("endpoints") ? "Downloading…" : "Download endpoints CSV"}
           </button>
+          <button className="btn" disabled={!!dl} title="Every install: machine, package, state, when it was confirmed, the inventory line that proves it, who approved it"
+                  onClick={() => void download("/api/reports/targets.csv", `offpatch-evidence-${today()}.csv`)}>
+            {dl?.includes("evidence") ? "Downloading…" : "Download evidence (CSV)"}
+          </button>
           <button className="btn btn-primary" onClick={() => window.print()} disabled={!r}>Print / save as PDF</button>
         </div>
       </PageHeader>
@@ -76,8 +86,8 @@ export default function Reports() {
       {r && (
         <>
           <section className="section">
-            <h2>Compliance by severity <span className="muted">· verified installs vs. the deadline from vendor release</span></h2>
-            {sevKeys.length === 0 ? <Empty>No deployment targets yet.</Empty> : (
+            <h2>Compliance by severity <span className="muted">· confirmed installs out of the machines that need each update, against the deadline from vendor release</span></h2>
+            {sevKeys.length === 0 ? <Empty>No machine needs a catalog package yet.</Empty> : (
               <div className="tiles tiles-4">
                 {sevKeys.map((sev) => <SevTile key={sev} sev={sev} st={r.by_severity[sev]} deadline={r.deadlines?.[sev]} />)}
               </div>
@@ -93,7 +103,7 @@ export default function Reports() {
                   <tr><td>Reporting</td><td className="num"><b className={`text-${pctTone(r.fleet.pct_reporting)}`}>{r.fleet.pct_reporting.toFixed(1)}%</b> <span className="muted">({r.fleet.reporting})</span></td></tr>
                   <tr><td><Link to="/endpoints?status=offline">Offline</Link></td><td className={`num ${r.fleet.offline ? "text-red" : ""}`}><b>{r.fleet.offline}</b></td></tr>
                   <tr><td><Link to="/endpoints?status=stale">Stale</Link></td><td className={`num ${r.fleet.stale ? "text-amber" : ""}`}><b>{r.fleet.stale}</b></td></tr>
-                  <tr><td><Link to="/endpoints?status=pending_reboot">Pending reboot</Link></td><td className="num"><b>{r.fleet.pending_reboot}</b></td></tr>
+                  <tr><td><Link to="/endpoints?status=pending_reboot">Restart needed</Link></td><td className="num"><b>{r.fleet.pending_reboot}</b></td></tr>
                 </tbody>
               </table>
             </section>
@@ -111,7 +121,7 @@ export default function Reports() {
               <h2>Intake</h2>
               <table className="table table-compact">
                 <tbody>
-                  <tr><td><Link to={paths.transfers}>Bundles validated</Link></td><td className="num"><b>{r.intake.validated}</b></td></tr>
+                  <tr><td><Link to={paths.imports}>Bundles validated</Link></td><td className="num"><b>{r.intake.validated}</b></td></tr>
                   <tr><td>Bundles rejected</td><td className={`num ${r.intake.rejected ? "text-red" : ""}`}><b>{r.intake.rejected}</b></td></tr>
                 </tbody>
               </table>
@@ -125,7 +135,9 @@ export default function Reports() {
                 <thead>
                   <tr>
                     <th>Package</th><th>Severity</th><th>State</th><th>Released</th><th>Deadline</th>
-                    <th className="num">Targets</th><th className="num">Verified</th><th className="num">Outstanding</th>
+                    <th className="num" title="Machines that need this package, whether a deployment targets them or not">Need it</th>
+                    <th className="num" title="Installed and confirmed by inventory">Verified</th>
+                    <th className="num" title="Still missing it, including machines no deployment targets yet">Outstanding</th>
                     <th className="num">Overdue</th><th className="num">Exc.</th><th className="num">Compliant</th>
                     <th className="num" title="Vendor release → received in the isolated zone">Rel→recv</th>
                     <th className="num" title="Received → approved">Recv→appr</th>
@@ -144,12 +156,12 @@ export default function Reports() {
                       <td><Pill state={p.state} /></td>
                       <td className="nowrap">{p.release_date ? p.release_date.slice(0, 10) : "—"}</td>
                       <td className="nowrap"><Time value={p.deadline} hideRel /></td>
-                      <td className="num">{p.targets}</td>
+                      <td className="num">{base(p)}</td>
                       <td className="num">{p.verified}</td>
                       <td className="num">{p.outstanding}</td>
                       <td className={`num ${p.overdue > 0 ? "text-red" : ""}`}><b>{p.overdue}</b></td>
                       <td className="num">{p.exceptions}</td>
-                      <td className={`num text-${pctTone(p.pct_compliant)}`}>{p.targets ? `${p.pct_compliant.toFixed(1)}%` : "—"}</td>
+                      <td className={`num text-${pctTone(p.pct_compliant)}`}>{base(p) ? `${p.pct_compliant.toFixed(1)}%` : "—"}</td>
                       <td className="num">{days(p.days_release_to_received)}</td>
                       <td className="num">{days(p.days_received_to_approved)}</td>
                       <td className="num">{days(p.days_approved_to_first_verified)}</td>
@@ -159,7 +171,7 @@ export default function Reports() {
                 </tbody>
               </table>
             )}
-            <div className="hint">“—” means the milestone has not been reached yet. Rows with overdue targets are highlighted.</div>
+            <div className="hint">“—” means the milestone has not been reached yet. Rows with overdue machines are highlighted. Machines that need a package but are not in any deployment count as outstanding.</div>
           </section>
         </>
       )}
@@ -172,9 +184,9 @@ function SevTile({ sev, st, deadline }: { sev: string; st: SeverityStats; deadli
   return (
     <div className={`tile tile-${tone} ${st.overdue > 0 ? "tile-alert" : ""}`}>
       <div className="tile-label"><Severity s={sev} /> · deadline {fmtGoDuration(deadline)}</div>
-      <div className="tile-value">{st.targets ? `${st.pct_compliant.toFixed(1)}%` : "—"}</div>
+      <div className="tile-value">{base(st) ? `${st.pct_compliant.toFixed(1)}%` : "—"}</div>
       <div className="tile-foot">
-        {st.verified}/{st.targets} verified · {st.outstanding} outstanding
+        {st.verified}/{base(st)} verified · {st.outstanding} outstanding
         <br />
         <span className={st.overdue ? "text-red" : ""}><b>{st.overdue}</b> overdue</span> · {st.exceptions} exceptions
       </div>

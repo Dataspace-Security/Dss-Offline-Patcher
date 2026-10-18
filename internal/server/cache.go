@@ -55,10 +55,13 @@ func (c *genCache[T]) get(gen func() uint64, ttl time.Duration, f func() (T, err
 }
 
 // needsView is the cached GET /api/packages-needs result plus, per
-// endpoint, how many approved catalog packages it needs (Endpoint.missing.ready).
+// endpoint, how many approved catalog packages it needs
+// (Endpoint.missing.ready) and how many approved or quarantined ones
+// (Endpoint.missing.catalog).
 type needsView struct {
-	needs map[string]store.PackageNeed
-	ready map[string]int
+	needs   map[string]store.PackageNeed
+	ready   map[string]int
+	catalog map[string]int
 }
 
 // fleetNeeds returns the cached package needs of the whole fleet (fleetTTL,
@@ -69,16 +72,16 @@ func (s *Server) fleetNeeds(ctx context.Context) (needsView, error) {
 		if err != nil {
 			return needsView{}, err
 		}
-		ready := map[string]int{}
+		ready, catalog := map[string]int{}, map[string]int{}
 		for _, n := range needs {
-			if !n.Approved() {
-				continue
-			}
 			for _, id := range n.Endpoints {
-				ready[id]++
+				catalog[id]++
+				if n.Approved() {
+					ready[id]++
+				}
 			}
 		}
-		return needsView{needs: needs, ready: ready}, nil
+		return needsView{needs: needs, ready: ready, catalog: catalog}, nil
 	})
 }
 

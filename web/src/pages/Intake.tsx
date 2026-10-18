@@ -8,7 +8,7 @@ export const fetchBundles = () => api.get<Bundle[]>("/api/bundles");
 export const fetchReconciliation = () => api.get<Reconciliation>("/api/transfer/reconcile");
 
 /**
- * Transfers → "Arrived through the transfer": gateway receipts reconciled
+ * Imports → "Arrived through the transfer": gateway receipts reconciled
  * against the bundles received, and the bundles (newest first).
  */
 export function ReceivedSection({ data, error, recon, reconError }: {

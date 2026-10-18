@@ -6,15 +6,50 @@ import type { AcquisitionRequestRef, CatalogLink, PackageFleet } from "../types"
 import { Pill, RelTime } from "./ui";
 import "../patch.css";
 
-/** "requested 2d ago · seen" for an update that is not imported yet. */
+/** "Importing… requested 2d ago" / "… seen by acquisition" for an update that is not imported yet. */
 export function RequestedNote({ requested }: { requested: AcquisitionRequestRef | null | undefined }) {
   if (!requested) return null;
-  const label = { requested: "requested", seen: "requested · seen by acquisition", fulfilled: "requested · arrived" }[requested.status] ?? "requested";
+  if (requested.status === "unsupported" || requested.status === "failed" || requested.status === "stale") return <ImportProblem requested={requested} />;
+  const label = { requested: "Importing… requested", seen: "Importing… seen by acquisition", fulfilled: "Imported · arrived" }[requested.status] ?? "Importing… requested";
   return (
     <span className="requested" title={`Acquisition request ${requested.request_id}`}>
       {label} <RelTime value={requested.at} />
     </span>
   );
+}
+
+/**
+ * "Can't import: <reason>" (never fetchable this way) / "Import failed: <reason>" (may work next time) /
+ * "Not picked up: <reason>" (a later acquisition run missed the request; ask again).
+ */
+export function ImportProblem({ requested }: { requested: AcquisitionRequestRef }) {
+  const why = requested.reason?.trim();
+  if (requested.status === "stale") {
+    return (
+      <span className="text-amber small" title={`Acquisition request ${requested.request_id}`}>
+        Not picked up{why ? `: ${why}` : ""} <span className="muted"><RelTime value={requested.at} /></span>
+      </span>
+    );
+  }
+  if (requested.status === "unsupported") {
+    return <span className="text-red small" title={`Acquisition request ${requested.request_id}`}>Can't import{why ? `: ${why}` : ""}</span>;
+  }
+  return (
+    <span className="text-red small" title={`Acquisition request ${requested.request_id}`}>
+      Import failed{why ? `: ${why}` : ""} <span className="muted"><RelTime value={requested.at} /></span>
+    </span>
+  );
+}
+
+/**
+ * True when an update can be imported: not in the catalog, or its package was
+ * rejected (a fresh download gets a new review). Revoked packages stay
+ * revoked, and an update the downloader reported it can never fetch is not
+ * offered again.
+ */
+export function isRequestable(link: CatalogLink | null | undefined, requested?: AcquisitionRequestRef | null): boolean {
+  if (requested?.status === "unsupported") return false;
+  return !link || link.state === "rejected";
 }
 
 type Props = {
@@ -23,30 +58,71 @@ type Props = {
   fleet?: PackageFleet;
   /** Opens the Patch this drawer for the package. */
   onPatch: (packageId: string) => void;
-  /** Not imported: toggle the row in the acquisition-request selection (omit to hide). */
-  selected?: boolean;
-  onSelect?: () => void;
+  /** Importable rows: send an acquisition request for this row now (omit to hide the Import button). */
+  onRequest?: () => void;
+  /** This row's request is in flight. */
+  requesting?: boolean;
+  /** Any request is in flight (disables the button). */
+  disabled?: boolean;
 };
+
+function RequestButton({ label, title, onRequest, requesting, disabled }:
+  { label: string; title: string; onRequest: () => void; requesting?: boolean; disabled?: boolean }) {
+  return (
+    <button className="btn btn-sm" onClick={onRequest} disabled={disabled || requesting} title={title}>
+      {requesting ? "Sending…" : label}
+    </button>
+  );
+}
 
 /**
  * The one next action for an update, by where it stands in the pipeline:
- * not imported → select / request; quarantined → Review & approve (approvers)
- * or Awaiting approval; approved → Patch this…; deploying → the deployment.
+ * not imported → Import (or "Can't import: why" / "Import failed: why · Try again");
+ * rejected → state + Import again; revoked → cannot be imported again;
+ * quarantined → Review & approve (approvers) or Awaiting approval;
+ * approved → Patch this…; deploying → the deployment.
  */
-export function PipelineAction({ link, requested, fleet, onPatch, selected, onSelect }: Props) {
+export function PipelineAction({ link, requested, fleet, onPatch, onRequest, requesting, disabled }: Props) {
   const canApprove = useCan("approver");
   const canDeploy = useCan("operator");
+  const canRequest = !!onRequest && canDeploy;
+  const unsupported = requested?.status === "unsupported";
+  const failed = requested?.status === "failed";
   if (!link) {
     return (
       <div className="row-action">
         <RequestedNote requested={requested} />
-        {onSelect && canDeploy && (
-          <button className={`btn btn-sm ${selected ? "btn-primary" : ""}`} onClick={onSelect}
-                  title="Add to the acquisition request to export">
-            {selected ? "Selected" : requested ? "Request again" : "Request"}
-          </button>
+        {canRequest && !unsupported && (
+          <RequestButton label={failed ? "Try again" : requested ? "Ask again" : "Import"} onRequest={onRequest!} requesting={requesting} disabled={disabled}
+                         title={failed
+                           ? "Send a new acquisition request; the last download failed but may work now"
+                           : requested
+                           ? "Send a new acquisition request for this update"
+                           : "Download this update in the acquisition zone; it is verified, signed and comes back here for approval"} />
         )}
-        {!onSelect && !requested && <span className="muted small">not imported</span>}
+        {!canRequest && !requested && <span className="muted small">not imported</span>}
+      </div>
+    );
+  }
+  if (link.state === "revoked") {
+    return (
+      <div className="row-action">
+        <Link to={paths.catalog(link.package_id)}><Pill state="revoked" /></Link>
+        <span className="muted small" title="A revoked package is a security decision: a new download of the same package is not accepted">
+          Revoked — cannot be imported again
+        </span>
+      </div>
+    );
+  }
+  if (link.state === "rejected") {
+    return (
+      <div className="row-action">
+        <Link to={paths.catalog(link.package_id)}><Pill state="rejected" /></Link>
+        {requested && requested.status !== "fulfilled" && <RequestedNote requested={requested} />}
+        {canRequest && !unsupported && (
+          <RequestButton label={failed ? "Try again" : "Import again"} onRequest={onRequest!} requesting={requesting} disabled={disabled}
+                         title="The previous package was rejected; import a fresh download for a new review" />
+        )}
       </div>
     );
   }

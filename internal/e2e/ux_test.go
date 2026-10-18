@@ -103,12 +103,6 @@ func TestUXIteration(t *testing.T) {
 	chrome := manifest.Package{PackageID: "Google.Chrome-155.0.8059.85", Title: "Google Chrome 155.0.8059.85", Vendor: "Google", Kind: "msi",
 		Version: "155.0.8059.85", ProductCode: chromeCode, PackageName: "Google Chrome", Severity: "important", ReleaseDate: "2026-10-15",
 		Supersedes: []string{}, Applicability: manifest.Applicability{OS: "windows", Arch: "x64"}, VendorSignature: manifest.VendorSignature{Status: "not_checked"}}
-	if bd := e.transferAndIntake(e.bundle(bundleOpts{seq: 1}, map[string]manifest.Package{cu.PackageID: cu, chrome.PackageID: chrome},
-		map[string]string{cu.PackageID: e.payload("cu.msu", "cu"), chrome.PackageID: e.payload("chrome.msi", "chrome")})); bd.State != "validated" {
-		t.Fatalf("bundle %s: %v", bd.State, checksFailed(bd))
-	}
-	e.approve(cu.PackageID) // Chrome stays quarantined
-
 	gen := time.Now().UTC().Add(-time.Hour).Truncate(time.Second).Format(time.RFC3339)
 	e.dropIntel(intel.Doc{Source: "acq-zone-1", GeneratedAt: gen,
 		Windows: []intel.WindowsRelease{{Product: "Windows 10 Version 22H2", Build: 19045, Arch: "x64", KB: "KB5000901", UBR: 5000, Title: "2026-10 Cumulative Update (KB5000901)"}},
@@ -116,6 +110,20 @@ func TestUXIteration(t *testing.T) {
 			{ID: "Google.Chrome", Name: "Google Chrome", Version: "155.0.8059.85", Codes: []string{strings.ToLower(chromeCode)}, Names: []string{"googlechrome"}},
 			{ID: "7zip.7zip", Name: "7-Zip", Version: "26.04", ARPMax: "26.04.00.0", Codes: []string{"{23170f69-40c1-2702-2603-000001000000}"}, Names: []string{"7zip"}},
 		}}, e.priv, "intel-ux")
+
+	// The operator requests the missing updates before they arrive (a package
+	// that was already imported does not fulfil a later request).
+	var req struct {
+		RequestID string `json:"request_id"`
+	}
+	if code := e.api("POST", "/api/acquisition-requests", tokOperator, map[string]any{"apps": []string{"Google.Chrome", "7zip.7zip"}, "kbs": []string{"KB5000901"}}, &req); code != 200 {
+		t.Fatalf("export: %d", code)
+	}
+	if bd := e.transferAndIntake(e.bundle(bundleOpts{seq: 1}, map[string]manifest.Package{cu.PackageID: cu, chrome.PackageID: chrome},
+		map[string]string{cu.PackageID: e.payload("cu.msu", "cu"), chrome.PackageID: e.payload("chrome.msi", "chrome")})); bd.State != "validated" {
+		t.Fatalf("bundle %s: %v", bd.State, checksFailed(bd))
+	}
+	e.approve(cu.PackageID) // Chrome stays quarantined
 
 	// ---- policy ----
 	var pol struct {
@@ -157,13 +165,13 @@ func TestUXIteration(t *testing.T) {
 	for _, ep := range eps {
 		miss[ep.EndpointID] = ep.Missing
 	}
-	if m := miss[a.id]; m == nil || *m != (store.EndpointMissing{OS: 1, Apps: 2, Ready: 1}) {
+	if m := miss[a.id]; m == nil || *m != (store.EndpointMissing{OS: 1, Apps: 2, Ready: 1, Catalog: 2}) {
 		t.Errorf("A missing: %+v", m)
 	}
 	if m := miss[b.id]; m == nil || *m != (store.EndpointMissing{}) {
 		t.Errorf("B missing: %+v", m)
 	}
-	if m := miss[c.id]; m == nil || *m != (store.EndpointMissing{OS: 1, Ready: 1}) {
+	if m := miss[c.id]; m == nil || *m != (store.EndpointMissing{OS: 1, Ready: 1, Catalog: 1}) {
 		t.Errorf("C missing: %+v", m)
 	}
 	var one store.EndpointDetail
@@ -181,12 +189,6 @@ func TestUXIteration(t *testing.T) {
 	}
 
 	// ---- acquisition requests: requested → seen → fulfilled ----
-	var req struct {
-		RequestID string `json:"request_id"`
-	}
-	if code := e.api("POST", "/api/acquisition-requests", tokOperator, map[string]any{"apps": []string{"Google.Chrome", "7zip.7zip"}, "kbs": []string{"KB5000901"}}, &req); code != 200 {
-		t.Fatalf("export: %d", code)
-	}
 	reqs := func() []store.AcqRequestRecord {
 		t.Helper()
 		var v []store.AcqRequestRecord

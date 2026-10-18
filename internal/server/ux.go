@@ -35,21 +35,21 @@ func (s *Server) policy(w http.ResponseWriter, r *http.Request) {
 // ---- Endpoint.missing ----
 
 // fillMissing sets Missing on each endpoint from the cached fleet view (os,
-// apps) and the cached catalog needs (ready = approved packages it needs).
-// snap may be nil (no usable intelligence): then Missing is set only when
-// ready > 0.
-func fillMissing(eps []store.Endpoint, snap *fleetSnapshot, ready map[string]int) {
+// apps) and the cached catalog needs (ready = approved packages it needs,
+// catalog = approved or quarantined). snap may be nil (no usable
+// intelligence): then Missing is set only when catalog > 0.
+func fillMissing(eps []store.Endpoint, snap *fleetSnapshot, ready, catalog map[string]int) {
 	for i := range eps {
 		e := &eps[i]
 		if e.RetiredAt != "" {
 			e.Missing = nil
 			continue
 		}
-		m := store.EndpointMissing{Ready: ready[e.EndpointID]}
+		m := store.EndpointMissing{Ready: ready[e.EndpointID], Catalog: catalog[e.EndpointID]}
 		if snap != nil {
 			c := snap.perEP[e.EndpointID]
-			m.OS, m.Apps = c.OS, c.Apps
-		} else if m.Ready == 0 {
+			m.OS, m.Apps, m.OSSupport, m.OSLastUpdate = c.OS, c.Apps, c.OSSupport, c.OSLastUpdate
+		} else if m.Catalog == 0 {
 			e.Missing = nil
 			continue
 		}
@@ -61,13 +61,8 @@ func fillMissing(eps []store.Endpoint, snap *fleetSnapshot, ready map[string]int
 // from the cached fleet snapshot and needs (rebuilt at most once per
 // fleetTTL or store change).
 func (s *Server) listEndpoints(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	eps, err := s.store.ListEndpointsBrief(ctx, s.th)
+	eps, err := s.honestEndpoints(r.Context())
 	if err != nil {
-		s.fail(w, err)
-		return
-	}
-	if err := s.missingFor(ctx, eps); err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -86,6 +81,7 @@ func (s *Server) getEndpoint(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	refineStatus(one)
 	v.Endpoint = one[0]
 	writeJSON(w, 200, v)
 }
@@ -100,7 +96,7 @@ func (s *Server) missingFor(ctx context.Context, eps []store.Endpoint) error {
 	if err != nil {
 		return err
 	}
-	fillMissing(eps, snap, nv.ready)
+	fillMissing(eps, snap, nv.ready, nv.catalog)
 	return nil
 }
 

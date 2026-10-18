@@ -1,16 +1,19 @@
 import { Fragment, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { api, errMsg, saveBlob } from "../api";
+import { api } from "../api";
 import { useCan } from "../auth";
 import { RequestedPill } from "../components/AcqRequestStatus";
 import { FleetBar, StatusCounts, UpdateEndpoints, needsAction, type FleetEndpointStatus } from "../components/fleetStatusParts";
 import { PatchThis } from "../components/PatchThis";
-import { PipelineAction } from "../components/PipelineAction";
+import { PipelineAction, isRequestable } from "../components/PipelineAction";
+import { RequestResultBanner } from "../components/RequestResultBanner";
+import { useImportRequest } from "../components/useImportRequest";
 import { fetchFleet } from "../components/patchPlan";
 import { CatalogState, IntelSource } from "../components/UpdatesAvailable";
+import { IntelStaleBanner } from "../components/IntelStaleBanner";
 import { Empty, ErrorBanner, Mono, PageHeader, RelTime, expandRowProps } from "../components/ui";
 import { paths } from "../paths";
-import type { AcquisitionRequest, FleetStatus, FleetStatusRow, FleetUpdates } from "../types";
+import type { FleetStatus, FleetStatusRow, FleetUpdates } from "../types";
 import { useLoad } from "../util";
 import "../ops.css";
 
@@ -21,10 +24,11 @@ type NeededEndpoint = FleetUpdates["updates"][number]["endpoints"][number];
 const POLL_MS = 60000;
 const NAMES_SHOWN = 5;
 const rowKey = (r: { kind: string; key: string }) => `${r.kind}:${r.key}`;
+const BULK = "__bulk__";
 
 /**
- * Patches → Updates: every Windows update and application across the fleet
- * in one list (formerly "Needed" and "Status"). Default view: only what needs
+ * Patches → Needed: every Windows update and application across the fleet
+ * in one list. Default view: only what needs
  * action (outdated or failed somewhere); "Everything" adds what is up to date.
  * Rows from GET /api/fleet/status; the endpoints of a row are fetched when it
  * is opened. Names of the endpoints that still need an update come from
@@ -47,9 +51,6 @@ export default function PatchUpdates() {
   const [open, setOpen] = useState<{ key: string; status: FleetEndpointStatus | "" } | null>(null);
   const [patching, setPatching] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [busy, setBusy] = useState(false);
-  const [exportErr, setExportErr] = useState<string | null>(null);
-  const [exported, setExported] = useState<AcquisitionRequest | null>(null);
 
   const allRows = status.data?.rows ?? [];
   const intel = status.data?.intel ?? null;
@@ -76,10 +77,10 @@ export default function PatchUpdates() {
   const kindCount = (k: Kind) => inView.filter((r) => !k || r.kind === k).length;
   const actionCount = allRows.filter(needsAction).length;
 
-  // Only updates not in the catalog yet can be requested; the selection
-  // follows the current data (an update that disappears drops out).
-  const chosen = allRows.filter((r) => !r.catalog && selected.has(rowKey(r)));
-  const visibleRequestable = rows.filter((r) => !r.catalog);
+  // Updates not in the catalog yet (or whose package was rejected) can
+  // be imported; the selection follows the current data.
+  const chosen = allRows.filter((r) => isRequestable(r.catalog, r.requested) && selected.has(rowKey(r)));
+  const visibleRequestable = rows.filter((r) => isRequestable(r.catalog, r.requested));
   const allOn = visibleRequestable.length > 0 && visibleRequestable.every((r) => selected.has(rowKey(r)));
   const toggleOne = (r: FleetStatusRow) => {
     const n = new Set(selected);
@@ -97,24 +98,18 @@ export default function PatchUpdates() {
     setOpen(open && open.key === key && (s === "" || open.status === s) ? null : { key, status: s });
 
   const reloadAll = () => { void status.reload(); void needed.reload(); void fleet.reload(); };
+  const imp = useImportRequest(reloadAll);
+  const busy = imp.busy; // row key, BULK, or null
 
-  const exportRequest = async () => {
-    setBusy(true);
-    setExportErr(null);
-    try {
-      const req = await api.post<AcquisitionRequest>("/api/acquisition-requests", {
-        apps: chosen.filter((r) => r.kind === "app").map((r) => r.key),
-        kbs: chosen.filter((r) => r.kind === "os").map((r) => r.key),
-      });
-      saveBlob(new Blob([JSON.stringify(req, null, 2) + "\n"], { type: "application/json" }), `${req.request_id}.json`);
-      setExported(req);
-      setSelected(new Set());
-      reloadAll();
-    } catch (e) {
-      setExportErr(errMsg(e));
-    } finally {
-      setBusy(false);
-    }
+  // Import = one acquisition request for the given rows.
+  const sendRequest = async (items: FleetStatusRow[], busyKey: string) => {
+    const req = await imp.send({
+      apps: items.filter((r) => r.kind === "app").map((r) => r.key),
+      kbs: items.filter((r) => r.kind === "os").map((r) => r.key),
+    }, busyKey);
+    if (!req) return;
+    const sent = new Set(items.map(rowKey));
+    setSelected((cur) => new Set([...cur].filter((k) => !sent.has(k))));
   };
 
   const cols = canRequest ? 6 : 5;
@@ -122,30 +117,24 @@ export default function PatchUpdates() {
   return (
     <>
       <PageHeader
-        title="Updates"
-        sub={<>Every Windows update and application across the fleet, imported or not. <b>Up to date</b> = inventory shows it; <b>verified</b> = installed by an offpatch deployment and confirmed.
+        title="Needed"
+        sub={<>Updates for the Windows versions and applications on your machines, imported or not. To add software no machine has yet, use
+          the <Link to={paths.library()}>Library</Link>. <b>Up to date</b> = inventory shows it; <b>verified</b> = installed by an offpatch deployment and confirmed.
           {status.loadedAt ? <> · updated <RelTime value={new Date(status.loadedAt).toISOString()} /></> : null}</>}
       >
         <input className="search" placeholder="Filter by update, app, version or host…" value={q} onChange={(e) => setQ(e.target.value)} />
       </PageHeader>
       <ErrorBanner error={status.error} />
-      {intel?.error && <div className="banner banner-error">The stored update intelligence cannot be used: {intel.error}. Send a new document from the acquisition zone.</div>}
+      <IntelStaleBanner />
+      {intel?.error && <div className="banner banner-error">The stored update intelligence cannot be used: {intel.error}. Ask the acquisition team to send a new one.</div>}
       {status.data && !intel && (
         <div className="banner banner-info">
-          No update intelligence received yet, so only catalog-based status is known. Enable <Mono>"intel": {"{}"}</Mono> in the acquisition config
-          (<Mono>/etc/offpatch/acquire.json</Mono>) or run <Mono>pmctl intel -key bundle.key -to &lt;inbox&gt;</Mono> in the acquisition zone.
+          No update intelligence received yet, so only catalog-based status is known. Ask the acquisition team to send update intelligence;
+          it arrives through the transfer like any bundle.
         </div>
       )}
-      {exportErr && <div className="banner banner-error">Acquisition request not exported: {exportErr}</div>}
-      {exported && (
-        <div className="banner banner-ok">
-          Downloaded <Mono>{exported.request_id}.json</Mono> ({exported.apps.length} application{exported.apps.length === 1 ? "" : "s"},{" "}
-          {exported.kbs.length} Windows update{exported.kbs.length === 1 ? "" : "s"}). Carry it to the acquisition zone on approved media and put it
-          in the <Mono>requests</Mono> directory of <Mono>pmctl auto</Mono>. The packages come back in a signed bundle and wait in the catalog for approval.
-          {" "}Track it on <Link to={paths.transfers}>Transfers</Link>.{" "}
-          <button className="btn btn-sm" onClick={() => setExported(null)}>Dismiss</button>
-        </div>
-      )}
+      {imp.error && <div className="banner banner-error">Import failed: {imp.error}</div>}
+      {imp.result && <RequestResultBanner req={imp.result} onDismiss={imp.dismiss} />}
 
       <div className="section-head">
         <div className="chips">
@@ -166,11 +155,11 @@ export default function PatchUpdates() {
       {canRequest && chosen.length > 0 && (
         <div className="bulkbar">
           <b>{chosen.length}</b> selected
-          <button className="btn btn-sm btn-primary" disabled={busy} onClick={() => void exportRequest()}>
-            {busy ? "Exporting…" : "Export acquisition request"}
+          <button className="btn btn-sm btn-primary" disabled={busy !== null} onClick={() => void sendRequest(chosen, BULK)}>
+            {busy === BULK ? "Sending…" : `Import selected (${chosen.length})`}
           </button>
           <button className="btn btn-sm" onClick={() => setSelected(new Set())}>Clear selection</button>
-          <span className="muted">downloads a file to carry to the acquisition zone; the server itself never sends anything out</span>
+          <span className="muted">one acquisition request for all of them</span>
         </div>
       )}
 
@@ -189,7 +178,7 @@ export default function PatchUpdates() {
               {canRequest && (
                 <th style={{ width: 28 }}>
                   <input type="checkbox" className="rowcheck" checked={allOn} disabled={visibleRequestable.length === 0} onChange={toggleAll}
-                         aria-label="Select all updates not imported" title="Select every update shown that is not in the catalog yet" />
+                         aria-label="Select all importable updates" title="Select every update shown that can be imported (not in the catalog yet, or rejected)" />
                 </th>
               )}
               <th>Update / application</th><th>Endpoints</th><th>Catalog</th><th style={{ width: 120 }}>Fleet</th><th className="right">Next step</th>
@@ -202,11 +191,11 @@ export default function PatchUpdates() {
               const names = namesOf(r);
               return (
                 <Fragment key={key}>
-                  <tr {...expandRowProps(isOpen, () => toggleOpen(key, ""), !r.catalog && selected.has(key) ? "selected" : "")}>
+                  <tr {...expandRowProps(isOpen, () => toggleOpen(key, ""), isRequestable(r.catalog, r.requested) && selected.has(key) ? "selected" : "")}>
                     {canRequest && (
                       <td onClick={(e) => e.stopPropagation()}>
-                        {!r.catalog && (
-                          <input type="checkbox" className="rowcheck" checked={selected.has(key)} onChange={() => toggleOne(r)} aria-label={`Request ${r.name || r.key}`} />
+                        {isRequestable(r.catalog, r.requested) && (
+                          <input type="checkbox" className="rowcheck" checked={selected.has(key)} onChange={() => toggleOne(r)} aria-label={`Import ${r.name || r.key}`} />
                         )}
                       </td>
                     )}
@@ -237,7 +226,9 @@ export default function PatchUpdates() {
                     <td className="right" onClick={(e) => e.stopPropagation()}>
                       {needsAction(r) || r.catalog
                         ? <PipelineAction link={r.catalog} requested={r.requested} fleet={r.catalog ? fleet.data?.[r.catalog.package_id] : undefined}
-                                          onPatch={setPatching} selected={selected.has(key)} onSelect={() => toggleOne(r)} />
+                                          onPatch={setPatching}
+                                          onRequest={isRequestable(r.catalog, r.requested) ? () => void sendRequest([r], key) : undefined}
+                                          requesting={busy === key} disabled={busy !== null} />
                         : <span className="muted small">nothing to do</span>}
                     </td>
                   </tr>

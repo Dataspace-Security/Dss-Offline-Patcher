@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"offpatch/internal/acqrequest"
+	"offpatch/internal/acqstatus"
 	"offpatch/internal/acquire/acquiretest"
 	"offpatch/internal/manifest"
 )
@@ -77,11 +78,10 @@ func TestAutoAcquisitionRequests(t *testing.T) {
 		"7/7zip/7zip/26.04/7zip.7zip.installer.yaml",
 		"m/Microsoft/VisualStudioCode/1.142.0/Microsoft.VisualStudioCode.installer.yaml")
 
-	oldHTTP, oldNow, oldAvail := autoHTTP, autoNow, msiCodeAvailable
+	oldHTTP, oldNow := autoHTTP, autoNow
 	autoHTTP = func() *http.Client { return srv.Client() }
 	autoNow = func() time.Time { return time.Date(2026, 10, 17, 3, 0, 0, 0, time.UTC) }
-	msiCodeAvailable = false
-	t.Cleanup(func() { autoHTTP, autoNow, msiCodeAvailable = oldHTTP, oldNow, oldAvail })
+	t.Cleanup(func() { autoHTTP, autoNow = oldHTTP, oldNow })
 
 	dir := t.TempDir()
 	pub, priv, _ := manifest.GenerateKey()
@@ -146,6 +146,14 @@ func TestAutoAcquisitionRequests(t *testing.T) {
 	if !feed {
 		t.Errorf("no request feed: %+v", rep.Feeds)
 	}
+	wantItems := map[string][2]string{
+		"Google.Chrome":              {"fetched", ""},
+		"7zip.7zip":                  {"fetched", ""},
+		"Microsoft.VisualStudioCode": {"unsupported", "no MSI installer for x64 in winget (only inno)"},
+		"Contoso.Gone":               {"unsupported", "winget no longer lists version 1.0"},
+		acquiretest.KB:               {"fetched", ""},
+	}
+	checkItems(t, rep.Items, "acq-request-1", wantItems)
 	if _, err := os.Stat(filepath.Join(reqDir, "done", "acq-request-1.json")); err != nil {
 		t.Errorf("request not archived: %v", err)
 	}
@@ -187,12 +195,15 @@ func TestAutoAcquisitionRequests(t *testing.T) {
 		t.Errorf("kb package: %+v", kb)
 	}
 
-	// The same request again: everything was sent already, nothing new.
+	// The same request carried over again: a request is explicit, so its
+	// items are fetched and sent again although state.json has them (e.g.
+	// to import a package again that was rejected on the isolated side).
 	writeRequest(t, reqDir, "acq-request-1.json", req)
 	rep, err = runAuto(ctx, cfgPath, false)
-	if err != nil || rep.Sent || len(rep.New) != 0 || rep.Skipped != 3 {
+	if err != nil || !rep.Sent || len(rep.New) != 3 || rep.Skipped != 0 {
 		t.Fatalf("repeat: %v %+v", err, rep)
 	}
+	checkItems(t, rep.Items, "acq-request-1", wantItems)
 	if ents, _ := os.ReadDir(filepath.Join(reqDir, "done")); len(ents) != 2 {
 		t.Errorf("repeat request not archived next to the first: %d", len(ents))
 	}
@@ -206,6 +217,7 @@ func TestAutoAcquisitionRequests(t *testing.T) {
 	if rep.Failures["Google.Chrome-155.0.8059.85-x86"] == "" || rep.Sent {
 		t.Fatalf("hash mismatch must fail: %+v", rep)
 	}
+	checkItems(t, rep.Items, "acq-request-2", map[string][2]string{"Google.Chrome": {"failed", "SHA-256 mismatch"}})
 	if _, err := os.Stat(filepath.Join(reqDir, "acq-request-2.json")); err != nil {
 		t.Fatal("request with a failed item was archived")
 	}
@@ -223,5 +235,31 @@ func TestWingetPackageID(t *testing.T) {
 	long := wingetPackageID(strings.Repeat("a", 32)+"."+strings.Repeat("b", 32), "1.2.3", "x64")
 	if len(long) != 64 || !strings.HasPrefix(long, strings.Repeat("a", 32)) {
 		t.Errorf("long id %q (%d)", long, len(long))
+	}
+}
+
+// checkItems compares the per-item results of one request with want
+// (key → result, reason prefix).
+func checkItems(t *testing.T, items []acqstatus.ItemResult, rid string, want map[string][2]string) {
+	t.Helper()
+	got := map[string]acqstatus.ItemResult{}
+	for _, it := range items {
+		if it.RequestID == rid {
+			got[it.Key] = it
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("items of %s: %+v, want %v", rid, items, want)
+	}
+	for key, w := range want {
+		it, ok := got[key]
+		switch {
+		case !ok:
+			t.Errorf("%s: no item result for %s in %+v", rid, key, items)
+		case it.Result != w[0] || !strings.HasPrefix(it.Reason, w[1]) || (w[1] == "" && w[0] != "already_sent" && it.Reason != ""):
+			t.Errorf("%s %s: %s %q, want %s %q", rid, key, it.Result, it.Reason, w[0], w[1])
+		case (it.Result == "fetched" || it.Result == "already_sent") && it.PackageID == "":
+			t.Errorf("%s %s: no package id", rid, key)
+		}
 	}
 }

@@ -3,7 +3,8 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api, ApiError, enc, errMsg } from "../api";
 import { paths } from "../paths";
 import { useCan } from "../auth";
-import { TargetPreview } from "../components/TargetPreview";
+import { AlreadyRunning, runningDeploymentFrom } from "../components/PatchThis";
+import { TargetPreview, nothingToDo, type TargetSummary } from "../components/TargetPreview";
 import { STAGES_HINT, stageLabel } from "../components/deployLabels";
 import { CountsBar, Empty, ErrorBanner, Mono, PageHeader, Pill, Time, patchScore, scoreTone } from "../components/ui";
 import type { Deployment, DeploymentOperation, HealthCheck, NewDeployment, Package, RebootPolicy } from "../types";
@@ -76,6 +77,9 @@ export function DeploymentList() {
                 <td className="nowrap">
                   {ringLabel(d)}
                   {currentStageName(d) && <div className="cell-sub">{currentStageName(d)}</div>}
+                  {d.auto_advance && (d.state === "active" || d.state === "paused") && d.current_ring < (d.rings?.length ?? 0) - 1 && (
+                    <div className="cell-sub" title="The next stage starts by itself once this one succeeds">next stage starts automatically</div>
+                  )}
                 </td>
                 <td><CountsBar counts={d.counts ?? {}} compact /><SmallCounts d={d} /></td>
                 <td><Time value={d.created_at} hideRel /><div className="cell-sub">{d.created_by}</div></td>
@@ -98,7 +102,7 @@ function SmallCounts({ d }: { d: Deployment }) {
     <div className="cell-sub">
       <b className={`text-${scoreTone(sc.pct)}`}>{sc.pct}% {d.operation === "rollback" ? "removed" : "patched"}</b> · {done}/{total} done
       {(c.failed ?? 0) > 0 && <span className="text-red"> · {c.failed} failed</span>}
-      {(c.pending_reboot ?? 0) > 0 && <span className="text-amber"> · {c.pending_reboot} reboot</span>}
+      {(c.pending_reboot ?? 0) > 0 && <span className="text-amber"> · {c.pending_reboot} restart needed</span>}
       {(c.lost_after_install ?? 0) > 0 && <span className="text-red"> · {c.lost_after_install} lost</span>}
       {(c.deferred ?? 0) > 0 && <span className="text-amber"> · {c.deferred} deferred</span>}
     </div>
@@ -108,13 +112,36 @@ function SmallCounts({ d }: { d: Deployment }) {
 type RingDraft = { name: string; groups: string };
 
 export const REBOOT_POLICIES: { value: RebootPolicy; label: string; hint: string }[] = [
-  { value: "never", label: "Never", hint: "The agent never reboots; endpoints report pending reboot." },
+  { value: "never", label: "Never", hint: "The agent never restarts the machine; machines show 'Restart needed' until someone restarts them." },
   { value: "in_window", label: "In a maintenance window", hint: "Reboot only inside a group maintenance window that allows reboots." },
   { value: "at_deadline", label: "At the deadline", hint: "Reboot when the deadline passes, even outside windows." },
 ];
 
 function validPort(s: string): boolean {
   return /^\d+$/.test(s) && Number(s) >= 1 && Number(s) <= 65535;
+}
+
+/** Collapsed stages line: "Stages: every compatible machine that needs it (2)" or "Stages: Test machines (3) → …". */
+function stagesSummary(rings: RingDraft[], counts: number[] | null, preview: TargetSummary | null): string {
+  if (rings.length === 1 && splitList(rings[0].groups).map((g) => g.toLowerCase()).includes("all")) {
+    const n = preview ? preview.willInstall + preview.unknown : null;
+    return `Stages: every compatible machine that needs it${n !== null ? ` (${n})` : ""}`;
+  }
+  return "Stages: " + rings.map((r, i) => {
+    const label = stageLabel(r.name, i).replace(/^Stage \d+ · /, "") || `Stage ${i + 1}`;
+    return counts ? `${label} (${counts[i]})` : label;
+  }).join(" → ");
+}
+
+/** One package in the form's select; `needed` (install only) = machines that need it now. */
+function PackageOption({ p, needed, rollback }: { p: Package; needed?: number; rollback: boolean }) {
+  return (
+    <option value={p.package_id} disabled={rollback && !!p.rollback_unsupported}>
+      {p.title || p.package_id} {p.kb ? `(${p.kb})` : ""} · {p.severity}{p.state === "revoked" ? " · revoked" : ""}
+      {needed !== undefined ? ` · needs it: ${needed}` : ""}
+      {rollback && p.rollback_unsupported ? " — rollback not supported" : ""}
+    </option>
+  );
 }
 
 export function NewDeploymentPage() {
@@ -127,6 +154,7 @@ export function NewDeploymentPage() {
 
   const policy = useLoad(fetchPolicy, []);
   const eps = useLoad(fetchEndpoints, []);
+  const fleet = useLoad(fetchFleet, []);
   // Every setting can be prefilled from the query string (Patch this → Custom…).
   const qDeadline = sp.get("deadline");
   const qReboot = sp.get("reboot_policy") as RebootPolicy | null;
@@ -138,8 +166,7 @@ export function NewDeploymentPage() {
   const [name, setName] = useState(sp.get("name") ?? "");
   const [nameTouched, setNameTouched] = useState(sp.has("name"));
   const [rings, setRings] = useState<RingDraft[]>(decodeRings(sp.get("rings")) ?? [
-    { name: "Test machines", groups: "pilot" },
-    { name: "All machines", groups: "all" },
+    { name: "Compatible machines that need it", groups: "all" },
   ]);
   const [maxFail, setMaxFail] = useState(qNum("max_failure_pct", "10"));
   const [maxRetries, setMaxRetries] = useState(qNum("max_retries", "2"));
@@ -153,10 +180,14 @@ export function NewDeploymentPage() {
   const [maxConcurrent, setMaxConcurrent] = useState(qNum("max_concurrent", "0"));
   const [rebootPolicy, setRebootPolicy] = useState<RebootPolicy>(qReboot && REBOOT_VALUES.includes(qReboot) ? qReboot : "never");
   const [ignoreWindows, setIgnoreWindows] = useState(sp.get("ignore_windows") === "1");
+  const [autoAdvance, setAutoAdvance] = useState(sp.get("auto_advance") === "1");
   const [checks, setChecks] = useState<HealthCheck[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
+  const [summary, setSummary] = useState<TargetSummary | null>(null);
+  // 409 "already running" from the server, for the package + operation it was refused for.
+  const [refused, setRefused] = useState<{ key: string; deploymentId: string } | null>(null);
   // Risky settings that came from the link rather than from the person filling in the form.
   const prefilled = [
     sp.get("emergency") === "1" && "emergency",
@@ -167,6 +198,16 @@ export function NewDeploymentPage() {
   // Rollbacks may also target revoked packages (removing a bad patch is often why it was revoked).
   const approved = (pkgs.data ?? []).filter((p) => p.state === "approved" || (rollback && p.state === "revoked"));
   const selected = approved.find((p) => p.package_id === packageId);
+  // Install: packages machines need first (most needed first); nobody-needs-it ones in their own group.
+  const neededOf = (p: Package) => fleet.data?.[p.package_id]?.needed ?? 0;
+  const byNeed = rollback || !fleet.data ? null : {
+    needed: approved.filter((p) => neededOf(p) > 0).sort((a, b) => neededOf(b) - neededOf(a) || (a.title || a.package_id).localeCompare(b.title || b.package_id)),
+    idle: approved.filter((p) => neededOf(p) === 0),
+  };
+  const refusedKey = `${operation}:${packageId}`;
+  const runningId = (!rollback && selected ? fleet.data?.[selected.package_id]?.active_deployment_id : "")
+    || (refused?.key === refusedKey ? refused.deploymentId : "");
+  const nobodyNeedsIt = !rollback && !!selected && !!fleet.data && neededOf(selected) === 0;
   const dlPolicy = rollback ? null : policyDeadline(selected, policy.data);
   const ringNames = rings.map((r) => r.name.trim()).filter(Boolean).join(" → ");
 
@@ -211,10 +252,13 @@ export function NewDeploymentPage() {
     if (!c.name.trim()) problems.push(`Health check ${i + 1} needs a ${c.type === "tcp_listening" ? "port" : "service name"}.`);
     else if (c.type === "tcp_listening" && !validPort(c.name.trim())) problems.push(`Health check ${i + 1}: port must be a number 1–65535.`);
   });
+  if (!rollback && selected && (nobodyNeedsIt || nothingToDo(summary))) {
+    problems.push("Nothing to do: every machine is already up to date or doesn't need it.");
+  }
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (problems.length || busy) return;
+    if (problems.length || runningId || busy) return;
     setBusy(true);
     setError(null);
     setConflict(false);
@@ -232,6 +276,7 @@ export function NewDeploymentPage() {
       max_concurrent: mc,
       reboot_policy: rebootPolicy,
       ignore_windows: ignoreWindows,
+      auto_advance: rings.length > 1 && autoAdvance,
       health_checks: checks.map((c) => ({ type: c.type, name: c.name.trim() })),
       operation,
     };
@@ -239,8 +284,12 @@ export function NewDeploymentPage() {
       const d = await api.post<Deployment>("/api/deployments", body);
       navigate(`/deployments/${enc(d.deployment_id)}`);
     } catch (err) {
-      setError(errMsg(err));
-      setConflict(err instanceof ApiError && err.status === 409);
+      const msg = errMsg(err);
+      const is409 = err instanceof ApiError && err.status === 409;
+      const running = is409 ? runningDeploymentFrom(msg) : "";
+      setRefused(running ? { key: refusedKey, deploymentId: running } : null);
+      setError(running ? null : msg);
+      setConflict(is409 && !running);
       setBusy(false);
     }
   };
@@ -283,12 +332,16 @@ export function NewDeploymentPage() {
             <span>Package <em className="req">{rollback ? "approved or revoked" : "approved only"}</em></span>
             <select value={packageId} onChange={(e) => setPackageId(e.target.value)}>
               <option value="">— select an approved package —</option>
-              {approved.map((p) => (
-                <option key={p.package_id} value={p.package_id} disabled={rollback && !!p.rollback_unsupported}>
-                  {p.title || p.package_id} {p.kb ? `(${p.kb})` : ""} · {p.severity}{p.state === "revoked" ? " · revoked" : ""}
-                  {rollback && p.rollback_unsupported ? " — rollback not supported" : ""}
-                </option>
-              ))}
+              {byNeed ? (
+                <>
+                  {byNeed.needed.map((p) => <PackageOption key={p.package_id} p={p} needed={neededOf(p)} rollback={false} />)}
+                  {byNeed.idle.length > 0 && (
+                    <optgroup label="Nobody needs these right now">
+                      {byNeed.idle.map((p) => <PackageOption key={p.package_id} p={p} needed={0} rollback={false} />)}
+                    </optgroup>
+                  )}
+                </>
+              ) : approved.map((p) => <PackageOption key={p.package_id} p={p} rollback={rollback} />)}
               {packageId && !selected && pkgs.data && (
                 <option value={packageId} disabled>{packageId} (not approved)</option>
               )}
@@ -301,9 +354,11 @@ export function NewDeploymentPage() {
           </label>
         </div>
 
-        <fieldset className="fieldset">
-          <legend>Stages <span className="muted">— rolled out in order; only the current stage receives assignments</span></legend>
-          <p className="hint" style={{ marginTop: 0 }}>{STAGES_HINT}</p>
+        <details className="fieldset advanced" open={rings.length > 1 || emptyRings.length > 0}>
+          <summary>
+            Advanced: stages <span className="muted">— {stagesSummary(rings, counts, rollback ? null : summary)}</span>
+          </summary>
+          <p className="hint">Rolled out in order; only the current stage receives assignments. {STAGES_HINT}</p>
           <table className="table table-compact rings">
             <thead><tr><th style={{ width: 40 }}>#</th><th>Name</th><th>Groups (comma-separated)</th><th title="Machines that fall in this stage (first matching stage wins); the preview below shows what happens on each">Machines</th><th style={{ width: 120 }} /></tr></thead>
             <tbody>
@@ -333,6 +388,12 @@ export function NewDeploymentPage() {
             </tbody>
           </table>
           <button type="button" className="btn btn-sm" onClick={() => setRings([...rings, { name: "", groups: "" }])}>+ Add stage</button>
+          {rings.length > 1 && (
+            <label className="check" style={{ marginTop: 8 }}>
+              <input type="checkbox" checked={autoAdvance} onChange={(e) => setAutoAdvance(e.target.checked)} />
+              <span><b>Start the next stage automatically</b> once the current one succeeds (it pauses instead if too many fail)</span>
+            </label>
+          )}
           {emptyRings.length > 0 && (
             <div className="banner banner-warn" style={{ marginTop: 8 }}>
               <b>{emptyRings.length === 1 ? `Stage ${emptyRings[0] + 1} has` : `Stages ${emptyRings.map((i) => i + 1).join(", ")} have`} no endpoints.</b>{" "}
@@ -344,12 +405,12 @@ export function NewDeploymentPage() {
               )}
             </div>
           )}
-        </fieldset>
+        </details>
 
         {rollback && selected?.rollback_unsupported && (
           <div className="banner banner-error"><b>Rollback not supported for {selected.kind}:</b> {selected.rollback_unsupported}</div>
         )}
-        {!rollback && <TargetPreview pkg={selected} rings={rings} />}
+        {!rollback && <TargetPreview pkg={selected} rings={rings} onSummary={setSummary} />}
 
         <div className="form-grid">
           <label className="field">
@@ -485,14 +546,16 @@ export function NewDeploymentPage() {
             )}
           </div>
         )}
-        {problems.length > 0 && (
+        {runningId ? <AlreadyRunning deploymentId={runningId} /> : problems.length > 0 && (
           <ul className="problems">{problems.map((p) => <li key={p}>{p}</li>)}</ul>
         )}
         <div className="form-actions">
           <Link to="/deployments" className="btn">Cancel</Link>
-          <button className={`btn ${emergency || rollback ? "btn-danger" : "btn-primary"}`} disabled={problems.length > 0 || busy}>
-            {busy ? "Creating…" : rollback ? "Create rollback deployment" : emergency ? "Create emergency deployment" : "Create deployment"}
-          </button>
+          {!runningId && (
+            <button className={`btn ${emergency || rollback ? "btn-danger" : "btn-primary"}`} disabled={problems.length > 0 || busy}>
+              {busy ? "Creating…" : rollback ? "Create rollback deployment" : emergency ? "Create emergency deployment" : "Create deployment"}
+            </button>
+          )}
         </div>
       </form>
     </>

@@ -22,9 +22,9 @@ func addPackage(t *testing.T, s *Store, p Package) {
 		p.Severity = "important"
 	}
 	now := s.now()
-	if _, err := s.db.Exec(`INSERT INTO packages(`+packageCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := s.db.Exec(`INSERT INTO packages(`+packageCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.PackageID, "b-1", p.PackageID, "Vendor", p.Kind, p.Version, p.KB, p.ProductCode, p.Severity, "2026-10-01", mustJSON(nonNil(p.Supersedes)),
-		mustJSON(p.Applicability), "f.bin", 1, strings.Repeat("a", 63)+string(rune('a'+len(p.PackageID)%6)), "", `{}`, "", p.State, "", "", now, now, p.PackageName, "[]", ""); err != nil {
+		mustJSON(p.Applicability), "f.bin", 1, strings.Repeat("a", 63)+string(rune('a'+len(p.PackageID)%6)), "", `{}`, "", p.State, "", "", now, now, p.PackageName, "[]", "", p.ExpectedUBR); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -257,7 +257,8 @@ func TestAcqRequestTracking(t *testing.T) {
 	if it := got["Notepad++.Notepad++/8.7"]; it.Status != "fulfilled" {
 		t.Errorf("notepad++ (sanitised id): %+v", it)
 	}
-	if list[0].SeenAt != "" || list[0].Items[0].Status != "requested" {
+	// req-2 (08:00) was not in the 09:00 run: not picked up (P2 "stale").
+	if list[0].SeenAt != "" || list[0].Items[0].Status != "stale" || !strings.Contains(list[0].Items[0].Reason, "did not pick this request up") {
 		t.Errorf("req-2: %+v", list[0])
 	}
 

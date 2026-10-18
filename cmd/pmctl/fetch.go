@@ -107,6 +107,7 @@ func fetchKB(args []string) error {
 	fs.StringVar(&o.Severity, "severity", "", "critical|important|moderate|low (default: from -msrc-month, else catalog, else important)")
 	fs.StringVar(&o.MSRCMonth, "msrc-month", "", "look up severity in the MSRC release, e.g. 2026-Oct")
 	fs.StringVar(&o.ProductCode, "product-code", "", "{GUID}; only needed if the catalog file is an .msi")
+	fs.BoolVar(&o.RecordUBR, "expected-ubr", false, "record expected_ubr from the catalog title (only once every agent runs 0.6.5 or later; older agents refuse the bundle)")
 	fs.StringVar(&o.PackageID, "package-id", "", "package id (default <KB>-<arch>)")
 	fs.StringVar(&o.OutDir, "out", "", "download directory")
 	fs.StringVar(&o.SpecPath, "spec", "", "spec.json to append to / update")

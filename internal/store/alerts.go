@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"time"
@@ -29,11 +30,39 @@ type Alert struct {
 	ObjectID       string `json:"object_id"`
 	AcknowledgedBy string `json:"acknowledged_by"`
 	AcknowledgedAt string `json:"acknowledged_at"`
+	// Details: structured context, e.g. endpoint_ids for alerts that name
+	// hosts. ResolvedAt: the condition cleared and the alert closed itself
+	// (acknowledged_by is then system:scheduler).
+	Details    map[string]any `json:"details,omitempty"`
+	ResolvedAt string         `json:"resolved_at,omitempty"`
+	ResolvedBy string         `json:"resolved_by,omitempty"`
+}
+
+const alertCols = `id,created_at,severity,kind,message,object_type,object_id,acknowledged_by,acknowledged_at,details,resolved_at`
+
+func scanAlert(sc interface{ Scan(...any) error }) (Alert, error) {
+	var a Alert
+	var det string
+	if err := sc.Scan(&a.ID, &a.CreatedAt, &a.Severity, &a.Kind, &a.Message, &a.ObjectType, &a.ObjectID, &a.AcknowledgedBy, &a.AcknowledgedAt, &det, &a.ResolvedAt); err != nil {
+		return a, err
+	}
+	if det != "" && det != "{}" {
+		json.Unmarshal([]byte(det), &a.Details)
+	}
+	if a.ResolvedAt != "" {
+		a.ResolvedBy = a.AcknowledgedBy
+	}
+	return a, nil
 }
 
 // raiseAlert records an alert unless an identical one (kind+object) is
 // still open, so a flapping condition does not flood operators.
 func (s *Store) raiseAlert(tx *sql.Tx, severity, kind, objectType, objectID, message string) error {
+	return s.raiseAlertWith(tx, severity, kind, objectType, objectID, message, nil)
+}
+
+// raiseAlertWith is raiseAlert with structured details (e.g. endpoint_ids).
+func (s *Store) raiseAlertWith(tx *sql.Tx, severity, kind, objectType, objectID, message string, details map[string]any) error {
 	var n int
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM alerts WHERE kind=? AND object_id=? AND acknowledged_at=''`, kind, objectID).Scan(&n); err != nil {
 		return err
@@ -41,7 +70,11 @@ func (s *Store) raiseAlert(tx *sql.Tx, severity, kind, objectType, objectID, mes
 	if n > 0 {
 		return nil
 	}
-	_, err := tx.Exec(`INSERT INTO alerts(created_at,severity,kind,message,object_type,object_id) VALUES(?,?,?,?,?,?)`, s.now(), severity, kind, message, objectType, objectID)
+	det := "{}"
+	if details != nil {
+		det = mustJSON(details)
+	}
+	_, err := tx.Exec(`INSERT INTO alerts(created_at,severity,kind,message,object_type,object_id,details) VALUES(?,?,?,?,?,?,?)`, s.now(), severity, kind, message, objectType, objectID, det)
 	return err
 }
 
@@ -51,7 +84,7 @@ func (s *Store) RaiseAlert(ctx context.Context, severity, kind, objectType, obje
 }
 
 func (s *Store) ListAlerts(ctx context.Context, openOnly bool) ([]Alert, error) {
-	q := `SELECT id,created_at,severity,kind,message,object_type,object_id,acknowledged_by,acknowledged_at FROM alerts`
+	q := `SELECT ` + alertCols + ` FROM alerts`
 	if openOnly {
 		q += ` WHERE acknowledged_at=''`
 	}
@@ -62,8 +95,8 @@ func (s *Store) ListAlerts(ctx context.Context, openOnly bool) ([]Alert, error) 
 	defer rows.Close()
 	out := []Alert{}
 	for rows.Next() {
-		var a Alert
-		if err := rows.Scan(&a.ID, &a.CreatedAt, &a.Severity, &a.Kind, &a.Message, &a.ObjectType, &a.ObjectID, &a.AcknowledgedBy, &a.AcknowledgedAt); err != nil {
+		a, err := scanAlert(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -93,15 +126,15 @@ func (s *Store) AckAlert(ctx context.Context, actor string, id int64, note strin
 
 // UndeliveredAlerts / MarkDelivered support external notification.
 func (s *Store) UndeliveredAlerts(ctx context.Context) ([]Alert, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,created_at,severity,kind,message,object_type,object_id,acknowledged_by,acknowledged_at FROM alerts WHERE delivered=0 ORDER BY id LIMIT 100`)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+alertCols+` FROM alerts WHERE delivered=0 ORDER BY id LIMIT 100`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []Alert
 	for rows.Next() {
-		var a Alert
-		if err := rows.Scan(&a.ID, &a.CreatedAt, &a.Severity, &a.Kind, &a.Message, &a.ObjectType, &a.ObjectID, &a.AcknowledgedBy, &a.AcknowledgedAt); err != nil {
+		a, err := scanAlert(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -115,8 +148,10 @@ func (s *Store) MarkDelivered(ctx context.Context, id int64) error {
 }
 
 // SweepAlerts raises time-based alerts: endpoints lost after an install
-// (which may auto-pause their deployment), offline endpoints, stale inventory,
-// exceptions expiring within a week, and certificates near expiry.
+// (which may auto-pause their deployment), installs inventory never
+// confirmed, offline endpoints, stale inventory, exceptions expiring within
+// a week, and certificates near expiry. Condition alerts name their hosts
+// and close themselves once the condition clears (alerts_condition.go).
 func (s *Store) SweepAlerts(ctx context.Context, th Thresholds) error {
 	if err := s.sweepLost(ctx, th.LostAfterInstall); err != nil {
 		return err
@@ -127,36 +162,51 @@ func (s *Store) SweepAlerts(ctx context.Context, th Thresholds) error {
 	if err := s.sweepAcquisition(ctx); err != nil {
 		return err
 	}
+	if err := s.sweepDeployments(ctx); err != nil {
+		return err
+	}
+	if err := s.sweepUnverified(ctx); err != nil {
+		return err
+	}
+	if err := s.sweepResolved(ctx); err != nil {
+		return err
+	}
 	eps, err := s.ListEndpointsBrief(ctx, th)
 	if err != nil {
 		return err
 	}
-	offline, stale := 0, 0
+	var offline, stale []HostRef
 	for _, e := range eps {
 		switch e.Status {
 		case "offline", "lost_after_install": // lost endpoints are offline too
-			offline++
+			offline = append(offline, HostRef{e.EndpointID, e.Hostname})
 		case "stale":
-			stale++
+			stale = append(stale, HostRef{e.EndpointID, e.Hostname})
 		}
 	}
-	if offline > 0 {
-		if err := s.RaiseAlert(ctx, "warning", "endpoints_offline", "fleet", "offline", itoa(offline)+" endpoint(s) have not checked in recently and are NOT counted as compliant"); err != nil {
-			return err
-		}
+	if err := s.SetHostAlert(ctx, "warning", "endpoints_offline", "fleet", "offline",
+		itoa(len(offline))+" endpoint(s) have not checked in recently and are NOT counted as compliant", offline, "every endpoint checked in again (or was retired)"); err != nil {
+		return err
 	}
-	if stale > 0 {
-		if err := s.RaiseAlert(ctx, "warning", "inventory_stale", "fleet", "stale", itoa(stale)+" endpoint(s) have stale inventory"); err != nil {
-			return err
-		}
+	if err := s.SetHostAlert(ctx, "warning", "inventory_stale", "fleet", "stale",
+		itoa(len(stale))+" endpoint(s) have stale inventory", stale, "every endpoint reported fresh inventory (or was retired)"); err != nil {
+		return err
 	}
+	expiring := map[string]bool{}
 	for _, e := range eps {
 		if e.Status != "retired" && e.CertNotAfter != "" && parseTime(e.CertNotAfter).Before(s.Now().Add(14*24*time.Hour)) {
-			if err := s.RaiseAlert(ctx, "warning", "cert_expiring", "endpoint", e.EndpointID,
-				e.Hostname+": client certificate expires "+e.CertNotAfter[:10]+" and has not been renewed (agent offline?)"); err != nil {
+			expiring[e.EndpointID] = true
+			det, _ := hostDetails([]HostRef{{e.EndpointID, e.Hostname}})
+			if err := s.SetConditionAlert(ctx, "warning", "cert_expiring", "endpoint", e.EndpointID,
+				e.Hostname+": client certificate expires "+e.CertNotAfter[:10]+" and has not been renewed (agent offline?)", det); err != nil {
 				return err
 			}
 		}
+	}
+	if err := s.tx(ctx, func(tx *sql.Tx) error {
+		return s.resolveAlertsExcept(tx, "cert_expiring", expiring, "the client certificate was renewed (or the endpoint retired)")
+	}); err != nil {
+		return err
 	}
 	xs, err := s.ListExceptions(ctx)
 	if err != nil {

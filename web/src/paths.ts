@@ -10,17 +10,18 @@ export const paths = {
   overview: "/",
   alerts: "/alerts",
   // Patches
-  /** Updates: what the fleet needs and how each update stands ("view=all" = everything, not just what needs action). */
-  updates: (view?: "all") => (view ? `/patches/updates?view=${view}` : "/patches/updates"),
+  /** Needed: what the fleet needs and how each update stands ("view=all" = everything, not just what needs action). */
+  needed: (view?: "all") => (view ? `/patches/needed?view=${view}` : "/patches/needed"),
+  /** Library: everything that could be imported (untrusted index from update intelligence). */
+  library: (q?: string) => (q ? `/patches/library?q=${enc(q)}` : "/patches/library"),
   catalog: (packageId?: string | null) => (packageId ? `/patches/catalog/${enc(packageId)}` : "/patches/catalog"),
-  /** Downloads in the acquisition zone + bundles that arrived through the transfer. */
-  transfers: "/patches/transfers",
+  /** Imports: what was asked for, what the acquisition zone downloaded, and what arrived through the transfer. */
+  imports: "/patches/imports",
   // Deployments
   deployments: "/deployments",
   deployment: (id: string) => `/deployments/${enc(id)}`,
   newDeployment: "/deployments/new",
   windows: "/deployments/windows",
-  exceptions: "/deployments/exceptions",
   // Endpoints
   endpoints: "/endpoints",
   endpoint: (id: string) => `/endpoints/${enc(id)}`,
@@ -31,7 +32,10 @@ export const paths = {
     const q = filter ? new URLSearchParams(filter).toString() : "";
     return q ? `/reports/audit?${q}` : "/reports/audit";
   },
+  exceptions: "/reports/exceptions",
   // Settings
   server: "/settings/server",
   users: "/settings/users",
+  /** Agent versions: offpatch agent packages (kept out of the Catalog). */
+  agentVersions: (packageId?: string | null) => (packageId ? `/settings/agents/${enc(packageId)}` : "/settings/agents"),
 };

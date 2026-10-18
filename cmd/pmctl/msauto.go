@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"offpatch/internal/acqstatus"
@@ -166,7 +167,7 @@ func (r *msRun) fetch(cd msCand, prereq map[string]bool) {
 	}
 	res, err := acquire.FetchKB(r.ctx, r.cat, r.ms, acquire.FetchKBOptions{KB: cd.kb, Product: catProd, Arch: p.Arch, Match: p.Match,
 		MinBuild: p.MinBuild, MaxBuild: p.MaxBuild, Severity: cd.severity, PackageID: cd.id, OutDir: r.downloads, SpecPath: r.spec,
-		SkipPrerequisite: r.delivered})
+		SkipPrerequisite: r.delivered, RecordUBR: r.c.ExpectedUBR, ExpectedUBR: r.st.WindowsUBR[strings.ToUpper(cd.kb)+"/"+strconv.Itoa(p.MinBuild)]})
 	if err != nil {
 		r.fail(cd.id, err)
 		return
