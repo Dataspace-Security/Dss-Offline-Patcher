@@ -29,8 +29,9 @@ single-server deployment. Then:
 
 1. Move the offline root key off the server: `sudo ./install-ubuntu.sh --export-root-key /media/usb`.
 2. Sign in at the URL the installer prints (`https://<server name>:8443`; the name is `--domain`,
-   default `dsspatcher.internal`, and must resolve to the server on the admins' PCs: internal DNS
-   or the hosts-file line the installer prints, see §5.5) as
+   default `dsspatcher.local`, which the server announces by mDNS so admin PCs on the same
+   network segment find it with no setup; from other subnets use internal DNS or the hosts-file
+   line the installer prints, see §5.5) as
    `superadmin@dataspacesecurity.com` with the default password (vendor handbook) and change the password.
 3. **Settings → Users**: create the bank's Admin.
 4. **Endpoints → Create enrollment token** → run the PowerShell line on each PC as Administrator
@@ -677,7 +678,8 @@ that was offline past its certificate expiry cannot renew and must be re-enrolle
 ### 5.5 Server name and certificates
 
 **The name is for the console; agents use the IP.** The installer's `--domain NAME` (default
-`dsspatcher.internal`, or the name an earlier install used) becomes `server_name` in
+`dsspatcher.local`, or the name an earlier install used: upgrades keep the recorded name unless
+`--domain` is given) becomes `server_name` in
 `pmserver.json`: browsers open the console at `https://<server name>:8443`. Agents never use the
 name: they connect to `agent_url`, by default `https://<agent_ip>:8443`, where `agent_ip` is the
 server's IP (detected; set it in `pmserver.json` on servers with several addresses). The
@@ -691,12 +693,49 @@ pin the CA, not this certificate, so they keep working). `agent_url` can still b
 `curl -sI https://example.com | grep -i strict-transport`) unless the console gets a public or
 bank certificate. Browsers then accept only certificates they already trust for every subdomain
 and remove "Proceed anyway", so the internal certificate is blocked outright until the internal
-CA is trusted on that PC. That is why the default is `dsspatcher.internal`: `.internal` is
-reserved for private networks and never has public DNS or HSTS.
+CA is trusted on that PC. That is why the default is `dsspatcher.local`: `.local` is reserved for
+multicast DNS on the local link (RFC 6762) and never has public DNS or HSTS. (`.internal`, the
+previous default, is equally safe when the name is served by internal DNS.)
 
-The name must resolve to the server's IP **on the admins' PCs only** (browsers), either by an
-internal DNS A record or by one hosts-file line on each admin PC, which the installer prints, for
-example:
+The name must resolve to the server's IP **on the admins' PCs only** (browsers).
+
+**Found automatically on the local network (mDNS).** When the name ends in `.local` (the default)
+the installer (role all/server) installs `avahi-daemon` and `avahi-utils` if missing and runs
+`offpatch-mdns.service` (`avahi-publish -a -R <name> <IP>`): the server answers multicast DNS
+queries for the name with its IP. Windows 10/11, macOS and Linux desktops resolve `*.local` names by
+mDNS out of the box, so admin PCs **on the same network segment** open `https://dsspatcher.local:8443`
+with no DNS record and no hosts file. Details and limits:
+
+- mDNS is multicast (224.0.0.251 / ff02::fb, UDP 5353) and does not cross routers: it works within
+  one subnet / VLAN. PCs on other subnets need an internal DNS A record or a hosts-file line (below),
+  unless the network team runs an mDNS gateway/reflector between the VLANs.
+- Windows: name resolution by mDNS must not be disabled by policy (registry
+  `HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\EnableMDNS` = 0 turns it off), and the
+  Windows Firewall rule *mDNS (UDP-In)* must allow the answers; it is on for Domain/Private
+  networks and often blocked on networks marked Public. If the bank's own DNS domain ends in
+  `.local` (old AD naming), Windows may send the name to DNS instead: use a DNS record then.
+- Only the interface carrying the server's IP announces the name: when the server has other
+  interfaces, the installer sets `allow-interfaces=<that interface>` in
+  `/etc/avahi/avahi-daemon.conf` (marked by a comment; an `allow-interfaces` an administrator set
+  is respected and only warned about). The host's own name record (`<hostname>.local`) is not
+  changed; if the console name is the host's own mDNS name, no extra record is published. The name
+  is not published when another device already answers to it (the installer warns: pick another
+  `--domain <name>.local`).
+- When ufw is active the installer allows UDP 5353 from the server's local subnet (it never
+  enables ufw). The egress lock (§0) does not affect avahi: it matches only the `offpatch` and
+  `offpatch-acq` accounts, and avahi runs as user `avahi`.
+- `--no-mdns` turns it off (remembered; `--mdns` turns it back on). A name that does not end in
+  `.local` (for example `--domain patcher.bank.example`) is never published by mDNS and relies on
+  DNS or hosts files as before. If the server's IP changes, re-run the installer to publish the new
+  address. `--uninstall` removes the unit, the `avahi-daemon.conf` line and the ufw rule; the avahi
+  packages are removed only by `--purge`, and only when this installer installed them.
+- Test from an admin PC: Windows PowerShell `Resolve-DnsName dsspatcher.local` (or
+  `ping dsspatcher.local`), Linux `avahi-resolve -n dsspatcher.local`, macOS
+  `dns-sd -G v4 dsspatcher.local`. On the server: `systemctl status offpatch-mdns`,
+  `sudo ./install-ubuntu.sh --status`.
+
+**Other subnets, or a non-`.local` name:** an internal DNS A record, or one hosts-file line on each
+admin PC, which the installer prints, for example:
 
 ```text
 10.0.0.5 patcher.bank.example # DSS Patcher

@@ -23,11 +23,16 @@
 #
 # Options:
 #   --role all|server|acquisition|agent  default: the role of an earlier install, else all
-#   --domain NAME                     the console's DNS name: browsers open https://NAME:<port>, and the
-#                                     internal certificate includes it (default dsspatcher.internal, or
-#                                     the name of an earlier install). Resolve it by internal DNS or a
-#                                     hosts-file line on the ADMINS' PCs only. Agents never use it: they
-#                                     connect to https://<server IP>:<port> (no DNS/hosts on endpoints)
+#   --domain NAME                     the console's name: browsers open https://NAME:<port>, and the
+#                                     internal certificate includes it (default dsspatcher.local, or
+#                                     the name of an earlier install). A *.local name is published on
+#                                     this machine's network segment by mDNS (avahi): admin PCs on the
+#                                     same subnet/VLAN find it with no DNS or hosts file. Any other name
+#                                     (e.g. patcher.bank.example) needs internal DNS or a hosts-file line
+#                                     on the ADMINS' PCs. Agents never use it: they connect to
+#                                     https://<server IP>:<port> (no DNS/hosts on endpoints)
+#   --no-mdns                         do not publish the *.local console name by mDNS (remembered;
+#                                     --mdns turns it back on). Admin PCs then need DNS or a hosts line
 #   --hosts "pm.corp.local,10.0.0.5"  extra names/IPs for the server certificate (first install)
 #   --server-ip IP                    accepted for compatibility and ignored: agents connect by IP
 #                                     (--server https://<server IP>:<port>); /etc/hosts is not changed
@@ -86,9 +91,10 @@ ALLOW_FROM=()
 ADMIN_EMAIL="superadmin@dataspacesecurity.com"
 UNINSTALL=0 PURGE=0 STATUS=0 YES=0
 EGRESS_LOCK_IN=""                    # 1 / 0 from --egress-lock / --no-egress-lock; empty = remembered or 1
+MDNS_IN=""                           # 1 / 0 from --mdns / --no-mdns; empty = remembered or 1
 EXPORT_ROOT_KEY=""                   # --export-root-key DIR
 ADMIN_EMAIL_SET=0
-DEFAULT_DOMAIN="dsspatcher.internal"   # --domain default: .internal is reserved for private networks (ICANN 2024), never public, no HSTS
+DEFAULT_DOMAIN="dsspatcher.local"   # --domain default: .local is resolved by mDNS on the local network (RFC 6762), never public DNS
 DOMAIN_IN="" SERVER_IP_IN="" SERVER_NAME=""
 PUBLIC_DOMAIN_IN="" PUBLIC_CERT_IN="" PUBLIC_KEY_IN="" ACME_CHALLENGE="" CF_CREDS="" ACME_EMAIL="" AGENT_URL_IN=""
 OTHER_ARGS=0                         # 1 = an option other than the public-certificate ones was given
@@ -158,6 +164,8 @@ while [ $# -gt 0 ]; do
     --admin-email) ADMIN_EMAIL="$2"; ADMIN_EMAIL_SET=1; shift ;;
     --no-egress-lock) EGRESS_LOCK_IN=0 ;;
     --egress-lock) EGRESS_LOCK_IN=1 ;;
+    --no-mdns) MDNS_IN=0 ;;
+    --mdns) MDNS_IN=1 ;;
     --export-root-key) EXPORT_ROOT_KEY="$2"; shift ;;
     --uninstall) UNINSTALL=1 ;;
     --purge) PURGE=1 ;;
@@ -187,6 +195,7 @@ if [ $STATUS = 0 ] && [ $UNINSTALL = 0 ] && [ -z "$EXPORT_ROOT_KEY" ]; then
 fi
 [ "$(id -u)" -eq 0 ] || die "run as root: sudo $0 $*"
 EGRESS_LOCK=${EGRESS_LOCK_IN:-$(state_get EGRESS_LOCK)}; EGRESS_LOCK=${EGRESS_LOCK:-1}
+MDNS=${MDNS_IN:-$(state_get MDNS)}; MDNS=${MDNS:-1}
 
 # Values end up in JSON, systemd units and ufw rules: accept plain paths / numbers / CIDRs only.
 safe_path() { [[ "$1" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "$2 must be an absolute path of letters, digits, . _ - / (got: $1)"; }
@@ -518,6 +527,236 @@ check_public_https() { # port
 BACKUP_DIR=${BACKUP_DIR_IN:-$(state_get BACKUP_DIR)}; BACKUP_DIR=${BACKUP_DIR:-$DEFAULT_BACKUP_DIR}
 BACKUP_KEEP=${BACKUP_KEEP_IN:-$(state_get BACKUP_KEEP)}; BACKUP_KEEP=${BACKUP_KEEP:-$DEFAULT_BACKUP_KEEP}
 
+# ---------------------------------------------------------------- console name on the LAN (mDNS)
+# A *.local console name (default dsspatcher.local) is answered by avahi-daemon on the network
+# segment of the chosen IP: offpatch-mdns.service runs `avahi-publish -a -R NAME IP` (an extra
+# address record; the host's own name record is left alone). Windows 10/11, macOS and Linux
+# desktops resolve *.local by mDNS out of the box. Multicast does not cross routers: PCs on other
+# subnets/VLANs still need a DNS record or a hosts-file line.
+MDNS_UNIT=/etc/systemd/system/offpatch-mdns.service
+AVAHI_CONF=/etc/avahi/avahi-daemon.conf
+MDNS_MARK="# offpatch: the next line is set by install-ubuntu.sh (console name over mDNS); --uninstall removes it"
+MDNS_PKGS_NOW=$(state_get MDNS_PKGS)   # packages this installer installed for mDNS (removed only by --purge)
+MDNS_UFW_NOW=$(state_get MDNS_UFW)     # ufw sources opened for UDP 5353 (remembered: MDNS_UFW)
+MDNS_ACTIVE=0                          # 1 = the console name resolves by mDNS (checked)
+MDNS_NOTE=""                           # why not, for the summary
+
+pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
+iface_of_ip() { ip -4 -o addr show 2>/dev/null | awk -v ip="$1" '{a = $4; sub(/\/.*/, "", a); if (a == ip) { print $2; exit }}'; }
+# Uncommented allow-interfaces in [server] of avahi-daemon.conf: "ours|theirs|none<TAB>value".
+avahi_allow_line() {
+  [ -f "$AVAHI_CONF" ] || { printf 'none\t\n'; return 0; }
+  awk -v mark="$MDNS_MARK" '
+    /^[[:space:]]*\[/ { sec = $0; gsub(/[][[:space:]]/, "", sec) }
+    sec == "server" && /^[[:space:]]*allow-interfaces[[:space:]]*=/ {
+      v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v)
+      printf "%s\t%s\n", (prev == mark ? "ours" : "theirs"), v; found = 1; exit }
+    { prev = $0 }
+    END { if (!found) printf "none\t\n" }' "$AVAHI_CONF"
+}
+avahi_strip_ours() { # file: drop our marker and the allow-interfaces line after it
+  awk -v mark="$MDNS_MARK" '$0 == mark { skip = 1; next }
+    skip { skip = 0; if ($0 ~ /^[[:space:]]*allow-interfaces[[:space:]]*=/) next } { print }' "$1"
+}
+avahi_set_allow() { # iface; returns 0 when the file changed
+  local tmp; tmp=$(mktemp)
+  [ -f "$AVAHI_CONF" ] || : > "$AVAHI_CONF"
+  avahi_strip_ours "$AVAHI_CONF" | awk -v mark="$MDNS_MARK" -v line="allow-interfaces=$1" '
+    { print }
+    /^[[:space:]]*\[server\][[:space:]]*$/ && !done { print mark; print line; done = 1 }
+    END { if (!done) { print ""; print "[server]"; print mark; print line } }' > "$tmp"
+  if cmp -s "$tmp" "$AVAHI_CONF"; then rm -f "$tmp"; return 1; fi
+  cat "$tmp" > "$AVAHI_CONF"; rm -f "$tmp"   # keep owner and mode
+  return 0
+}
+avahi_unset_allow() { # returns 0 when the file changed
+  [ -f "$AVAHI_CONF" ] && grep -qxF "$MDNS_MARK" "$AVAHI_CONF" || return 1
+  local tmp; tmp=$(mktemp)
+  avahi_strip_ours "$AVAHI_CONF" > "$tmp"; cat "$tmp" > "$AVAHI_CONF"; rm -f "$tmp"
+  return 0
+}
+mdns_resolve() { command -v avahi-resolve >/dev/null || return 0; timeout 6 avahi-resolve -4 -n "$1" 2>/dev/null | awk '{print $2; exit}' || true; }
+
+# Stop publishing and undo this installer's avahi/ufw changes; avahi itself stays installed.
+remove_mdns() {
+  local had=0 c
+  if [ -f "$MDNS_UNIT" ]; then
+    had=1
+    [ $HAVE_SYSTEMD = 0 ] || systemctl disable --now offpatch-mdns.service >/dev/null 2>&1 || true
+    rm -f "$MDNS_UNIT"; [ $HAVE_SYSTEMD = 0 ] || systemctl daemon-reload
+  fi
+  if avahi_unset_allow; then
+    ok "avahi-daemon.conf: removed the allow-interfaces line this installer added"
+    if [ $HAVE_SYSTEMD = 1 ] && systemctl is-active --quiet avahi-daemon; then systemctl restart avahi-daemon || true; fi
+  fi
+  for c in $MDNS_UFW_NOW; do
+    command -v ufw >/dev/null && ufw delete allow proto udp from "$c" to any port 5353 >/dev/null 2>&1 && ok "ufw: removed the mDNS rule (UDP 5353 from $c)"
+  done
+  MDNS_UFW_NOW=""
+  [ $had = 0 ] || ok "stopped publishing the console name by mDNS (offpatch-mdns.service removed)"
+  return 0
+}
+
+# --purge: remove the avahi packages this installer added, unless something else now needs them.
+purge_mdns_pkgs() { # packages
+  local p left="" n
+  for p in "$@"; do pkg_installed "$p" && left="$left $p"; done
+  [ -n "$left" ] || return 0
+  n=$(apt-get -s remove $left 2>/dev/null | grep -c '^Remv ' || true)
+  if [ "$n" = "$(wc -w <<< "$left")" ] && apt-get remove --purge -y -qq $left >/dev/null 2>&1; then
+    ok "removed$left (installed by this installer for mDNS)"
+  else
+    warn "kept$left: other packages depend on them (sudo apt-get remove$left to see what)"
+  fi
+  return 0
+}
+
+install_mdns_pkgs() { # returns 1 when avahi is not available
+  local p missing=""
+  for p in avahi-daemon avahi-utils; do pkg_installed "$p" || missing="$missing $p"; done
+  [ -n "$missing" ] || return 0
+  if ! command -v apt-get >/dev/null; then MDNS_NOTE="avahi not installed"; warn "install$missing, then re-run (no apt-get)"; return 1; fi
+  export DEBIAN_FRONTEND=noninteractive
+  if apt-get install -y -qq --no-install-recommends $missing >/dev/null 2>&1 \
+     || { apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq --no-install-recommends $missing >/dev/null 2>&1; }; then
+    MDNS_PKGS_NOW=$(printf '%s\n' $MDNS_PKGS_NOW $missing | awk 'NF && !seen[$0]++' | paste -sd' ' -)
+    ok "installed$missing"
+    return 0
+  fi
+  MDNS_NOTE="could not install$missing"
+  warn "could not install$missing (no package source reachable?). Install them (offline: apt-get download on a"
+  warn "connected Ubuntu of the same release, then sudo dpkg -i *.deb), then re-run this installer"
+  return 1
+}
+
+# Interfaces: announce only on the interface carrying $IP (a second / public interface stays
+# silent). An allow-interfaces the admin set is respected; ours is added only when the host has
+# other interfaces with addresses.
+configure_avahi_ifaces() { # iface; sets AVAHI_CHANGED
+  local iface=$1 others st val
+  AVAHI_CHANGED=0
+  others=$(ip -o addr show scope global 2>/dev/null | awk '{print $2}' | awk '!seen[$0]++' | grep -vxF "$iface" | paste -sd' ' - || true)
+  IFS=$'\t' read -r st val <<< "$(avahi_allow_line)"
+  if [ "$st" = theirs ]; then
+    if printf '%s\n' "$val" | tr ', ' '\n\n' | grep -qxF "$iface"; then
+      ok "avahi-daemon.conf: allow-interfaces=$val kept (set by an admin; includes $iface)"
+    else
+      warn "avahi-daemon.conf has allow-interfaces=$val (set by an admin) without $iface: the console name is"
+      warn "not announced there. Add $iface to it and: sudo systemctl restart avahi-daemon (not changed by this installer)"
+    fi
+  elif [ -n "$others" ] || [ "$st" = ours ]; then
+    if avahi_set_allow "$iface"; then
+      AVAHI_CHANGED=1; ok "avahi-daemon.conf: allow-interfaces=$iface (not announced on: ${others:-no other interface})"
+    else
+      ok "avahi-daemon.conf: already limited to $iface"
+    fi
+  else
+    ok "avahi: $iface is the only network interface; avahi-daemon.conf unchanged"
+  fi
+  if grep -Eq "^[[:space:]]*deny-interfaces[[:space:]]*=.*(^|[=, ])$iface([, ]|$)" "$AVAHI_CONF" 2>/dev/null; then
+    warn "avahi-daemon.conf: deny-interfaces lists $iface: the console name is not announced there"
+  fi
+  return 0
+}
+
+# ufw (only when active; never enabled here): mDNS queries (UDP 5353) from the local subnet of $IP.
+mdns_firewall() {
+  command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active" || return 0
+  local c old prev=$MDNS_UFW_NOW
+  MDNS_UFW_NOW=""
+  for c in $(local_subnets "$IP"); do
+    ufw allow proto udp from "$c" to any port 5353 comment 'mDNS: DSS Patcher console name' >/dev/null \
+      && { ok "ufw: UDP 5353 (mDNS) open from $c"; MDNS_UFW_NOW="${MDNS_UFW_NOW:+$MDNS_UFW_NOW }$c"; }
+  done
+  for old in $prev; do   # the subnet changed since the last run
+    case " $MDNS_UFW_NOW " in *" $old "*) ;; *) ufw delete allow proto udp from "$old" to any port 5353 >/dev/null 2>&1 && ok "ufw: removed the old mDNS rule for $old" ;; esac
+  done
+  return 0
+}
+
+write_mdns_unit() { # avahi-publish name ip
+  cat > "$MDNS_UNIT" <<EOF
+[Unit]
+Description=DSS Patcher console name $2 -> $3 on the local network (mDNS)
+Documentation=man:avahi-publish(1)
+Requires=avahi-daemon.service
+After=avahi-daemon.service
+# avahi-daemon restarted: publish again
+PartOf=avahi-daemon.service
+
+[Service]
+ExecStart=$1 -a -R $2 $3
+Restart=always
+RestartSec=10
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target avahi-daemon.service
+EOF
+  chmod 0644 "$MDNS_UNIT"
+}
+
+setup_mdns() {
+  step "Console name on the local network (mDNS): $SERVER_NAME → ${IP:-?}"
+  local iface pub host_rec other got
+  if [ $HAVE_SYSTEMD = 0 ]; then
+    MDNS_NOTE="no systemd"; warn "no systemd: $SERVER_NAME is not published. Run from your init: avahi-publish -a -R $SERVER_NAME ${IP:-<IP>}"; return 0
+  fi
+  [ -n "${IP:-}" ] && iface=$(iface_of_ip "$IP") && [ -n "$iface" ] \
+    || { MDNS_NOTE="no interface for ${IP:-the server IP}"; warn "cannot find the network interface of ${IP:-the server IP}: $SERVER_NAME is not published"; return 0; }
+  install_mdns_pkgs || return 0
+  if [ "$(systemctl is-enabled avahi-daemon.service 2>/dev/null || true)" = masked ]; then
+    MDNS_NOTE="avahi-daemon is masked"; warn "avahi-daemon is masked on this host (local policy?): $SERVER_NAME is not published. Unmask it and re-run, or use --no-mdns"; return 0
+  fi
+  configure_avahi_ifaces "$iface"
+  systemctl enable avahi-daemon.service >/dev/null 2>&1 || true
+  if [ $AVAHI_CHANGED = 1 ]; then systemctl restart avahi-daemon.service; else systemctl start avahi-daemon.service; fi \
+    || { MDNS_NOTE="avahi-daemon did not start"; warn "avahi-daemon did not start (journalctl -u avahi-daemon): $SERVER_NAME is not published"; return 0; }
+  mdns_firewall
+  # The host's own mDNS name (avahi publishes <hostname>.local itself): no alias needed, and a
+  # second record with the same name would collide.
+  host_rec=$(sed -n 's/^[[:space:]]*host-name[[:space:]]*=[[:space:]]*//p' "$AVAHI_CONF" 2>/dev/null | tail -n 1)
+  host_rec=$(printf '%s.local' "${host_rec:-$(hostname -s)}" | tr 'A-Z' 'a-z')
+  if [ "$host_rec" = "$SERVER_NAME" ]; then
+    if [ -f "$MDNS_UNIT" ]; then systemctl disable --now offpatch-mdns.service >/dev/null 2>&1 || true; rm -f "$MDNS_UNIT"; systemctl daemon-reload; fi
+    ok "$SERVER_NAME is this host's own mDNS name (published by avahi-daemon); no alias needed"
+  else
+    # Someone else on the segment already answering to the name: do not fight over it.
+    [ ! -f "$MDNS_UNIT" ] || systemctl stop offpatch-mdns.service >/dev/null 2>&1 || true
+    other=$(mdns_resolve "$SERVER_NAME")
+    if [ -n "$other" ] && [ "$other" != "$IP" ]; then
+      MDNS_NOTE="another device answers to $SERVER_NAME ($other)"
+      warn "another device on this network already answers to $SERVER_NAME ($other): not published."
+      warn "Re-run with --domain <other-name>.local (or --no-mdns and a DNS record)"
+      if [ -f "$MDNS_UNIT" ]; then systemctl disable offpatch-mdns.service >/dev/null 2>&1 || true; rm -f "$MDNS_UNIT"; systemctl daemon-reload; fi
+      return 0
+    fi
+    pub=$(command -v avahi-publish || echo /usr/bin/avahi-publish)
+    write_mdns_unit "$pub" "$SERVER_NAME" "$IP"
+    systemctl daemon-reload
+    systemctl enable offpatch-mdns.service >/dev/null 2>&1 || true
+    systemctl restart offpatch-mdns.service || true
+  fi
+  for _ in 1 2 3 4 5; do got=$(mdns_resolve "$SERVER_NAME"); [ "$got" = "$IP" ] && break; sleep 1; done
+  if [ "$got" = "$IP" ]; then
+    MDNS_ACTIVE=1
+    ok "$SERVER_NAME → $IP answered by mDNS on $iface (offpatch-mdns.service; avahi runs as user avahi, the egress lock does not apply)"
+  else
+    MDNS_NOTE="published, but not confirmed"
+    warn "$SERVER_NAME did not resolve to $IP yet (got: ${got:-nothing}). Check: systemctl status offpatch-mdns; avahi-resolve -n $SERVER_NAME"
+    journalctl -u offpatch-mdns.service -n 3 -o cat 2>/dev/null | sed 's/^/      /' || true
+  fi
+  return 0
+}
+
 # ---------------------------------------------------------------- status
 svc_state() { if [ $HAVE_SYSTEMD = 1 ]; then systemctl is-active "$1" 2>/dev/null || true; else pgrep -f "$2" >/dev/null && echo "running (no systemd)" || echo "not running"; fi; }
 
@@ -542,6 +781,11 @@ if [ $STATUS = 1 ]; then
     echo "egress lock:       NOT loaded ($EGRESS_NFT exists): sudo systemctl restart offpatch-egress"
   elif [ "$(state_get ROLE)" = all ]; then
     echo "egress lock:       off (--no-egress-lock)"
+  fi
+  if [ -f "$MDNS_UNIT" ]; then
+    echo "console by mDNS:   $(svc_state offpatch-mdns 'avahi-publish') ($(sed -n 's/^ExecStart=[^ ]* -a -R //p' "$MDNS_UNIT"); offpatch-mdns.service; test: avahi-resolve -n $(cfg_get server_name))"
+  elif [ "$(state_get MDNS)" = 0 ]; then
+    echo "console by mDNS:   off (--no-mdns)"
   fi
   [ -f "$ETC/keys/root.key" ] && echo "root key:          $ETC/keys/root.key is on this server: sudo $0 --export-root-key <offline media>"
   [ -f "$ETC/console-url.txt" ] && echo "console:           $(cat "$ETC/console-url.txt")"
@@ -601,6 +845,7 @@ list_secrets() {
 if [ $UNINSTALL = 1 ]; then
   AUDIT_LEFT=$(cfg_path audit_export_dir)
   PUB_MODE_LEFT=$(state_get PUBLIC_MODE); PUB_LEFT=$(state_get PUBLIC_NAMES); PUB_LEFT=${PUB_LEFT%%,*}
+  MDNS_PKGS_LEFT=$(state_get MDNS_PKGS)
   if [ $PURGE = 1 ] && [ $YES = 0 ]; then
     [ -t 0 ] || die "--purge deletes signing keys, the CA key, tokens and all data. Non-interactive: add --yes"
     banner "--purge deletes $ETC (signing keys, CA key, tokens, config)," \
@@ -628,6 +873,13 @@ if [ $UNINSTALL = 1 ]; then
     nft delete table inet "$EGRESS_TABLE" && ok "removed the egress lock (nftables table $EGRESS_TABLE)"
   fi
   rm -f "$EGRESS_NFT"
+  # Console name by mDNS: the unit, our avahi-daemon.conf line and ufw rules always go; the avahi
+  # packages only with --purge and only when this installer installed them.
+  remove_mdns
+  if [ -n "$MDNS_PKGS_LEFT" ]; then
+    if [ $PURGE = 1 ]; then purge_mdns_pkgs $MDNS_PKGS_LEFT
+    else warn "kept $MDNS_PKGS_LEFT (installed by this installer for mDNS): removed by --purge, or: sudo apt-get remove $MDNS_PKGS_LEFT"; fi
+  fi
   for b in pmserver pmctl pmagent; do
     [ "$(readlink "/usr/local/bin/$b" 2>/dev/null)" = "$PREFIX/bin/$b" ] && rm -f "/usr/local/bin/$b"
   done
@@ -1504,6 +1756,16 @@ PY
   fi
 fi
 
+# ---------------------------------------------------------------- console name by mDNS
+# Only a *.local name is published (a DNS name such as patcher.bank.example keeps relying on DNS).
+if [ $IS_SERVER = 1 ] && [ "$MDNS" = 1 ] && [[ "$SERVER_NAME" == *.local ]]; then
+  setup_mdns
+else
+  if [ $IS_SERVER = 1 ] && [ "$MDNS" = 0 ]; then MDNS_NOTE="--no-mdns"
+  elif [ $IS_SERVER = 1 ]; then MDNS_NOTE="$SERVER_NAME is not a .local name"; fi
+  remove_mdns
+fi
+
 # Lab (role all): run `pmctl auto -only-requests` as soon as the server queues a request.
 # pmctl moves handled requests into done/ or rejected/, so the glob only matches pending ones.
 # A request that keeps failing stays there: after a failed or partial run the service waits
@@ -1798,6 +2060,9 @@ BACKUP_DIR=$BACKUP_DIR
 BACKUP_KEEP=$BACKUP_KEEP
 ALLOW_FROM=${ALLOW_FROM[*]+"${ALLOW_FROM[*]}"}
 EGRESS_LOCK=$EGRESS_LOCK
+MDNS=$MDNS
+MDNS_PKGS=$MDNS_PKGS_NOW
+MDNS_UFW=$MDNS_UFW_NOW
 PUBLIC_MODE=$( [ $PUBLIC_OK = 1 ] && echo "$PUBLIC_MODE" || state_get PUBLIC_MODE )
 PUBLIC_NAMES=$( [ $PUBLIC_OK = 1 ] && echo "$PUBLIC_NAMES" || state_get PUBLIC_NAMES )
 EOF
@@ -1811,14 +2076,23 @@ if [ $IS_SERVER = 1 ]; then
     public_summary "$PORT"
     echo "                  also $URL_PUBLIC (internal CA); sign in with email + password"
     echo "  Browsers:       need TCP $PORT from the admins' networks (ufw: --allow-from; network firewall)"
+  elif [ $MDNS_ACTIVE = 1 ]; then
+    echo "  Console:        $URL_PUBLIC — found automatically on this network (mDNS); from other subnets add a DNS record or hosts line"
+    echo "                  (sign in with email + password)"
   else
     echo "  Console:        $URL_PUBLIC   (sign in with email + password)"
   fi
   AGENT_URL_NOW=${AGENT_URL_NOW:-$(cfg_get agent_url)}; AGENT_URL_NOW=${AGENT_URL_NOW:-$URL_AGENT}
   [ $PUBLIC_OK = 1 ] || echo "  Agents connect to: $AGENT_URL_NOW   (by IP: no DNS or hosts-file entry on the PCs)"
   echo "  PCs need:       TCP $PORT from every PC to ${IP:-this server} (nothing connects to the PCs)"
-  if [ -n "$SERVER_NAME" ] && [ -n "${IP:-}" ]; then
+  if [ $MDNS_ACTIVE = 1 ] && [ -n "${IP:-}" ]; then
+    echo "  Console name:   $SERVER_NAME answers by mDNS on this server's network segment (one subnet/VLAN; Windows 10/11,"
+    echo "                  macOS, Linux resolve it with no setup). Test on a PC: Resolve-DnsName $SERVER_NAME (Windows),"
+    echo "                  avahi-resolve -n $SERVER_NAME (Linux). Admin PCs on OTHER subnets: internal DNS A record, or:"
+    echo "                    $IP $SERVER_NAME # DSS Patcher"
+  elif [ -n "$SERVER_NAME" ] && [ -n "${IP:-}" ]; then
     echo "  Console name:   $SERVER_NAME is for the admins' browsers only: it must resolve to $IP on the ADMIN PCs"
+    [ -z "$MDNS_NOTE" ] || [[ "$SERVER_NAME" != *.local ]] || echo "                  (not published by mDNS: $MDNS_NOTE)"
     echo "                  (internal DNS A record, or this hosts-file line on each admin PC; never needed on endpoints):"
     echo "                    $IP $SERVER_NAME # DSS Patcher"
     echo "                  Windows (PowerShell as Administrator):"

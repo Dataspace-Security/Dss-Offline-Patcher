@@ -80,8 +80,10 @@ MFA key, hardened `offpatch-server.service`, daily backup, ufw), plus:
   firewall rules. `acquisition_stale_after` defaults to 3h (hourly runs).
 
 The summary ends with the next steps: the console URL with the server name (`--domain`, for
-browsers), the URL agents connect to (`https://<server IP>:8443`), the hosts-file line for the
-admins' PCs when there is no internal DNS (never needed on endpoints), the super admin
+browsers; with the default `dsspatcher.local` it reads "found automatically on this network
+(mDNS); from other subnets add a DNS record or hosts line"), the URL agents connect to
+(`https://<server IP>:8443`), the hosts-file line for admin PCs on other subnets or without
+internal DNS (never needed on endpoints), the super admin
 email (default password), then 1. sign in and change the password, 2. Settings → Users: create the
 bank's Admin, 3. Endpoints → Create enrollment token → run the PowerShell line on each PC (as
 Administrator), 4. Patches → Needed → Import, Catalog → Approve, Patch this (2 approvals). Each PC
@@ -94,12 +96,27 @@ downloader then shares no machine with the server's data.
 
 Details and configuration keys: [admin guide section 5.5](../07-admin-guide.md#55-server-name-and-certificates).
 
-1. **Name.** `--domain patcher.bank.example` (default `dsspatcher.internal`, or the
-   name of the earlier install). The installer writes `server_name` and `agent_ip` into
-   `pmserver.json`, makes sure the internal server certificate names it and the server's IP
-   (reissuing it on upgrades when not; agents keep working, they pin the CA) and prints the URL
-   `https://<name>:8443` for the console. Create an internal DNS A record, or give admins the
-   printed hosts-file line (`<IP> <name> # DSS Patcher`) for their own PCs. Agents do not use the
+1. **Name.** `--domain patcher.bank.example` (default `dsspatcher.local`, or the
+   name of the earlier install: upgrades keep it unless `--domain` is given). The installer writes
+   `server_name` and `agent_ip` into `pmserver.json`, makes sure the internal server certificate
+   names it and the server's IP (reissuing it on upgrades when not; agents keep working, they pin
+   the CA) and prints the URL `https://<name>:8443` for the console.
+   - **`*.local` name (default): found automatically by mDNS.** The installer installs
+     `avahi-daemon`/`avahi-utils` when missing (needs a package source; otherwise it warns and
+     carries on), limits avahi to the interface carrying the server IP when there are others, and
+     runs `offpatch-mdns.service` (`avahi-publish -a -R <name> <IP>`). With ufw active it allows UDP
+     5353 from the local subnet. Admin PCs on the **same subnet/VLAN** (Windows 10/11, macOS, Linux)
+     then open `https://dsspatcher.local:8443` with no DNS or hosts file. Multicast does not cross
+     routers: PCs on other subnets need a DNS record or the hosts-file line. On Windows, mDNS must
+     not be disabled by policy (`Dnscache\Parameters\EnableMDNS` = 0) and the firewall rule *mDNS
+     (UDP-In)* must be allowed (it is on Domain/Private networks). Test: Windows
+     `Resolve-DnsName dsspatcher.local`; Linux `avahi-resolve -n dsspatcher.local`; on the server
+     `systemctl status offpatch-mdns`. `--no-mdns` turns it off (remembered).
+   - **Any other name**, or admin PCs on other subnets: create an internal DNS A record, or give
+     admins the printed hosts-file line (`<IP> <name> # DSS Patcher`) for their own PCs. A
+     non-`.local` name is never published by mDNS.
+
+   Agents do not use the
    name: they connect to `https://<IP>:8443` (`agent_url`, printed as "Agents connect to"), so
    endpoints need no DNS or hosts-file entry. The Windows enrollment command uses that URL;
    Ubuntu agents: `--role agent --server https://<IP>:8443` (`--server-ip` is accepted and
