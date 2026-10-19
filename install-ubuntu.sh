@@ -23,7 +23,13 @@
 #
 # Options:
 #   --role all|server|acquisition|agent  default: the role of an earlier install, else all
+#   --domain NAME                     the server's DNS name; the console, enrollment commands and agents
+#                                     use https://NAME:<port>, and the internal certificate includes it
+#                                     (default patcher.dataspacesecurity.com, or the name of an earlier
+#                                     install). Resolve it by internal DNS or a hosts-file line (summary)
 #   --hosts "pm.corp.local,10.0.0.5"  extra names/IPs for the server certificate (first install)
+#   --server-ip IP                    role agent: map the --server name to IP in /etc/hosts when it does
+#                                     not resolve (offline networks without DNS)
 #   --port 8443                       server port (first install; re-runs use pmserver.json)
 #   --pubkey FILE / --root-pubkey FILE  role server: public keys from the acquisition host and the
 #                                     offline root key (first install; never overwritten later).
@@ -44,6 +50,24 @@
 #   --with-agent                      role all: also enroll this machine as a managed endpoint
 #   --go-version 1.27.2               Go toolchain to install when building from source
 #
+# Public certificate for the console (optional; role all/server with TLS). Without these options
+# browsers get the internal CA's certificate (distribute ca.pem, e.g. by Group Policy). Agents
+# always keep the internal CA + mTLS on the agent URL. Alone on an existing install they only add
+# or replace the certificate; with other options they run as part of the install or upgrade.
+#   --public-cert FILE --public-key FILE  the bank's own certificate (PEM chain, leaf first) and
+#                                     unencrypted key; no internet needed (recommended for isolated
+#                                     bank networks). Re-run with new files to replace them
+#   --public-domain NAME              console DNS name. With --public-cert: optional (default: the
+#                                     certificate's DNS names). Without: Let's Encrypt via certbot
+#   --acme-challenge auto|http|cloudflare  Let's Encrypt validation (default auto: HTTP-01 when TCP 80
+#                                     is free on this host, else Cloudflare DNS when the credentials
+#                                     file exists, else stop and list the options)
+#   --cloudflare-credentials FILE     root-owned 0600, one line "dns_cloudflare_api_token = <token>"
+#                                     (default /etc/offpatch/acme/cloudflare.ini; never printed)
+#   --acme-email EMAIL                Let's Encrypt account email (default: --admin-email if given)
+#   --agent-url URL                   URL agents enroll against (default https://<--domain>:<port>; may
+#                                     be the public name: agents ask for their certificate by TLS ALPN)
+#
 # Re-running (same role) upgrades: keys, certificates, tokens, config and data are kept;
 # a verified backup is taken first and the previous binaries are kept in /opt/offpatch/bin.prev.
 set -euo pipefail
@@ -62,6 +86,11 @@ ADMIN_EMAIL="superadmin@dataspacesecurity.com"
 UNINSTALL=0 PURGE=0 STATUS=0 YES=0
 EGRESS_LOCK_IN=""                    # 1 / 0 from --egress-lock / --no-egress-lock; empty = remembered or 1
 EXPORT_ROOT_KEY=""                   # --export-root-key DIR
+ADMIN_EMAIL_SET=0
+DEFAULT_DOMAIN="patcher.dataspacesecurity.com"   # --domain default (the only built-in name)
+DOMAIN_IN="" SERVER_IP_IN="" SERVER_NAME=""
+PUBLIC_DOMAIN_IN="" PUBLIC_CERT_IN="" PUBLIC_KEY_IN="" ACME_CHALLENGE="" CF_CREDS="" ACME_EMAIL="" AGENT_URL_IN=""
+OTHER_ARGS=0                         # 1 = an option other than the public-certificate ones was given
 
 PREFIX=/opt/offpatch                 # binaries
 ETC=/etc/offpatch                    # config, PKI, keys
@@ -78,6 +107,9 @@ EGRESS_NFT=/etc/nftables.d/offpatch.nft
 EGRESS_UNIT=/etc/systemd/system/offpatch-egress.service
 DEFAULT_BACKUP_DIR=/var/lib/offpatch-backup
 DEFAULT_BACKUP_KEEP=14
+DEFAULT_CF_CREDS=$ETC/acme/cloudflare.ini
+LE_HOOK=/etc/letsencrypt/renewal-hooks/deploy/offpatch.sh   # copies renewed certificates for pmserver
+PUBLIC_DIR=$ETC/pki/public           # public console certificate as pmserver reads it
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
 
@@ -97,8 +129,12 @@ usage() { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; ex
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --role|--port|--hosts|--go-version|--server|--token|--ca|--pubkey|--root-pubkey|--audit-dir|--allow-from|--backup-dir|--backup-keep|--admin-email|--export-root-key)
+    --role|--port|--hosts|--go-version|--server|--token|--ca|--pubkey|--root-pubkey|--audit-dir|--allow-from|--backup-dir|--backup-keep|--admin-email|--export-root-key|--public-domain|--public-cert|--public-key|--acme-challenge|--cloudflare-credentials|--acme-email|--agent-url|--domain|--server-ip)
       [ $# -ge 2 ] || die "$1 needs a value" ;;
+  esac
+  case "$1" in
+    --public-domain|--public-cert|--public-key|--acme-challenge|--cloudflare-credentials|--acme-email|--agent-url|--yes) ;;
+    *) OTHER_ARGS=1 ;;
   esac
   case "$1" in
     --role) ROLE="$2"; shift ;;
@@ -118,7 +154,7 @@ while [ $# -gt 0 ]; do
     --backup-dir) BACKUP_DIR_IN="$2"; shift ;;
     --backup-keep) BACKUP_KEEP_IN="$2"; shift ;;
     --skip-backup) SKIP_BACKUP=1 ;;
-    --admin-email) ADMIN_EMAIL="$2"; shift ;;
+    --admin-email) ADMIN_EMAIL="$2"; ADMIN_EMAIL_SET=1; shift ;;
     --no-egress-lock) EGRESS_LOCK_IN=0 ;;
     --egress-lock) EGRESS_LOCK_IN=1 ;;
     --export-root-key) EXPORT_ROOT_KEY="$2"; shift ;;
@@ -126,6 +162,15 @@ while [ $# -gt 0 ]; do
     --purge) PURGE=1 ;;
     --yes) YES=1 ;;
     --status) STATUS=1 ;;
+    --public-domain) PUBLIC_DOMAIN_IN=$(printf '%s' "$2" | tr 'A-Z' 'a-z'); PUBLIC_DOMAIN_IN=${PUBLIC_DOMAIN_IN%.}; shift ;;
+    --public-cert) PUBLIC_CERT_IN="$2"; shift ;;
+    --public-key) PUBLIC_KEY_IN="$2"; shift ;;
+    --acme-challenge) ACME_CHALLENGE="$2"; shift ;;
+    --cloudflare-credentials) CF_CREDS="$2"; shift ;;
+    --acme-email) ACME_EMAIL="$2"; shift ;;
+    --agent-url) AGENT_URL_IN="${2%/}"; shift ;;
+    --domain) DOMAIN_IN=$(printf '%s' "$2" | tr 'A-Z' 'a-z'); DOMAIN_IN=${DOMAIN_IN%.}; shift ;;
+    --server-ip) SERVER_IP_IN="$2"; shift ;;
     -h|--help) usage 0 ;;
     *) echo "unknown option: $1"; usage 1 ;;
   esac
@@ -148,6 +193,29 @@ safe_path() { [[ "$1" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "$2 must be an absolute p
 [ -z "$AUDIT_DIR_IN" ] || safe_path "$AUDIT_DIR_IN" --audit-dir
 [ -z "$BACKUP_DIR_IN" ] || safe_path "$BACKUP_DIR_IN" --backup-dir
 [ -z "$BACKUP_KEEP_IN" ] || { [[ "$BACKUP_KEEP_IN" =~ ^[0-9]+$ ]] && [ "$BACKUP_KEEP_IN" -ge 1 ]; } || die "--backup-keep must be a number >= 1"
+# Public console certificate (values end up in JSON and a hook: plain values only).
+valid_domain() { [[ "$1" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; }
+url_host() { local h=${1#*://}; h=${h%%/*}; case "$h" in \[*) h=${h%%]*}; h=${h#[} ;; *) h=${h%:*} ;; esac; printf '%s' "$h" | tr 'A-Z' 'a-z'; }
+PUBLIC_WANTED=0; { [ -n "$PUBLIC_DOMAIN_IN" ] || [ -n "$PUBLIC_CERT_IN" ] || [ -n "$PUBLIC_KEY_IN" ]; } && PUBLIC_WANTED=1
+[ -z "$PUBLIC_DOMAIN_IN" ] || valid_domain "$PUBLIC_DOMAIN_IN" || die "--public-domain must be a DNS name such as patch.bank.example (got: $PUBLIC_DOMAIN_IN)"
+{ [ -n "$PUBLIC_CERT_IN" ] && [ -n "$PUBLIC_KEY_IN" ]; } || { [ -z "$PUBLIC_CERT_IN" ] && [ -z "$PUBLIC_KEY_IN" ]; } || die "--public-cert and --public-key go together"
+[ -z "$PUBLIC_CERT_IN" ] || { safe_path "$PUBLIC_CERT_IN" --public-cert; safe_path "$PUBLIC_KEY_IN" --public-key; }
+if [ -n "$PUBLIC_CERT_IN" ] && { [ -n "$ACME_CHALLENGE" ] || [ -n "$CF_CREDS" ] || [ -n "$ACME_EMAIL" ]; }; then
+  die "--acme-challenge, --cloudflare-credentials and --acme-email are for Let's Encrypt; a provided certificate (--public-cert) needs none of them"
+fi
+ACME_CHALLENGE=${ACME_CHALLENGE:-auto}
+case "$ACME_CHALLENGE" in auto|http|cloudflare) ;; *) die "--acme-challenge must be auto, http or cloudflare" ;; esac
+[ "$ACME_CHALLENGE" = auto ] || [ -n "$PUBLIC_DOMAIN_IN" ] || die "--acme-challenge needs --public-domain"
+CF_CREDS=${CF_CREDS:-$DEFAULT_CF_CREDS}; safe_path "$CF_CREDS" --cloudflare-credentials
+[ -z "$ACME_EMAIL" ] || [[ "$ACME_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || die "--acme-email is not an email address: $ACME_EMAIL"
+if [ -n "$AGENT_URL_IN" ]; then
+  [[ "$AGENT_URL_IN" =~ ^https://([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?$ ]] || die "--agent-url must be https://host:port with no path (got: $AGENT_URL_IN)"
+  [ $PUBLIC_WANTED = 1 ] || die "--agent-url goes with --public-domain or --public-cert"
+fi
+PUBLIC_DOMAIN=$PUBLIC_DOMAIN_IN PUBLIC_MODE="" PUBLIC_NAMES="" ACME_METHOD=""
+[ -z "$DOMAIN_IN" ] || valid_domain "$DOMAIN_IN" || die "--domain must be a DNS name such as patcher.bank.example (got: $DOMAIN_IN)"
+valid_ip() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$1" =~ ^[0-9A-Fa-f]*:[0-9A-Fa-f:.]*$ ]]; }
+[ -z "$SERVER_IP_IN" ] || valid_ip "$SERVER_IP_IN" || die "--server-ip must be an IP address (got: $SERVER_IP_IN)"
 # ufw sources given on an earlier run stay in force unless new --allow-from values are given.
 if [ ${#ALLOW_FROM[@]} -eq 0 ]; then read -r -a ALLOW_FROM <<< "$(state_get ALLOW_FROM)"; fi
 for c in ${ALLOW_FROM[@]+"${ALLOW_FROM[@]}"}; do
@@ -171,6 +239,284 @@ print("" if v is None else (str(v).lower() if isinstance(v, bool) else v))' "$f"
 }
 cfg_path() { local v; v=$(cfg_get "$1"); case "$v" in ""|/*) echo "$v" ;; *) echo "$ETC/$v" ;; esac; }
 
+# ---------------------------------------------------------------- public console certificate
+# Optional. Without --public-domain / --public-cert nothing here runs: browsers get the internal
+# CA's certificate as always. With it, pmserver serves a public certificate to browsers that ask
+# for one of public_tls.names (TLS SNI); agents keep the internal CA + mTLS on the agent URL.
+#   provided     --public-cert/--public-key: the bank's own certificate (no certbot, no internet)
+#   letsencrypt  --public-domain [--acme-challenge auto|http|cloudflare]: certbot, renewed by its
+#                timer; the deploy hook copies renewals to $PUBLIC_DIR and pmserver re-reads them
+#                (within a minute, at once on reload). certbot runs as root: the egress lock
+#                (offpatch accounts only) does not affect it.
+# Secrets (private keys, the Cloudflare token) are never printed.
+
+# TCP 80 is taken: a local listener, or NAT rules forwarding it elsewhere (e.g. Docker with the
+# userland proxy off), where Let's Encrypt's HTTP-01 request would never reach certbot.
+port80_busy() {
+  ss -Hltn 'sport = :80' 2>/dev/null | grep -q . && return 0
+  { iptables -t nat -S 2>/dev/null; nft list ruleset 2>/dev/null; } | grep -Eq -- '(--dport|dport) 80([^0-9]|$)'
+}
+
+check_cf_credentials() { # file
+  local f=$1 mode
+  if [ ! -f "$f" ]; then
+    die "Cloudflare credentials $f not found. Create a Cloudflare API token with Zone > DNS > Edit
+     for the domain's zone, then store it in that file (one line, root only):
+       sudo install -d -m 0700 $(dirname "$f")
+       sudo install -m 0600 /dev/null $f
+       sudo nano $f      # dns_cloudflare_api_token = <token>
+     and re-run."
+  fi
+  [ "$(stat -c %U "$f")" = root ] || die "$f must be owned by root (it holds the Cloudflare API token): sudo chown root:root $f"
+  mode=$(stat -c %a "$f")
+  if [ "$mode" != 600 ] && [ "$mode" != 400 ]; then chmod 0600 "$f"; warn "$f was mode $mode; now 0600"; fi
+  case "$(dirname "$f")" in "$ETC"/*) chown root:root "$(dirname "$f")"; chmod 0700 "$(dirname "$f")" ;; esac
+  grep -Eq '^[[:space:]]*dns_cloudflare_api_token[[:space:]]*=[[:space:]]*[^[:space:]]+' "$f" \
+    || die "$f has no line \"dns_cloudflare_api_token = <token>\""
+  ok "Cloudflare credentials $f (root, mode $(stat -c %a "$f"))"
+}
+
+# Let's Encrypt: pick the challenge before anything changes. An existing certificate for the
+# name keeps the method certbot stored for it (unless --acme-challenge is given).
+resolve_acme_challenge() {
+  if [ "$ACME_CHALLENGE" = auto ] && [ -f "/etc/letsencrypt/renewal/$PUBLIC_DOMAIN.conf" ]; then
+    ACME_METHOD=existing
+    ok "Let's Encrypt certificate for $PUBLIC_DOMAIN exists; certbot keeps renewing it with the method it was issued with"
+    return 0
+  fi
+  case "$ACME_CHALLENGE" in
+    http)
+      ! port80_busy || die "--acme-challenge http needs TCP 80 free on this host, but it is in use ($(ss -Hltnp 'sport = :80' 2>/dev/null | sed -n 's/.*users:((\"\([^\"]*\)\".*/\1/p' | head -n 1)).
+     Use --acme-challenge cloudflare (DNS), or the bank's own certificate: --public-cert FILE --public-key FILE"
+      ACME_METHOD=http ;;
+    cloudflare) check_cf_credentials "$CF_CREDS"; ACME_METHOD=cloudflare ;;
+    auto)
+      if ! port80_busy; then ACME_METHOD=http; ok "TCP 80 is free: Let's Encrypt HTTP-01 (certbot standalone, no credentials)"
+      elif [ -f "$CF_CREDS" ]; then check_cf_credentials "$CF_CREDS"; ACME_METHOD=cloudflare; ok "TCP 80 is in use: Let's Encrypt DNS-01 via Cloudflare"
+      else
+        die "cannot get a certificate for $PUBLIC_DOMAIN automatically: TCP 80 is in use on this host and there are no
+     Cloudflare credentials ($CF_CREDS). Choose one:
+       1. the bank's own certificate (recommended for isolated bank networks):
+            --public-cert FILE --public-key FILE [--public-domain $PUBLIC_DOMAIN]
+       2. DNS validation (domain on Cloudflare): create $CF_CREDS with
+            dns_cloudflare_api_token = <token>   (root, 0600), then --acme-challenge cloudflare
+       3. free TCP 80 on this host during issuance and renewals, then --acme-challenge http
+     Without a public certificate, browsers trust the internal CA once it is distributed
+     (e.g. by Group Policy: $ETC/pki/ca.pem as a Trusted Root Certification Authority)."
+      fi ;;
+  esac
+}
+
+install_certbot() { # method
+  local pkgs="certbot"
+  [ "$1" = cloudflare ] && pkgs="certbot python3-certbot-dns-cloudflare"
+  if command -v certbot >/dev/null && { [ "$1" != cloudflare ] || dpkg -s python3-certbot-dns-cloudflare >/dev/null 2>&1; }; then
+    ok "certbot is installed"; return 0
+  fi
+  command -v apt-get >/dev/null || die "install $pkgs, then re-run"
+  export DEBIAN_FRONTEND=noninteractive
+  # shellcheck disable=SC2086
+  { apt-get update -qq && apt-get install -y -qq $pkgs >/dev/null; } || die "apt-get install $pkgs failed"
+  ok "installed $pkgs"
+}
+
+write_le_hook() { # domain
+  install -d -m 0755 "$(dirname "$LE_HOOK")"
+  cat > "$LE_HOOK" <<HOOK
+#!/bin/sh
+# DSS Patcher (offpatch): console certificate for $1. Written by install-ubuntu.sh; re-runs rewrite it.
+# certbot runs this after a renewal: copy the certificate to where pmserver reads it. pmserver
+# re-reads it within a minute (reload: at once); agents keep the internal CA and are not affected.
+set -eu
+LINEAGE=/etc/letsencrypt/live/$1
+[ "\${RENEWED_LINEAGE:-\$LINEAGE}" = "\$LINEAGE" ] || exit 0
+DEST=$PUBLIC_DIR
+install -d -m 0700 -o $SVC_USER -g $SVC_USER "\$DEST"
+install -m 0600 -o $SVC_USER -g $SVC_USER "\$LINEAGE/privkey.pem" "\$DEST/key.pem.new"
+install -m 0600 -o $SVC_USER -g $SVC_USER "\$LINEAGE/fullchain.pem" "\$DEST/cert.pem.new"
+mv -f "\$DEST/key.pem.new" "\$DEST/key.pem"
+mv -f "\$DEST/cert.pem.new" "\$DEST/cert.pem"
+systemctl reload offpatch-server >/dev/null 2>&1 || true
+HOOK
+  chmod 0755 "$LE_HOOK"
+  ok "certbot deploy hook $LE_HOOK -> $PUBLIC_DIR/{cert,key}.pem ($SVC_USER, 0600)"
+}
+
+# Bank-provided certificate: validate before anything changes. Sets PUBLIC_NAMES (comma list).
+check_provided_cert() {
+  local c=$PUBLIC_CERT_IN k=$PUBLIC_KEY_IN n i cur nxt pk1 pk2 split
+  command -v openssl >/dev/null || die "openssl is required to check --public-cert"
+  [ -f "$c" ] && [ -r "$c" ] || die "--public-cert: $c not found"
+  [ -f "$k" ] && [ -r "$k" ] || die "--public-key: $k not found"
+  grep -q 'PRIVATE KEY' "$c" && die "--public-cert: $c contains a private key; give the certificate chain only"
+  grep -q 'ENCRYPTED' "$k" && die "--public-key: $k is encrypted; pmserver needs it unencrypted (openssl pkey -in KEY -out key.pem, keep it 0600)"
+  openssl x509 -in "$c" -noout 2>/dev/null || die "--public-cert: $c is not a PEM certificate"
+  openssl pkey -in "$k" -noout -passin pass: 2>/dev/null || die "--public-key: $k is not a PEM private key"
+  pk1=$(openssl x509 -in "$c" -noout -pubkey 2>/dev/null | openssl pkey -pubin -outform DER 2>/dev/null | sha256sum || true)
+  pk2=$(openssl pkey -in "$k" -pubout -outform DER -passin pass: 2>/dev/null | sha256sum || true)
+  [ "$pk1" = "$pk2" ] || die "--public-key does not belong to --public-cert (the public keys differ)"
+  openssl x509 -in "$c" -noout -checkend 0 >/dev/null 2>&1 || die "--public-cert: the certificate has expired"
+  openssl x509 -in "$c" -noout -checkend $((14 * 86400)) >/dev/null 2>&1 || warn "--public-cert expires within 14 days ($(openssl x509 -in "$c" -noout -enddate | sed 's/notAfter=//'))"
+  # Chain: leaf first, each certificate issued by the next one.
+  split=$(mktemp -d)
+  awk -v d="$split" '/-----BEGIN CERTIFICATE-----/ {n++; f = sprintf("%s/%02d.pem", d, n)} n {print > f} /-----END CERTIFICATE-----/ {close(f)}' "$c"
+  n=$(find "$split" -name '*.pem' | wc -l)
+  for i in $(seq 1 $((n - 1))); do
+    cur=$(openssl x509 -in "$split/$(printf %02d "$i").pem" -noout -issuer -nameopt RFC2253 | sed 's/^issuer=//')
+    nxt=$(openssl x509 -in "$split/$(printf %02d $((i + 1))).pem" -noout -subject -nameopt RFC2253 | sed 's/^subject=//')
+    [ "$cur" = "$nxt" ] || { rm -rf "$split"; die "--public-cert: certificate $i is not issued by certificate $((i + 1)) (put the server certificate first, then its intermediates in order)"; }
+  done
+  cur=$(openssl x509 -in "$split/01.pem" -noout -issuer -nameopt RFC2253 | sed 's/^issuer=//')
+  nxt=$(openssl x509 -in "$split/01.pem" -noout -subject -nameopt RFC2253 | sed 's/^subject=//')
+  rm -rf "$split"
+  if [ "$n" = 1 ] && [ "$cur" != "$nxt" ]; then
+    warn "--public-cert holds only the server certificate: fine if it is issued directly by a root CA the browsers trust; otherwise append the intermediate CA certificate(s)"
+  fi
+  if [ -n "$PUBLIC_DOMAIN_IN" ]; then
+    openssl x509 -in "$c" -noout -checkhost "$PUBLIC_DOMAIN_IN" 2>/dev/null | grep -q 'does match' \
+      || die "--public-cert does not cover $PUBLIC_DOMAIN_IN (its names: $(openssl x509 -in "$c" -noout -ext subjectAltName 2>/dev/null | tail -n +2 | tr -d ' '))"
+    PUBLIC_NAMES=$PUBLIC_DOMAIN_IN
+  else
+    PUBLIC_NAMES=$(openssl x509 -in "$c" -noout -ext subjectAltName 2>/dev/null | tr ',' '\n' | sed -n 's/^[[:space:]]*DNS:\(.*\)$/\1/p' \
+      | tr 'A-Z' 'a-z' | { grep -v '^\*' || true; } | while read -r n; do if valid_domain "$n"; then echo "$n"; fi; done | paste -sd, - || true)
+    [ -n "$PUBLIC_NAMES" ] || die "--public-cert has no DNS names usable as console names (wildcards are not): add --public-domain NAME"
+  fi
+  ok "certificate checked: key matches, valid until $(openssl x509 -in "$c" -noout -enddate | sed 's/notAfter=//'), names $PUBLIC_NAMES"
+}
+
+install_provided_cert() {
+  install -d -m 0700 -o "$SVC_USER" -g "$SVC_USER" "$PUBLIC_DIR"
+  install -m 0600 -o "$SVC_USER" -g "$SVC_USER" "$PUBLIC_KEY_IN" "$PUBLIC_DIR/key.pem.new"
+  install -m 0600 -o "$SVC_USER" -g "$SVC_USER" "$PUBLIC_CERT_IN" "$PUBLIC_DIR/cert.pem.new"
+  mv -f "$PUBLIC_DIR/key.pem.new" "$PUBLIC_DIR/key.pem"
+  mv -f "$PUBLIC_DIR/cert.pem.new" "$PUBLIC_DIR/cert.pem"
+  ok "installed the provided certificate in $PUBLIC_DIR ($SVC_USER, 0600)"
+  if [ -f "$LE_HOOK" ]; then
+    rm -f "$LE_HOOK"
+    warn "removed the certbot deploy hook (it would overwrite the provided certificate); the Let's Encrypt certificate itself is kept: sudo certbot delete --cert-name <name> if unused"
+  fi
+}
+
+# Let's Encrypt issuance (or keep), hook and timer.
+obtain_le_cert() {
+  local out email_args=()
+  if [ -n "$ACME_EMAIL" ]; then email_args=(-m "$ACME_EMAIL")
+  elif [ "$ADMIN_EMAIL_SET" = 1 ]; then email_args=(-m "$ADMIN_EMAIL")
+  else email_args=(--register-unsafely-without-email); fi
+  write_le_hook "$PUBLIC_DOMAIN"
+  if [ "$ACME_METHOD" != existing ]; then
+    local how=(--standalone --preferred-challenges http)
+    [ "$ACME_METHOD" = cloudflare ] && how=(--dns-cloudflare --dns-cloudflare-credentials "$CF_CREDS" --dns-cloudflare-propagation-seconds 30)
+    if [ "$ACME_METHOD" = http ] && command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+      ufw allow 80/tcp comment 'certbot HTTP-01 (offpatch console certificate)' >/dev/null && ok "ufw: TCP 80 open for certbot (issuance and renewals)"
+    fi
+    if ! out=$(certbot certonly "${how[@]}" -d "$PUBLIC_DOMAIN" --cert-name "$PUBLIC_DOMAIN" --non-interactive --agree-tos \
+         "${email_args[@]}" --keep-until-expiring 2>&1); then
+      warn "certbot could not obtain a certificate for $PUBLIC_DOMAIN ($ACME_METHOD):"
+      printf '%s\n' "$out" | tail -n 8 | sed 's/^/      /'
+      warn "check the DNS A record$([ "$ACME_METHOD" = http ] && echo ' and that TCP 80 reaches this host from the internet' || echo " and the token's Zone > DNS > Edit permission") (log: /var/log/letsencrypt/letsencrypt.log)"
+      return 1
+    fi
+  fi
+  [ -f "/etc/letsencrypt/live/$PUBLIC_DOMAIN/fullchain.pem" ] || { warn "no certificate in /etc/letsencrypt/live/$PUBLIC_DOMAIN"; return 1; }
+  RENEWED_LINEAGE="/etc/letsencrypt/live/$PUBLIC_DOMAIN" "$LE_HOOK" || { warn "copying the certificate to $PUBLIC_DIR failed"; return 1; }
+  ok "Let's Encrypt certificate for $PUBLIC_DOMAIN ($(openssl x509 -in "$PUBLIC_DIR/cert.pem" -noout -enddate 2>/dev/null | sed 's/notAfter=/expires /'))"
+  if [ $HAVE_SYSTEMD = 1 ]; then
+    if systemctl enable --now certbot.timer >/dev/null 2>&1; then
+      ok "renewal: certbot.timer (twice a day; renews 30 days before expiry)"
+    elif systemctl list-unit-files snap.certbot.renew.timer 2>/dev/null | grep -q snap.certbot.renew.timer; then
+      ok "renewal: snap.certbot.renew.timer"
+    else
+      warn "no certbot timer found: add a daily 'certbot renew -q' (cron) so the certificate renews"
+    fi
+  fi
+  [ "$ACME_METHOD" != http ] || warn "renewals use HTTP-01 too: TCP 80 must stay free on this host and reachable from the internet"
+  return 0
+}
+
+# Merge public_tls and agent_url into pmserver.json (other keys untouched).
+write_public_config() { # names(comma) explicit-agent-url
+  python3 - "$ETC/pmserver.json" "$1" "$PUBLIC_DIR" "$2" <<'PY'
+import json, os, sys
+p, names, d, explicit = sys.argv[1:5]
+names = [n for n in names.split(",") if n]
+c = json.load(open(p))
+changed = []
+want = {"names": names, "cert_file": d + "/cert.pem", "key_file": d + "/key.pem"}
+if c.get("public_tls") != want:
+    c["public_tls"] = want
+    changed.append("public_tls " + ",".join(names))
+if explicit and c.get("agent_url") != explicit:
+    c["agent_url"] = explicit
+    changed.append("agent_url " + explicit)
+if changed:
+    tmp = p + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(c, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, p)
+    print("; ".join(changed))
+PY
+}
+
+# Checks that must pass before anything is changed (sets PUBLIC_MODE and PUBLIC_NAMES).
+public_precheck() {
+  [ "$(cfg_get insecure_http)" != true ] || die "a public certificate needs TLS; this server runs with insecure_http (lab)"
+  command -v python3 >/dev/null || die "python3 is required to edit $ETC/pmserver.json"
+  if [ -n "$PUBLIC_CERT_IN" ]; then
+    PUBLIC_MODE=provided; check_provided_cert
+  else
+    PUBLIC_MODE=letsencrypt; PUBLIC_NAMES=$PUBLIC_DOMAIN; resolve_acme_challenge
+  fi
+}
+
+# Install the certificate and configure pmserver. Non-zero: no certificate (config unchanged).
+setup_public_tls() { # agent URL to show when agent_url is not set
+  local msg
+  if [ "$PUBLIC_MODE" = provided ]; then
+    install_provided_cert
+  else
+    [ "$ACME_METHOD" = existing ] || install_certbot "$ACME_METHOD"
+    obtain_le_cert || return 1
+  fi
+  msg=$(write_public_config "$PUBLIC_NAMES" "$AGENT_URL_IN") || die "could not update $ETC/pmserver.json"
+  chown root:"$SVC_USER" "$ETC/pmserver.json"; chmod 0640 "$ETC/pmserver.json"
+  [ -z "$msg" ] || ok "$ETC/pmserver.json: $msg"
+  AGENT_URL_NOW=$(cfg_get agent_url); AGENT_URL_NOW=${AGENT_URL_NOW:-$1}
+  systemctl reload offpatch-server >/dev/null 2>&1 || true
+  return 0
+}
+
+remember_public() {
+  [ -f "$STATE_FILE" ] || return 0
+  sed -i '/^PUBLIC_MODE=/d; /^PUBLIC_NAMES=/d' "$STATE_FILE"
+  { echo "PUBLIC_MODE=$PUBLIC_MODE"; echo "PUBLIC_NAMES=$PUBLIC_NAMES"; } >> "$STATE_FILE"
+}
+
+public_summary() { # port
+  local first=${PUBLIC_NAMES%%,*} exp
+  exp=$(openssl x509 -in "$PUBLIC_DIR/cert.pem" -noout -enddate 2>/dev/null | sed 's/notAfter=//' || true)
+  if [ "$PUBLIC_MODE" = provided ]; then
+    echo "  Console:        https://$first:$1   (provided certificate, expires ${exp:-?}; to replace it re-run with --public-cert/--public-key)"
+  else
+    echo "  Console:        https://$first:$1   (public certificate, renews automatically)"
+  fi
+  [ "$first" = "$PUBLIC_NAMES" ] || echo "                  names: $PUBLIC_NAMES"
+  echo "  Agent URL:      ${AGENT_URL_NOW:-?}   (internal CA + client certificates; the enrollment command uses it)"
+}
+
+# Browsers: the public name must verify against the system trust store (checked locally).
+check_public_https() { # port
+  local first=${PUBLIC_NAMES%%,*}
+  if curl -fsS -o /dev/null --max-time 10 --resolve "$first:$1:127.0.0.1" "https://$first:$1/" 2>/dev/null; then
+    ok "https://$first:$1 serves the public certificate (verified)"
+  elif [ "$PUBLIC_MODE" = provided ]; then
+    ok "https://$first:$1 serves the provided certificate (not verifiable here unless this host trusts its CA)"
+  else
+    warn "https://$first:$1 did not verify locally; pmserver serves the internal certificate until the public one is usable (journalctl -u offpatch-server)"
+  fi
+}
+
 BACKUP_DIR=${BACKUP_DIR_IN:-$(state_get BACKUP_DIR)}; BACKUP_DIR=${BACKUP_DIR:-$DEFAULT_BACKUP_DIR}
 BACKUP_KEEP=${BACKUP_KEEP_IN:-$(state_get BACKUP_KEEP)}; BACKUP_KEEP=${BACKUP_KEEP:-$DEFAULT_BACKUP_KEEP}
 
@@ -179,6 +525,7 @@ svc_state() { if [ $HAVE_SYSTEMD = 1 ]; then systemctl is-active "$1" 2>/dev/nul
 
 if [ $STATUS = 1 ]; then
   echo "installed role:    $(state_get ROLE || true)"
+  [ -z "$(cfg_get server_name)" ] || echo "server name:       $(cfg_get server_name) ($(cfg_get agent_ip))"
   echo "pmserver:          $(svc_state offpatch-server 'offpatch/bin/pmserver')"
   echo "agent:             $(svc_state offpatch-agent 'offpatch/bin/pmagent run')"
   echo "acquisition timer: $( [ $HAVE_SYSTEMD = 1 ] && systemctl is-active offpatch-acquire.timer 2>/dev/null || echo 'cron/manual')"
@@ -197,6 +544,10 @@ if [ $STATUS = 1 ]; then
   fi
   [ -f "$ETC/keys/root.key" ] && echo "root key:          $ETC/keys/root.key is on this server: sudo $0 --export-root-key <offline media>"
   [ -f "$ETC/console-url.txt" ] && echo "console:           $(cat "$ETC/console-url.txt")"
+  if [ -n "$(state_get PUBLIC_NAMES)" ]; then
+    exp=$(openssl x509 -in "$PUBLIC_DIR/cert.pem" -noout -enddate 2>/dev/null | sed 's/notAfter=//' || true)
+    echo "public console:    https://$(state_get PUBLIC_NAMES | cut -d, -f1):$(cfg_get listen | sed 's/.*://') ($(state_get PUBLIC_MODE), expires ${exp:-unknown}; agents: $(cfg_get agent_url))"
+  fi
   exit 0
 fi
 
@@ -240,7 +591,7 @@ fi
 # ---------------------------------------------------------------- uninstall
 list_secrets() {
   local f
-  for f in "$ETC"/keys/*.key "$ETC/pki/ca.key" "$ETC/pki/server.key" "$SRV_DATA/audit-signing.key" "$AGENT_STATE"/*; do
+  for f in "$ETC"/keys/*.key "$ETC/pki/ca.key" "$ETC/pki/server.key" "$PUBLIC_DIR/key.pem" "$DEFAULT_CF_CREDS" "$SRV_DATA/audit-signing.key" "$AGENT_STATE"/*; do
     [ -e "$f" ] && warn "  still on disk: $f"
   done
   return 0
@@ -248,6 +599,7 @@ list_secrets() {
 
 if [ $UNINSTALL = 1 ]; then
   AUDIT_LEFT=$(cfg_path audit_export_dir)
+  PUB_MODE_LEFT=$(state_get PUBLIC_MODE); PUB_LEFT=$(state_get PUBLIC_NAMES); PUB_LEFT=${PUB_LEFT%%,*}
   if [ $PURGE = 1 ] && [ $YES = 0 ]; then
     [ -t 0 ] || die "--purge deletes signing keys, the CA key, tokens and all data. Non-interactive: add --yes"
     banner "--purge deletes $ETC (signing keys, CA key, tokens, config)," \
@@ -280,6 +632,21 @@ if [ $UNINSTALL = 1 ]; then
   done
   rm -f /etc/logrotate.d/offpatch
   rm -rf "$PREFIX"
+  # Public console certificate: the certbot deploy hook always goes; a Let's Encrypt certificate
+  # only with --purge (the local account too, unless other certbot certificates use it).
+  if [ -f "$LE_HOOK" ]; then rm -f "$LE_HOOK"; ok "removed the certbot deploy hook $LE_HOOK"; fi
+  if [ "$PUB_MODE_LEFT" = letsencrypt ] && [ -n "$PUB_LEFT" ] && [ -d "/etc/letsencrypt/live/$PUB_LEFT" ]; then
+    if [ $PURGE = 1 ] && command -v certbot >/dev/null; then
+      certbot delete --cert-name "$PUB_LEFT" --non-interactive >/dev/null 2>&1 && ok "deleted the Let's Encrypt certificate for $PUB_LEFT"
+      if ! compgen -G "/etc/letsencrypt/renewal/*.conf" >/dev/null; then
+        rm -rf /etc/letsencrypt/accounts && ok "deleted the local Let's Encrypt account (no other certbot certificates on this host)"
+      else
+        warn "kept the Let's Encrypt account in /etc/letsencrypt/accounts: other certbot certificates on this host use it"
+      fi
+    else
+      warn "kept the Let's Encrypt certificate for $PUB_LEFT (certbot keeps renewing it): sudo certbot delete --cert-name $PUB_LEFT, or --purge"
+    fi
+  fi
   if [ $PURGE = 1 ]; then
     rm -rf "$ETC" "$SRV_DATA" "$ACQ_DATA" "$AGENT_STATE"
     for u in "$SVC_USER" "$ACQ_USER"; do userdel "$u" 2>/dev/null || true; done
@@ -292,6 +659,42 @@ if [ $UNINSTALL = 1 ]; then
   fi
   [ -d "$BACKUP_DIR" ] && warn "backups kept in $BACKUP_DIR: they contain the CA private key and the database"
   case "$AUDIT_LEFT" in ""|"$SRV_DATA"/*) ;; *) [ -d "$AUDIT_LEFT" ] && warn "audit export kept in $AUDIT_LEFT" ;; esac
+  exit 0
+fi
+
+# ---------------------------------------------------------------- public certificate only
+# Only public-certificate options on an existing server: add or replace the console
+# certificate and change nothing else.
+if [ $PUBLIC_WANTED = 1 ] && [ $OTHER_ARGS = 0 ] && [ -f "$ETC/pmserver.json" ]; then
+  step "Public certificate for the console"
+  { [ -x "$PREFIX/bin/pmserver" ] && grep -aq 'public_tls' "$PREFIX/bin/pmserver"; } \
+    || die "the installed pmserver does not support public certificates yet: upgrade first by re-running this installer from the new release with the same options"
+  listen=$(cfg_get listen); port=${listen##*:}
+  [[ "$port" =~ ^[0-9]+$ ]] || die "cannot read the port from \"listen\": \"$listen\" in $ETC/pmserver.json"
+  public_precheck
+  default_agent=""
+  sn=$(cfg_get server_name)
+  if [ -n "$sn" ]; then default_agent="https://$sn:$port"
+  elif [ -f "$ETC/console-url.txt" ]; then default_agent=$(head -n 1 "$ETC/console-url.txt"); fi
+  cp -p "$ETC/pmserver.json" "$ETC/pmserver.json.before-public-tls"
+  setup_public_tls "$default_agent" || { rm -f "$ETC/pmserver.json.before-public-tls"; die "no certificate obtained; nothing was changed"; }
+  if [ $HAVE_SYSTEMD = 1 ]; then systemctl restart offpatch-server; else
+    pkill -f "$PREFIX/bin/pmserver" 2>/dev/null || true
+    runuser -u "$SVC_USER" -- nohup "$PREFIX/bin/pmserver" -config "$ETC/pmserver.json" >> "$SRV_DATA/pmserver.log" 2>&1 &
+  fi
+  for _ in $(seq 1 30); do curl -fs -o /dev/null --cacert "$ETC/pki/ca.pem" "https://127.0.0.1:$port/" && break; sleep 1; done
+  if ! curl -fs -o /dev/null --cacert "$ETC/pki/ca.pem" "https://127.0.0.1:$port/"; then
+    cp -p "$ETC/pmserver.json.before-public-tls" "$ETC/pmserver.json"
+    [ $HAVE_SYSTEMD = 0 ] || systemctl restart offpatch-server
+    die "pmserver did not start with the public certificate; restored the previous $ETC/pmserver.json (journalctl -u offpatch-server)"
+  fi
+  rm -f "$ETC/pmserver.json.before-public-tls"
+  check_public_https "$port"
+  remember_public
+  step "Done"
+  public_summary "$port"
+  [ "$PUBLIC_MODE" = provided ] || echo "  Renewal:        certbot timer + $LE_HOOK; test: sudo certbot renew --dry-run"
+  warn "browsers need TCP $port to this server from where admins work: check ufw (--allow-from) and any network firewall"
   exit 0
 fi
 
@@ -372,6 +775,20 @@ if [ $IS_SERVER = 1 ] && [ -f "$ETC/pmserver.json" ]; then
   [ -z "$AUDIT_DIR_IN" ] || [ "$AUDIT_DIR_IN" = "$AUDIT_DIR" ] || die "--audit-dir $AUDIT_DIR_IN conflicts with audit_export_dir \"$AUDIT_DIR\" in $ETC/pmserver.json. Change it there (see runbook 05 R5) and re-run without --audit-dir"
 else
   AUDIT_DIR=${AUDIT_DIR_IN:-$SRV_DATA/audit-export}
+fi
+
+# The server's name: --domain, else the name of an earlier install, else the default.
+if [ $IS_SERVER = 1 ]; then
+  SERVER_NAME=${DOMAIN_IN:-$(cfg_get server_name)}; SERVER_NAME=${SERVER_NAME:-$DEFAULT_DOMAIN}
+elif [ -n "$DOMAIN_IN" ]; then
+  die "--domain is for --role all or server; agents get the name from --server"
+fi
+[ -z "$SERVER_IP_IN" ] || [ "$ROLE" = agent ] || die "--server-ip is for --role agent"
+
+if [ $PUBLIC_WANTED = 1 ]; then
+  [ $IS_SERVER = 1 ] || die "--public-domain / --public-cert are for --role all or server (the console)"
+  [ $INSECURE = 0 ] || die "a public certificate needs TLS; it cannot be combined with --insecure-lab"
+  public_precheck   # fail before changing anything
 fi
 
 if [ "$ROLE" = all ]; then
@@ -643,10 +1060,10 @@ local_subnets() {
 }
 IP=$(pick_ip)
 OTHER_IPS=$(local_ips | grep -vxF "${IP:-}" | paste -sd' ' - || true)
-HOSTS=$(printf '%s\n' "$(hostname)" localhost 127.0.0.1 "$IP" "$EXTRA_HOSTS" | tr ',' '\n' | awk 'NF && !seen[$0]++' | paste -sd, -)
+HOSTS=$(printf '%s\n' "$SERVER_NAME" "$(hostname)" localhost 127.0.0.1 "$IP" "$EXTRA_HOSTS" | tr ',' '\n' | awk 'NF && !seen[$0]++' | paste -sd, -)
 case "$LISTEN_HOST" in ""|0.0.0.0|"::"|"[::]") LOCAL_HOST=127.0.0.1 ;; *) LOCAL_HOST=$LISTEN_HOST ;; esac
 URL_LOCAL="$SCHEME://$LOCAL_HOST:$PORT"
-URL_PUBLIC="$SCHEME://${IP:-$(hostname)}:$PORT"
+URL_PUBLIC="$SCHEME://${SERVER_NAME:-${IP:-$(hostname)}}:$PORT"   # what people and agents use
 
 # ---------------------------------------------------------------- keys
 install_pub() { # source-file name
@@ -719,6 +1136,8 @@ User=$SVC_USER
 Group=$SVC_USER
 SupplementaryGroups=$XFER_GROUP
 ExecStart=$PREFIX/bin/pmserver -config $ETC/pmserver.json
+# reload = re-read the public console certificate (certbot deploy hook)
+ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -856,6 +1275,7 @@ EOF
 }
 
 CURL_CA=()
+PUBLIC_OK=0 AGENT_URL_NOW=""
 ADMIN_CREATED_EMAIL="" ADMIN_CREATED_PW="" ADMIN_DEFAULT_PW=0
 if [ $IS_SERVER = 1 ]; then
   step "Management server"
@@ -863,8 +1283,23 @@ if [ $IS_SERVER = 1 ]; then
   if [ $INSECURE = 0 ] && [ ! -f "$ETC/pki/ca.pem" ]; then
     "$PREFIX/bin/pmserver" init-pki -dir "$ETC/pki" -hosts "$HOSTS" >/dev/null
     ok "created internal CA and server certificate for: $HOSTS"
-  elif [ -n "$EXTRA_HOSTS" ] && [ -f "$ETC/pki/ca.pem" ]; then
-    ok "keeping the existing server certificate (--hosts applies to the first install; to change names: sudo -u $SVC_USER $PREFIX/bin/pmserver reissue-server-cert -dir $ETC/pki -hosts ...)"
+  elif [ $INSECURE = 0 ] && [ -f "$ETC/pki/server.pem" ] && command -v openssl >/dev/null; then
+    # The certificate must name server_name and this machine's IP: agents connect by name,
+    # older agents by IP. Reissue (same CA: agents pin the CA, not this certificate) when not.
+    sans=$(openssl x509 -in "$ETC/pki/server.pem" -noout -ext subjectAltName 2>/dev/null | tail -n +2 | tr ',' '\n' \
+           | sed -n 's/^[[:space:]]*DNS://p; s/^[[:space:]]*IP Address://p' | tr -d ' ' || true)
+    need=""
+    for h in "$SERVER_NAME" ${IP:+"$IP"}; do printf '%s\n' "$sans" | grep -qixF "$h" || need="$need $h"; done
+    if [ -n "$need" ]; then
+      keep=$(printf '%s\n' "$SERVER_NAME" $sans "$IP" "$(printf '%s' "$EXTRA_HOSTS" | tr ',' '\n')" | awk 'NF && !seen[tolower($0)]++' | paste -sd, -)
+      if "$PREFIX/bin/pmserver" reissue-server-cert -dir "$ETC/pki" -hosts "$keep" >/dev/null; then
+        ok "server certificate reissued for: $keep (added:$need; agents keep working: they pin the CA)"
+      else
+        warn "could not reissue the server certificate with$need; agents and browsers may refuse that name: pmserver reissue-server-cert -dir $ETC/pki -hosts $keep"
+      fi
+    elif [ -n "$EXTRA_HOSTS" ]; then
+      ok "keeping the existing server certificate (it names $SERVER_NAME; to change names: sudo -u $SVC_USER $PREFIX/bin/pmserver reissue-server-cert -dir $ETC/pki -hosts ...)"
+    fi
   fi
   [ -d "$ETC/pki" ] && { chown -R "$SVC_USER":"$SVC_USER" "$ETC/pki"; chmod 0700 "$ETC/pki"; chmod 0644 "$ETC/pki/ca.pem"; }
 
@@ -908,10 +1343,12 @@ PY
   if [ $SERVER_CONFIGURED = 0 ]; then
     if [ $INSECURE = 1 ]; then tlsline='"insecure_http": true,'; else tlsline="\"pki_dir\": \"$ETC/pki\","; fi
     rootline=""; [ -f "$ETC/keys/root.pub" ] && rootline=$'\n'"  \"root_public_key_file\": \"$ETC/keys/root.pub\","
+    ipline=""; [ -n "${IP:-}" ] && ipline=$'\n'"  \"agent_ip\": \"$IP\","
     mode=two-machine; [ "$ROLE" = all ] && mode=single-server
     cat > "$ETC/pmserver.json" <<EOF
 {
   "listen": "0.0.0.0:$PORT",
+  "server_name": "$SERVER_NAME",${ipline}
   "deployment_mode": "$mode",
   $tlsline
   "data_dir": "$SRV_DATA",
@@ -925,6 +1362,32 @@ EOF
     ok "wrote $ETC/pmserver.json"
   else
     ok "keeping existing $ETC/pmserver.json (listen port $PORT, $SCHEME)"
+  fi
+  # The server's name (and the IP endpoints map it to): set on upgrades when missing, or
+  # changed by --domain. Other settings are kept.
+  if command -v python3 >/dev/null; then
+    if msg=$(python3 - "$ETC/pmserver.json" "$SERVER_NAME" "${IP:-}" "$DOMAIN_IN" <<'PY'
+import json, sys
+p, name, ip, explicit = sys.argv[1:5]
+c = json.load(open(p))
+changed = []
+if c.get("server_name") != name and (explicit or not c.get("server_name")):
+    c["server_name"] = name
+    changed.append("server_name " + name)
+if ip and not c.get("agent_ip"):
+    c["agent_ip"] = ip
+    changed.append("agent_ip " + ip)
+if changed:
+    json.dump(c, open(p, "w"), indent=2)
+    print("; ".join(changed))
+PY
+); then
+      if [ -n "$msg" ]; then ok "$ETC/pmserver.json: $msg"; fi
+    else
+      warn "could not update $ETC/pmserver.json; set \"server_name\": \"$SERVER_NAME\" by hand"
+    fi
+  else
+    warn "python3 not found: set \"server_name\": \"$SERVER_NAME\" in $ETC/pmserver.json by hand"
   fi
   # Single server (role all), fresh install and upgrades: direct hand-off of acquisition
   # requests, and the deployment mode the compliance report discloses (set when absent).
@@ -992,6 +1455,11 @@ PY
   else
     die "could not create the built-in super admin ($ADMIN_EMAIL): $out"
   fi
+  if [ $PUBLIC_WANTED = 1 ]; then
+    step "Public certificate for the console"
+    if setup_public_tls "$URL_PUBLIC"; then PUBLIC_OK=1
+    else warn "continuing without the public certificate; once fixed, re-run with the same --public-* options"; fi
+  fi
   start_server
   [ $INSECURE = 0 ] && CURL_CA=(--cacert "$ETC/pki/ca.pem")
   for _ in $(seq 1 30); do
@@ -1001,6 +1469,7 @@ PY
   curl -fs -o /dev/null ${CURL_CA[@]+"${CURL_CA[@]}"} "$URL_LOCAL/" || die "server did not start; check: journalctl -u offpatch-server (or $SRV_DATA/pmserver.log)"
   echo "$URL_PUBLIC" > "$ETC/console-url.txt"
   ok "server running at $URL_PUBLIC"
+  [ $PUBLIC_OK = 0 ] || check_public_https "$PORT"
   install_backup
   # Console/agent port: only from --allow-from CIDRs, else from the local subnet(s) of $IP.
   # The installer never enables ufw (that could cut off SSH); it prints the commands instead.
@@ -1244,6 +1713,18 @@ EOF
 fi
 
 # ---------------------------------------------------------------- local agent
+# Offline networks without DNS: map the server name to its IP in /etc/hosts (one line tagged
+# "# DSS Patcher", replaced on re-runs; nothing changes when the name already resolves to it).
+ensure_hosts_line() { # name ip
+  local name=$1 ip=$2 tmp
+  if getent ahosts "$name" 2>/dev/null | awk '{print $1}' | grep -qxF "$ip"; then ok "$name resolves to $ip"; return 0; fi
+  tmp=$(mktemp)
+  awk -v n="$name" '{ keep = 1; if (index($0, "# DSS Patcher")) { for (i = 2; i <= NF; i++) if (tolower($i) == n) keep = 0 } } keep' /etc/hosts > "$tmp"
+  printf '%s %s # DSS Patcher\n' "$ip" "$name" >> "$tmp"
+  cat "$tmp" > /etc/hosts; rm -f "$tmp"
+  ok "/etc/hosts: $ip $name # DSS Patcher"
+  getent ahosts "$name" 2>/dev/null | awk '{print $1}' | grep -qxF "$ip"     || warn "$name still does not resolve to $ip (another /etc/hosts line or DNS wins): fix that entry"
+}
 enroll_agent() { # server token ca pub root
   local args=(enroll -server "$1" -token "$2" -pubkey "$4" -platform linux -state-dir "$AGENT_STATE")
   [ -n "$3" ] && args+=(-ca "$3")
@@ -1261,6 +1742,15 @@ start_agent() {
 
 if [ "$ROLE" = agent ]; then
   step "Endpoint agent"
+  if [ -n "$SERVER_IP_IN" ]; then
+    srv_url=$AGENT_SERVER
+    if [ -z "$srv_url" ] && [ -f "$AGENT_STATE/agent.json" ]; then
+      srv_url=$(sed -n 's/.*"server_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$AGENT_STATE/agent.json" | head -n 1)
+    fi
+    srv_host=$(url_host "$srv_url")
+    if [ -n "$srv_host" ] && valid_domain "$srv_host"; then ensure_hosts_line "$srv_host" "$SERVER_IP_IN"
+    else warn "--server-ip ignored: the server URL does not use a DNS name"; fi
+  fi
   if [ ! -f "$AGENT_STATE/agent.json" ]; then
     enroll_agent "$AGENT_SERVER" "$AGENT_TOKEN" "$AGENT_CA" "$PUBKEY_IN" "$ROOTPUB_IN"
   else
@@ -1328,6 +1818,8 @@ BACKUP_DIR=$BACKUP_DIR
 BACKUP_KEEP=$BACKUP_KEEP
 ALLOW_FROM=${ALLOW_FROM[*]+"${ALLOW_FROM[*]}"}
 EGRESS_LOCK=$EGRESS_LOCK
+PUBLIC_MODE=$( [ $PUBLIC_OK = 1 ] && echo "$PUBLIC_MODE" || state_get PUBLIC_MODE )
+PUBLIC_NAMES=$( [ $PUBLIC_OK = 1 ] && echo "$PUBLIC_NAMES" || state_get PUBLIC_NAMES )
 EOF
 chmod 0644 "$STATE_FILE"
 
@@ -1335,8 +1827,23 @@ chmod 0644 "$STATE_FILE"
 step "Done"
 echo "  This machine:   $(hostname) — IP ${IP:-unknown}${OTHER_IPS:+   (other addresses: $OTHER_IPS)}"
 if [ $IS_SERVER = 1 ]; then
-  echo "  Console:        $URL_PUBLIC   (sign in with email + password)"
-  echo "  PCs need:       TCP $PORT from every PC to ${IP:-this server} (agents connect to $URL_PUBLIC; nothing connects to the PCs)"
+  if [ $PUBLIC_OK = 1 ]; then
+    public_summary "$PORT"
+    echo "                  also $URL_PUBLIC (internal CA); sign in with email + password"
+    echo "  Browsers:       need TCP $PORT from the admins' networks (ufw: --allow-from; network firewall)"
+  else
+    echo "  Console:        $URL_PUBLIC   (sign in with email + password)"
+  fi
+  echo "  PCs need:       TCP $PORT from every PC to ${IP:-this server} (agents connect to ${AGENT_URL_NOW:-$URL_PUBLIC}; nothing connects to the PCs)"
+  if [ -n "$SERVER_NAME" ] && [ -n "${IP:-}" ]; then
+    echo "  Name:           $SERVER_NAME must resolve to $IP for browsers and PCs: an internal DNS A record, or this"
+    echo "                  hosts-file line (the PowerShell enrollment command adds it on PCs by itself):"
+    echo "                    $IP $SERVER_NAME # DSS Patcher"
+    echo "                  Windows (PowerShell as Administrator):"
+    echo "                    Add-Content -Path \"\$env:SystemRoot\\System32\\drivers\\etc\\hosts\" -Value \"$IP $SERVER_NAME # DSS Patcher\""
+    echo "                  Linux / macOS:"
+    echo "                    echo '$IP $SERVER_NAME # DSS Patcher' | sudo tee -a /etc/hosts"
+  fi
   [ ${#FW_SOURCES[@]} -gt 0 ] && echo "  Firewall:       port $PORT allowed from ${FW_SOURCES[*]}$( ufw status 2>/dev/null | grep -q 'Status: active' || echo ' (ufw inactive: commands above)')"
   # The certificate is made on the first install; warn if this machine's address is not in it.
   if [ $INSECURE = 0 ] && [ -n "${IP:-}" ] && [ -f "$ETC/pki/server.pem" ] && command -v openssl >/dev/null \
@@ -1354,7 +1861,14 @@ if [ $IS_SERVER = 1 ]; then
   fi
   echo "  Lost password:  sudo runuser -u $SVC_USER -- $PREFIX/bin/pmserver reset-admin -config $ETC/pmserver.json -email <email>"
   echo "  Backups:        daily → $BACKUP_DIR (keeps $BACKUP_KEEP); copy them off the machine (they hold the CA key)"
-  [ $INSECURE = 0 ] && echo "  TLS:            internal CA $ETC/pki/ca.pem — import it into the admins' browsers (or accept the warning once)"
+  if [ $INSECURE = 0 ] && [ $PUBLIC_OK = 0 ] && [ -z "$(state_get PUBLIC_NAMES)" ]; then
+    echo "  TLS:            internal CA $ETC/pki/ca.pem — distribute it to the admins' browsers (Group Policy: Trusted Root"
+    echo "                  Certification Authorities), or give the console a public certificate: re-run with"
+    echo "                  --public-cert FILE --public-key FILE (bank's certificate, recommended for isolated networks)"
+    echo "                  or --public-domain NAME (Let's Encrypt; needs internet and TCP 80 or Cloudflare DNS)"
+  elif [ $INSECURE = 0 ]; then
+    echo "  TLS:            agents: internal CA $ETC/pki/ca.pem; browsers on $(state_get PUBLIC_NAMES): public certificate"
+  fi
   [ "$ROLE" = server ] && echo "  Inbox:          the transfer receiver delivers into $SRV_DATA/inbox; add its account to group $XFER_GROUP"
   cat <<EOF
 
@@ -1365,7 +1879,7 @@ if [ $IS_SERVER = 1 ]; then
        (Windows PowerShell as Administrator; the PC needs TCP $PORT to ${IP:-this server}).
     4. Patches → Needed → Import, Catalog → Approve, Patch this (2 approvals).
 
-  Ubuntu endpoints: sudo ./install-ubuntu.sh --role agent --server $URL_PUBLIC --token <enr_…> \\
+  Ubuntu endpoints: sudo ./install-ubuntu.sh --role agent --server $URL_PUBLIC${IP:+ --server-ip $IP} --token <enr_…> \\
                          --ca ca.pem --pubkey bundle.pub --root-pubkey root.pub
                     (copy ca.pem, bundle.pub, root.pub from $ETC/pki and $ETC/keys)
 EOF

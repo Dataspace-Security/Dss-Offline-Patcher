@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
+	"net"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -39,10 +41,19 @@ func (s *Server) bootstrapAllowed(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // serverURL is the base URL the endpoint used to reach us, so the agent
-// enrolls against an address that is known to work from that network.
-func serverURL(r *http.Request) (string, bool) {
+// enrolls against an address that is known to work from that network. A
+// public_tls name that the internal certificate does not cover is replaced
+// by the agent URL (the agent verifies the internal certificate).
+func (s *Server) serverURL(r *http.Request) (string, bool) {
 	if !hostRe.MatchString(r.Host) {
 		return "", false
+	}
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if s.cfg.isPublicName(host) && !s.certCovers(host) {
+		return s.agentURL(), true
 	}
 	scheme := "http"
 	if r.TLS != nil {
@@ -55,7 +66,7 @@ func (s *Server) bootstrapWindows(w http.ResponseWriter, r *http.Request) {
 	if !s.bootstrapAllowed(w, r) {
 		return
 	}
-	url, ok := serverURL(r)
+	url, ok := s.serverURL(r)
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "invalid Host header")
 		return
@@ -75,8 +86,14 @@ func (s *Server) bootstrapWindows(w http.ResponseWriter, r *http.Request) {
 	for _, k := range keys {
 		pems = append(pems, strings.TrimSpace(k.PublicKey))
 	}
+	hostsName, hostsIP := "", ""
+	if u, err := neturl.Parse(url); err == nil {
+		hostsName, hostsIP = s.hostsEntry(u.Hostname())
+	}
 	var buf bytes.Buffer
 	if err := windowsBootstrap.Execute(&buf, map[string]any{
+		"HostsName": hostsName, // server_name and agent_ip, both validated (DNS name, IP)
+		"HostsIP":   hostsIP,
 		"Server":    url,
 		"ExeSHA256": exeSHA,
 		"Keys":      pems,

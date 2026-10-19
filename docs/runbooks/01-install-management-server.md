@@ -79,7 +79,8 @@ MFA key, hardened `offpatch-server.service`, daily backup, ufw), plus:
   runs on the management server and that egress is limited to the downloader account by host
   firewall rules. `acquisition_stale_after` defaults to 3h (hourly runs).
 
-The summary ends with the next steps: the console URL with the server's IP, the super admin
+The summary ends with the next steps: the console URL with the server name (`--domain`), the
+hosts-file line for browsers and PCs without internal DNS, the super admin
 email (default password), then 1. sign in and change the password, 2. Settings → Users: create the
 bank's Admin, 3. Endpoints → Create enrollment token → run the PowerShell line on each PC (as
 Administrator), 4. Patches → Needed → Import, Catalog → Approve, Patch this (2 approvals). Each PC
@@ -87,6 +88,54 @@ needs TCP 8443 (or `--port`) to the server's IP.
 
 A two-machine layout (A2 with a separate acquisition host) is stricter: the internet-facing
 downloader then shares no machine with the server's data.
+
+## Server name and console certificate (methods A1/A2)
+
+Details and configuration keys: [admin guide section 5.5](../07-admin-guide.md#55-server-name-and-certificates).
+
+1. **Name.** `--domain patcher.bank.example` (default `patcher.dataspacesecurity.com`, or the
+   name of the earlier install). The installer writes `server_name` and `agent_ip` into
+   `pmserver.json`, makes sure the internal server certificate names it and the server's IP
+   (reissuing it on upgrades when not; agents keep working, they pin the CA) and prints the URL
+   `https://<name>:8443`. Create an internal DNS A record, or give admins the printed hosts-file
+   line (`<IP> <name> # DSS Patcher`). The Windows enrollment command adds that line on PCs by
+   itself; Ubuntu agents: `--role agent --server https://<name>:8443 --server-ip <IP>`. Agents
+   0.9.0 and older keep the IP they were enrolled with until re-enrolled.
+2. **Browser certificate**, one of:
+   - Group Policy: distribute `/etc/offpatch/pki/ca.pem` as a Trusted Root Certification Authority (no change on the server).
+   - The bank's own certificate (recommended for isolated networks; no internet):
+
+     ```bash
+     sudo ./install-ubuntu.sh --public-cert /root/patcher-fullchain.pem --public-key /root/patcher.key [--public-domain patcher.bank.example]
+     ```
+
+     Checked (key matches, not expired, chain order) and copied to `/etc/offpatch/pki/public/`
+     (offpatch, 0600). Replace it later the same way; no restart needed.
+   - Let's Encrypt (public DNS name, internet access):
+
+     ```bash
+     sudo ./install-ubuntu.sh --public-domain patcher.example.com [--acme-challenge auto|http|cloudflare] [--acme-email EMAIL]
+     ```
+
+     `auto`: HTTP-01 (`certbot --standalone`) when TCP 80 is free, else Cloudflare DNS-01 when
+     `/etc/offpatch/acme/cloudflare.ini` exists (root, 0600, `dns_cloudflare_api_token = <token>`;
+     or `--cloudflare-credentials FILE`), else it stops and lists the options. Renewal: certbot's
+     timer and the deploy hook `/etc/letsencrypt/renewal-hooks/deploy/offpatch.sh`; no restart.
+
+   With only these options on an existing install, nothing else changes (pmserver is restarted
+   once; the previous `pmserver.json` is restored if it does not come up). Agents always keep the
+   internal CA and mTLS (TLS ALPN `dss-agent/1`, or no SNI for older agents).
+3. Allow TCP 8443 from the admins' and PCs' networks (`--allow-from`, network firewall).
+
+Verify (replace the names):
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' https://patcher.bank.example:8443/auth/config   # 200; public/bank certificate verifies
+curl -sS -X POST https://patcher.bank.example:8443/api/agent/checkin                      # 421 for a browser-like client
+openssl s_client -connect 127.0.0.1:8443 -servername patcher.bank.example -alpn dss-agent/1,http/1.1 </dev/null 2>/dev/null | grep -E 'issuer|Acceptable client'   # internal CA, client certificate requested
+sudo ./install-ubuntu.sh --status                                                       # server name, public certificate expiry
+sudo certbot renew --dry-run                                                            # Let's Encrypt only
+```
 
 ## Method A2: two-machine layout (`--role server`, stricter)
 

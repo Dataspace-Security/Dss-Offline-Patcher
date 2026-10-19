@@ -167,6 +167,11 @@ export type AgentSetup = {
   root_public_key?: string; // PEM; "" when no root key is configured
   windows_bootstrap?: boolean; // pmagent.exe staged and CA served in the TLS chain
   server_cert_hosts?: string[]; // DNS names / IPs in the server certificate
+  agent_url?: string; // URL agents enroll against (internal certificate); never a public name
+  agent_url_configured?: boolean; // agent_url set in pmserver.json (else derived from the server IP)
+  public_names?: string[]; // console names browsers get the public certificate on
+  server_name?: string; // DNS name of the server; agent_url uses it
+  agent_ip?: string; // server IP the enrollment maps server_name to in the hosts file (offline networks)
 };
 
 // ---- auth & users (v1.1 B2/C8, roles contract) ----

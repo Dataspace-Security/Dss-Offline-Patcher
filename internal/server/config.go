@@ -99,6 +99,22 @@ type Config struct {
 	// status report for this long. Default 3h with deployment_mode
 	// single-server (hourly runs on this host), else 26h.
 	AcquisitionStaleAfter Duration `json:"acquisition_stale_after"`
+	// PublicTLS: optional publicly trusted certificate for the console,
+	// served only to browsers asking for one of its names (SNI); agents keep
+	// the internal CA and mTLS (publictls.go).
+	PublicTLS *PublicTLSConfig `json:"public_tls"`
+	// ServerName: DNS name of this server (e.g. patcher.bank.example). The
+	// console, the enrollment commands and agents use
+	// https://<server_name>:<port>; the internal server certificate must
+	// include it.
+	ServerName string `json:"server_name"`
+	// AgentIP: the server's IP as endpoints reach it; the enrollment writes
+	// "<agent_ip> <server_name>" into endpoints' hosts files when the name
+	// does not resolve there (offline networks without DNS). Default: detected.
+	AgentIP string `json:"agent_ip"`
+	// AgentURL: base URL agents enroll against. Default
+	// https://<server_name>:<port>, else https://<server IP>:<port>.
+	AgentURL string `json:"agent_url"`
 
 	dir string // directory of the config file; relative paths resolve from here
 	// fromFile: loaded by LoadConfig (LogAuthMode logs only then).
@@ -273,6 +289,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if c.TLSCert != "" && c.PKIDir == "" {
 		return nil, fmt.Errorf("config: pki_dir is required with TLS (it issues endpoint client certificates)")
+	}
+	if err := c.normalizePublicTLS(); err != nil {
+		return nil, err
 	}
 	return c, nil
 }

@@ -149,6 +149,7 @@ func newEnvOpts(t *testing.T, tlsMode bool, extra string) *env {
 	if tlsMode {
 		e.srv = httptest.NewUnstartedServer(h.Handler())
 		e.srv.TLS = h.TLSConfig() // server certificate + CA chain, as pmserver serves it
+		e.srv.Config.ConnContext, e.srv.Config.ConnState = h.ConnContext, h.ConnState
 		if len(e.srv.TLS.Certificates) == 0 {
 			t.Fatal("TLSConfig did not load the server certificate")
 		}

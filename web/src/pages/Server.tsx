@@ -15,6 +15,10 @@ type Sys = {
   audit: { chain_ok: boolean; events: number; export_dir: string; exported_to_seq: string; checkpoint_interval: string; retention: string };
   agents: { checkin_interval_seconds: number; offline_after: string; stale_inventory_after: string; download_rate_kbps: number };
   open_alerts: number;
+  agent_url?: string;
+  server_name?: string;
+  agent_ip?: string;
+  public_tls?: { names: string[]; cert_file: string; active: boolean; dns_names?: string[]; issuer?: string; not_after?: string; days_left?: number; error?: string };
 };
 
 const yes = (b: boolean, good = true) => <Pill state={b === good ? "verified" : "pending_reboot"} label={b ? "yes" : "no"} />;
@@ -58,6 +62,17 @@ export default function ServerPage() {
                 ["Two-person approval", s.policy.approval_policy && Object.keys(s.policy.approval_policy).length
                   ? Object.entries(s.policy.approval_policy).map(([k, v]) => `${k}: ${v}`).join(", ") : "1 approver for all severities"],
                 ["Separation of duties", yes(s.policy.separation_of_duties)],
+                ["Server name", s.server_name ? <Mono>{s.server_name}</Mono> : <span className="text-amber">not set (server_name)</span>],
+                ["Agent URL", <><Mono>{s.agent_url}</Mono>{s.agent_ip && <span className="muted"> · hosts line {s.agent_ip} {s.server_name}</span>}</>],
+                ["Public console certificate", s.public_tls ? (
+                  <>
+                    <Pill state={s.public_tls.active ? (s.public_tls.days_left !== undefined && s.public_tls.days_left < 14 ? "pending_reboot" : "verified") : "failed"}
+                      label={s.public_tls.active ? "in use" : "NOT in use (internal certificate served)"} />{" "}
+                    <Mono>{s.public_tls.names.join(", ")}</Mono>
+                    {s.public_tls.not_after && <> · {s.public_tls.issuer} · expires <Time value={s.public_tls.not_after} /> ({s.public_tls.days_left} days)</>}
+                    {s.public_tls.error && <div className="text-amber">{s.public_tls.error}</div>}
+                  </>
+                ) : "not configured (internal CA only)"],
               ]} />
             </section>
             <section className="card">

@@ -32,7 +32,7 @@ import (
 )
 
 // Version is set at build time: -ldflags "-X offpatch/internal/agent.Version=1.2.3".
-var Version = "0.9.0"
+var Version = "0.9.1"
 
 // State is persisted in <state-dir>/agent.json (0600).
 type State struct {
@@ -127,7 +127,9 @@ func httpClient(caFile, certFile, keyFile string) (*http.Client, error) {
 		DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
 		TLSHandshakeTimeout:   15 * time.Second,
 		ResponseHeaderTimeout: 60 * time.Second,
-		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
+		// ALPN dss-agent/1 asks for the internal certificate (and the client
+		// certificate request) even on a name browsers get a public certificate for.
+		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{pki.AgentALPN, "http/1.1"}},
 	}
 	if caFile != "" {
 		pem, err := os.ReadFile(caFile)

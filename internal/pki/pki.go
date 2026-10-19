@@ -29,6 +29,11 @@ const (
 	ServerKey  = "server.key"
 
 	ClientValidity = 365 * 24 * time.Hour
+
+	// AgentALPN: TLS ALPN protocol agents (0.9.1+) offer, so the server
+	// answers them with the internal certificate and a client-certificate
+	// request even on a name browsers get a public certificate for.
+	AgentALPN = "dss-agent/1"
 )
 
 // RenewBefore: agents renew when their certificate expires within this window.

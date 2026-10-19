@@ -1,5 +1,6 @@
 {
   "listen": "0.0.0.0:8443",
+  "server_name": "pm.corp.internal",
   "data_dir": "/var/lib/offpatch-server",
   "pki_dir": "/etc/offpatch-server/pki",
   "trusted_keys": [{"public_key_file": "/etc/offpatch-server/bundle.pub", "sources": ["acq-zone-1"]}],

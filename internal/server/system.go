@@ -125,6 +125,12 @@ func (s *Server) system(w http.ResponseWriter, r *http.Request) {
 			"lost_after_install": c.LostAfterInstall.String(), "preinstall_min_free_disk_mb": c.Preinstall.MinFreeDiskMB, "preinstall_min_battery_pct": c.Preinstall.policyFor("windows").MinBatteryPct,
 		},
 		"open_alerts": len(alerts),
+		"agent_url":   s.agentURL(),
+		"server_name": c.ServerName,
+		"agent_ip":    s.agentIP(),
+	}
+	if s.pub != nil {
+		out["public_tls"] = s.pub.status(c.PublicTLS.Names)
 	}
 	writeJSON(w, 200, out)
 }

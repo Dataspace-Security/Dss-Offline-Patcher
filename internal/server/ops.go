@@ -178,6 +178,9 @@ func (s *Server) RunAlerts(ctx context.Context, every time.Duration) {
 		if err := s.checkServerCert(ctx, time.Now()); err != nil {
 			s.log.Error("server certificate check", "err", err)
 		}
+		if err := s.checkPublicCert(ctx); err != nil {
+			s.log.Error("public certificate check", "err", err)
+		}
 		if err := s.SweepIntelAlerts(ctx); err != nil {
 			s.log.Error("update intelligence alert sweep", "err", err)
 		}

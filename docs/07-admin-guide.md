@@ -28,11 +28,14 @@ limited to the local subnet when ufw is active, and the compliance report disclo
 single-server deployment. Then:
 
 1. Move the offline root key off the server: `sudo ./install-ubuntu.sh --export-root-key /media/usb`.
-2. Sign in at the URL the installer prints (`https://<server IP>:8443`) as
+2. Sign in at the URL the installer prints (`https://<server name>:8443`; the name is `--domain`,
+   default `patcher.dataspacesecurity.com`, and must resolve to the server: internal DNS or the
+   hosts-file line the installer prints, see §5.5) as
    `superadmin@dataspacesecurity.com` with the default password (vendor handbook) and change the password.
 3. **Settings → Users**: create the bank's Admin.
 4. **Endpoints → Create enrollment token** → run the PowerShell line on each PC as Administrator
-   (§5.1). Each PC needs TCP 8443 to the server's IP.
+   (§5.1). Each PC needs TCP 8443 to the server's IP; the command maps the server name to that
+   IP in the PC's hosts file when the name does not resolve there.
 5. **Patches → Needed → Import**, **Catalog → Approve**, **Patch this** (2 approvals).
 
 A two-machine layout (`--role server` in the isolated zone, `--role acquisition` in the connected
@@ -277,6 +280,7 @@ and the `metrics_token` for `GET /metrics` are unchanged.
 | `signing_key_compromised` | critical | A trust document revoked a bundle key as compromised (raised again if a revocation interrupted by a restart is completed later) |
 | `manifest_verification_failed` | critical | An endpoint refused an assignment because the signed manifest or the downloaded content did not verify (tampering until shown otherwise) |
 | `server_cert_expiring` | warning / critical | The server TLS certificate expires within 30 days (critical once expired): run `pmserver reissue-server-cert` and restart |
+| `public_cert_expiring` | warning / critical | The public console certificate (§5.5) expires within 14 days, i.e. renewal is failing or the bank's certificate needs replacing (critical once expired or unusable: browsers get the internal certificate). Closes itself once a valid certificate is loaded |
 | `audit_export_failed` | critical | Writing audit export files failed |
 | `install_failed` | warning | An agent reported `failed` |
 | `health_check_failed` | warning | A post-install health check failed |
@@ -619,9 +623,13 @@ The full commands are in [runbooks/02-acquisition-zone-setup-and-monthly-run.md]
 2. **Windows (usual way):** paste the one-line PowerShell command from the dialog into **Windows
    PowerShell as Administrator** on the PC. It pins the server's CA by SHA-256 fingerprint,
    downloads `pmagent.exe` from the server and checks its SHA-256, enrolls the PC and starts the
-   `offpatch-agent` service. The PC needs TCP 8443 (the server port) to the address in the
-   command: open the console with the address the PCs use (the server IP the installer prints), or
-   edit the server URL in the dialog. Manual alternative, in an elevated shell:
+   `offpatch-agent` service. The command uses the agent URL `https://<server name>:8443` (the
+   console fills it in whatever address it is open on; editable). When the name does not resolve
+   to the server's IP on the PC (offline network without DNS), it first adds one line
+   `<server IP> <server name> # DSS Patcher` to `C:\Windows\System32\drivers\etc\hosts`
+   (replaced on re-runs, untouched when the name already resolves there); the generated installer
+   does the same. The PC needs TCP 8443 (the server port) to the server's IP. Manual alternative,
+   in an elevated shell:
 
 ```powershell
 pmagent.exe enroll -server https://pm.corp.internal:8443 -token enr_… -pubkey bundle.pub -ca ca.pem -root-pubkey root.pub
@@ -667,6 +675,106 @@ itself automatically at check-in during the last 30 days (`endpoint.cert_renewed
 log). The alert sweep raises `cert_expiring` for any active endpoint whose certificate expires
 within 14 days, which normally means the agent has not checked in for a long time. An endpoint
 that was offline past its certificate expiry cannot renew and must be re-enrolled.
+
+### 5.5 Server name and certificates
+
+**The server is addressed by name.** The installer's `--domain NAME` (default
+`patcher.dataspacesecurity.com`, or the name an earlier install used) becomes `server_name` in
+`pmserver.json`; the console URL, the agent URL, the enrollment commands and the agents all use
+`https://<server name>:8443`. The internal server certificate always names it together with the
+server's IP (`init-pki`; on upgrades the installer reissues it when either is missing; agents
+pin the CA, not this certificate, so they keep working). `agent_ip` (default: detected) is the
+IP endpoints map the name to.
+
+The name must resolve to the server's IP for browsers and PCs, either by an internal DNS A
+record or by one hosts-file line, which the installer prints, for example:
+
+```text
+10.0.0.5 patcher.bank.example # DSS Patcher
+```
+
+- Windows (PowerShell as Administrator):
+  `Add-Content -Path "$env:SystemRoot\System32\drivers\etc\hosts" -Value "10.0.0.5 patcher.bank.example # DSS Patcher"`
+- Linux / macOS: `echo '10.0.0.5 patcher.bank.example # DSS Patcher' | sudo tee -a /etc/hosts`
+
+The Windows enrollment command adds that line by itself on each PC when the name does not resolve
+there; Ubuntu agents get it from `install-ubuntu.sh --role agent --server https://<name>:8443
+--server-ip <IP>`. Agents 0.9.0 and older were enrolled by IP and keep their server URL (the agent
+cannot be told a new one): they keep working unchanged and switch to the name only when they are
+re-enrolled with a new token (the existing identity is replaced).
+
+**Browsers and the certificate.** Without anything else, browsers see the internal CA's
+certificate. Choose one:
+
+| Option | Use when | How |
+|---|---|---|
+| Internal CA in the browsers | No public name; managed Windows PCs | Distribute `/etc/offpatch/pki/ca.pem` by Group Policy (Computer Configuration > Windows Settings > Security Settings > Public Key Policies > Trusted Root Certification Authorities) |
+| **Bank's own certificate** (recommended for isolated bank networks) | The bank's PKI issues server certificates | `--public-cert FILE --public-key FILE [--public-domain NAME]` |
+| Let's Encrypt | The name is public DNS and the server can reach the internet | `--public-domain NAME [--acme-challenge auto\|http\|cloudflare]` |
+
+The last two serve that certificate only to browsers; agents keep the internal CA and mTLS
+(below). Alone on an existing install the options only add or replace the certificate and change
+nothing else; together with other options they run as part of the install or upgrade.
+
+*Bank's own certificate.* `--public-cert` is the PEM chain (server certificate first, then the
+intermediates), `--public-key` its unencrypted PEM key. The installer checks that the key belongs
+to the certificate, that it has not expired (warning under 14 days), that the chain is in order
+(warning when only the server certificate is given: fine if it is issued directly by a root the
+browsers trust), copies both to `/etc/offpatch/pki/public/{cert,key}.pem` (owner `offpatch`,
+0600; the key is never printed) and sets `public_tls.names` to `--public-domain` (which the
+certificate must cover) or else to the certificate's DNS names (wildcards excluded). No certbot,
+no internet. To renew, re-run with the new files: pmserver picks them up without a restart.
+
+*Let's Encrypt.* `--acme-challenge auto` (default) uses HTTP-01 with `certbot --standalone` when
+TCP 80 is free on the host (no listener, no NAT rule forwarding it elsewhere; with ufw active the
+installer allows 80/tcp), else DNS-01 through Cloudflare when the credentials file exists, else it
+stops and lists the options. Cloudflare: a token with Zone > DNS > Edit for the zone in
+`/etc/offpatch/acme/cloudflare.ini` (or `--cloudflare-credentials FILE`), root-owned, 0600, one
+line `dns_cloudflare_api_token = <token>`; never printed. The account email is `--acme-email`,
+else `--admin-email` when given, else none. certbot runs as root, so the egress lock (which
+only restricts the offpatch accounts) does not affect it. Renewals use the method the certificate
+was issued with (certbot stores it; HTTP-01 needs TCP 80 free at renewal time too): `certbot.timer`
+renews 30 days before expiry, the deploy hook `/etc/letsencrypt/renewal-hooks/deploy/offpatch.sh`
+copies the files to `/etc/offpatch/pki/public/` and reloads pmserver. Test:
+`sudo certbot renew --dry-run`.
+
+**How a connection gets its certificate** (`public_tls` set):
+
+| Client | TLS handshake | Certificate | Client certificate |
+|---|---|---|---|
+| Agent 0.9.1+ (any name) | ALPN `dss-agent/1` | internal CA (pinned by the agent) | requested |
+| Agent 0.9.0 or older (enrolled by IP) | no SNI | internal CA | requested |
+| Anything on a name not in `public_tls.names` | SNI | internal CA | requested |
+| Browser on a `public_tls` name | SNI, no agent ALPN | public | not requested (no certificate picker) |
+
+So the server name may also be the public name. The agent API answers **421 Misdirected Request**
+on a connection that got the public certificate. The PowerShell enrollment command cannot offer
+ALPN; on a public name its pin also accepts a chain that Windows fully trusts for that name, and
+the agent it installs then pins the internal CA. pmserver re-reads the public certificate files
+within a minute of a change (at once on `systemctl reload offpatch-server`). A missing,
+unreadable, wrong-name or expired public certificate is never served: pmserver logs an ERROR and
+uses the internal certificate (a renewal whose files are half-written keeps the previous
+certificate). The **Server** page shows the server name, agent URL and the public certificate's
+issuer, expiry and any problem. Alert `public_cert_expiring`: warning under 14 days, critical when
+expired or unusable; it closes itself once a valid certificate is loaded.
+
+Configuration (method B, or by hand):
+
+```json
+"server_name": "patcher.bank.example",
+"agent_ip": "10.0.0.5",
+"public_tls": {"names": ["patcher.bank.example"], "cert_file": "/etc/offpatch/pki/public/cert.pem", "key_file": "/etc/offpatch/pki/public/key.pem"}
+```
+
+`server_name`: a DNS name (no IP). `agent_ip`: an IP, not loopback. `agent_url` (optional): the
+URL agents enroll against, default `https://<server_name>:<port>`. `public_tls.names`: DNS names
+(no IPs, no wildcards), matched case-insensitively against the SNI; `cert_file`/`key_file`
+default to `<pki_dir>/public/cert.pem` and `key.pem`. pmserver warns at start when the internal
+certificate does not name `server_name` or the agent URL's host.
+
+Remove: `--uninstall` deletes the certbot hook; `--purge` also deletes the Let's Encrypt
+certificate (and the local account when no other certbot certificate on the host uses it). To stop
+serving a public certificate, delete `public_tls` from `pmserver.json` and restart.
 
 ---
 

@@ -97,6 +97,14 @@ func (s *Server) agentSetup(w http.ResponseWriter, r *http.Request) {
 		"root_public_key":          root,
 		"windows_bootstrap":        agentDistHas(s, bootstrapExe) && s.caInChain,
 		"server_cert_hosts":        s.certHosts,
+		// Agents always enroll against agent_url (internal certificate),
+		// also when the console is opened on a public_tls name.
+		"agent_url":            s.agentURL(),
+		"agent_url_configured": s.cfg.AgentURL != "",
+		"public_names":         s.publicNames(),
+		// hosts-file line the enrollment adds when the URL uses server_name.
+		"server_name": s.cfg.ServerName,
+		"agent_ip":    s.agentIP(),
 	})
 }
 
@@ -120,6 +128,13 @@ func (s *Server) agentSetupFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	http.ServeContent(w, r, name, st.ModTime(), f)
+}
+
+func (s *Server) publicNames() []string {
+	if s.cfg.PublicTLS == nil {
+		return []string{}
+	}
+	return s.cfg.PublicTLS.Names
 }
 
 func caPEM(s *Server) string {

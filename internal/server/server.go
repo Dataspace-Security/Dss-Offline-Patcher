@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"offpatch/internal/pki"
@@ -35,6 +36,9 @@ type Server struct {
 	th    store.Thresholds
 	ca    *pki.CA // nil in insecure_http lab mode
 	auth  *authState
+	pub   *publicCert // public_tls; nil when not configured
+	// publicConns: raw connections that were served the public certificate.
+	publicConns sync.Map
 
 	// Set by TLSConfig before serving: whether the CA is sent in the chain
 	// (needed to pin it) and the names/IPs the server certificate covers.
@@ -88,6 +92,9 @@ func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger
 		}
 		s.ca = ca
 	}
+	if cfg.PublicTLS != nil {
+		s.pub = newPublicCert(cfg.PublicTLS, log)
+	}
 	cfg.LogAuthMode(log)
 	return s, nil
 }
@@ -99,7 +106,16 @@ func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger
 // With the internal CA, the server certificate is served together with the CA
 // certificate, so a client can pin the CA by fingerprint before it trusts it
 // (the one-command endpoint install does this).
+//
+// With public_tls, connections asking for a public name (SNI) get the public
+// certificate and no client-certificate request instead (publictls.go).
 func (s *Server) TLSConfig() *tls.Config {
+	cfg := s.withPublicTLS(s.internalTLSConfig())
+	s.checkAgentURLCert()
+	return cfg
+}
+
+func (s *Server) internalTLSConfig() *tls.Config {
 	pool := x509.NewCertPool()
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12, ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: pool}
 	if s.ca == nil {
@@ -264,7 +280,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { writeErr(w, http.StatusNotFound, "no such endpoint") })
 	mux.Handle("/", s.spa())
-	return securityHeaders(mux)
+	return securityHeaders(s.refusePublicAgent(mux))
 }
 
 func securityHeaders(h http.Handler) http.Handler {

@@ -175,7 +175,6 @@ func run(cfgPath string, log *slog.Logger) error {
 	srv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           h.Handler(),
-		TLSConfig:         h.TLSConfig(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// Bounds reading a request (headers + body: check-ins, reports). No
 		// WriteTimeout: content downloads stream for as long as they take.
@@ -183,6 +182,33 @@ func run(cfgPath string, log *slog.Logger) error {
 		IdleTimeout:    2 * time.Minute,
 		MaxHeaderBytes: 64 << 10,
 	}
+	// SIGHUP (systemctl reload offpatch-server, the certbot deploy hook)
+	// re-reads the public console certificate now; it is also re-read within
+	// a minute of its files changing. Handled even without public_tls, so a
+	// leftover hook never terminates the server.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	background(func() {
+		defer signal.Stop(hup)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hup:
+				if cfg.PublicTLS == nil {
+					log.Info("SIGHUP: nothing to reload (public_tls is not configured)")
+					continue
+				}
+				log.Info("SIGHUP: reloading the public console certificate")
+				h.ReloadPublicCert()
+			}
+		}
+	})
+	if cfg.PublicTLS != nil {
+		log.Info("public console certificate enabled: browsers on these names get it; agents keep the internal CA",
+			"names", strings.Join(cfg.PublicTLS.Names, ","), "cert_file", cfg.PublicTLS.CertFile)
+	}
+	h.ConfigureHTTPServer(srv) // TLS (internal + public certificate) and connection hooks
 	background(func() {
 		<-ctx.Done()
 		sctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
