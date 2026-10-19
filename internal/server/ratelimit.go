@@ -66,8 +66,13 @@ func (l *ipLimiter) prune(now time.Time) {
 }
 
 // clientIP is the TCP peer address (the management server is reached
-// directly inside the isolated zone; no proxy headers are trusted).
+// directly inside the isolated zone; no proxy headers are trusted), except
+// on the console_proxy listener, where a trusted reverse proxy names the
+// browser's address (X-Forwarded-For / X-Real-IP; consoleproxy.go).
 func clientIP(r *http.Request) string {
+	if p := proxiedInfo(r); p != nil {
+		return p.ClientIP
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr

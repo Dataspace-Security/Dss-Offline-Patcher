@@ -116,6 +116,10 @@ type Config struct {
 	// AgentURL: base URL agents enroll against (explicit override). Default
 	// https://<agent_ip>:<port>; never derived from server_name.
 	AgentURL string `json:"agent_url"`
+	// ConsoleProxy: optional plain-HTTP listener for a reverse proxy on this
+	// host (Temps, nginx) that terminates TLS for the console; browser
+	// surface only, agents keep the main listener (consoleproxy.go).
+	ConsoleProxy *ConsoleProxyConfig `json:"console_proxy"`
 
 	dir string // directory of the config file; relative paths resolve from here
 	// fromFile: loaded by LoadConfig (LogAuthMode logs only then).
@@ -292,6 +296,9 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: pki_dir is required with TLS (it issues endpoint client certificates)")
 	}
 	if err := c.normalizePublicTLS(); err != nil {
+		return nil, err
+	}
+	if err := c.normalizeConsoleProxy(); err != nil {
 		return nil, err
 	}
 	return c, nil

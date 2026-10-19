@@ -19,6 +19,7 @@ type Sys = {
   server_name?: string;
   agent_ip?: string;
   public_tls?: { names: string[]; cert_file: string; active: boolean; dns_names?: string[]; issuer?: string; not_after?: string; days_left?: number; error?: string };
+  console_proxy?: { listen: string; trusted_proxies: string[] };
 };
 
 const yes = (b: boolean, good = true) => <Pill state={b === good ? "verified" : "pending_reboot"} label={b ? "yes" : "no"} />;
@@ -73,6 +74,9 @@ export default function ServerPage() {
                     {s.public_tls.error && <div className="text-amber">{s.public_tls.error}</div>}
                   </>
                 ) : "not configured (internal CA only)"],
+                ["Console via reverse proxy", s.console_proxy
+                  ? <><Mono>http://{s.console_proxy.listen}</Mono><span className="muted"> · plain HTTP, TLS at the proxy · trusted {s.console_proxy.trusted_proxies.join(", ")} · console only, agents use the agent URL</span></>
+                  : "not configured"],
               ]} />
             </section>
             <section className="card">

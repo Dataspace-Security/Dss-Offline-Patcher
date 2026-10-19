@@ -72,12 +72,12 @@ func (s *Server) setMFAPreAuth(w http.ResponseWriter, r *http.Request, email str
 	n := make([]byte, 12)
 	rand.Read(n)
 	b, _ := json.Marshal(mfaPreAuth{Email: email, Exp: time.Now().Add(mfaPreAuthFor).Unix(), Nonce: hex.EncodeToString(n)})
-	http.SetCookie(w, &http.Cookie{Name: mfaCookie, Value: s.sign(b), Path: "/api/auth/mfa", HttpOnly: true, Secure: r.TLS != nil,
+	http.SetCookie(w, &http.Cookie{Name: mfaCookie, Value: s.sign(b), Path: "/api/auth/mfa", HttpOnly: true, Secure: secureRequest(r),
 		SameSite: http.SameSiteStrictMode, MaxAge: int(mfaPreAuthFor.Seconds())})
 }
 
 func clearMFAPreAuth(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: mfaCookie, Value: "", Path: "/api/auth/mfa", MaxAge: -1, HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: mfaCookie, Value: "", Path: "/api/auth/mfa", MaxAge: -1, HttpOnly: true, Secure: secureRequest(r), SameSite: http.SameSiteStrictMode})
 }
 
 // mfaLogin: POST /api/auth/mfa {code} or {recovery_code} with the pre-auth

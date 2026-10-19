@@ -827,6 +827,79 @@ Remove: `--uninstall` deletes the certbot hook; `--purge` also deletes the Let's
 certificate (and the local account when no other certbot certificate on the host uses it). To stop
 serving a public certificate, delete `public_tls` from `pmserver.json` and restart.
 
+### 5.6 Console behind a reverse proxy (Temps, nginx, load balancer)
+
+Use this when pmserver shares a host with a reverse proxy that already owns port 443 and
+terminates TLS for the console's public name (for example Temps for
+`patch.dataspacesecurity.com`) and forwards to an upstream over **plain HTTP**. pmserver then
+opens a second listener, `console_proxy`, on loopback for that proxy only:
+
+- **Console only.** It serves the console (SPA), the admin API (`/api/*`), `/auth/*` and
+  `/api/auth/*`. The agent API (`/api/agent/*`) and the enrollment bootstrap downloads
+  (`/api/agent-setup/bootstrap/*`) answer **421**, `/metrics` **404**. Agents are unchanged: they
+  keep connecting directly to `https://<server IP>:8443` with mutual TLS (open that port to the
+  PCs as before). The listener is plain HTTP and never asks for a client certificate.
+- **Only the proxy may connect.** Connections from outside `trusted_proxies` get 403.
+- **Forwarded headers, only there.** For requests from a trusted proxy on this listener the
+  client address is the right-most address in `X-Forwarded-For` that is not a trusted proxy
+  (else `X-Real-IP`); it is used for the sign-in rate limit and in the logs. The scheme comes
+  from `X-Forwarded-Proto`. The main listener (8443) ignores all these headers, so they cannot be
+  spoofed there.
+- **Never plain HTTP to the browser.** When `X-Forwarded-Proto` is not `https` (Temps also
+  forwards its port 80 to the same upstream), `GET`/`HEAD` get **308** to
+  `https://<X-Forwarded-Host or Host><path>`, every other method **403**: no password, MFA code or
+  cookie is accepted over plain HTTP. Over HTTPS, responses carry
+  `Strict-Transport-Security: max-age=31536000`, session cookies keep `Secure`, `HttpOnly`,
+  `SameSite=Strict`, and the CSRF rule (`X-Offpatch-CSRF: 1`) is unchanged.
+
+Install (role all/server):
+
+```
+sudo ./install-ubuntu.sh --console-proxy-port 8090
+```
+
+This writes the following into `pmserver.json` (remembered for upgrades; `--no-console-proxy`
+removes it) and restarts pmserver. ufw is not changed (loopback).
+
+```json
+"console_proxy": {"listen": "127.0.0.1:8090", "trusted_proxies": ["127.0.0.1/32", "::1/128"]}
+```
+
+`listen` must be a loopback or private address and port (pmserver refuses to start with
+`0.0.0.0`, `::`, a public address, or the main listener's port). `trusted_proxies` (required) are
+CIDRs of the proxy (`0.0.0.0/0` is refused). If the proxy runs on another machine of a private
+network, use that network's address for `listen` and the proxy's address for `trusted_proxies`.
+
+Point the proxy at `http://127.0.0.1:8090`. Temps:
+
+```
+temps load-balancer create -d <name> -t http://127.0.0.1:8090
+```
+
+nginx (inside the `server { listen 443 ssl; ... }` block of the console name):
+
+```
+location / {
+    proxy_pass http://127.0.0.1:8090;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $host;
+    client_max_body_size 64m;
+}
+```
+
+The proxy must send `X-Forwarded-Proto` (Temps and nginx as above do). Check:
+`curl -sI https://patch.dataspacesecurity.com/` shows `strict-transport-security`;
+`curl -sI http://patch.dataspacesecurity.com/` answers 308 to `https://`. The **Server** page
+shows "Console via reverse proxy" with the listener, and `GET /api/system` has
+`console_proxy.listen`.
+
+SSO behind the proxy: set `oidc.redirect_url` to the public HTTPS name
+(`https://patch.dataspacesecurity.com/auth/callback`) and register it at the identity provider;
+pmserver never derives it from request headers. Enrollment commands shown in the console always
+use the agent URL (`agent_url` / `agent_ip`), never the proxy's name or port.
+
 ---
 
 ## 6. Audit log and evidence

@@ -74,6 +74,14 @@
 #   --agent-url URL                   URL agents enroll against (default https://<--domain>:<port>; may
 #                                     be the public name: agents ask for their certificate by TLS ALPN)
 #
+# Console behind a reverse proxy on this host (optional; role all/server). When another program
+# (Temps, nginx, a load balancer) owns 443 and terminates TLS for the console's name, pmserver also
+# listens on 127.0.0.1:PORT in plain HTTP for it: console only (no agent API), connections only from
+# 127.0.0.1/::1, X-Forwarded-For / X-Forwarded-Proto believed only there. Agents are unchanged
+# (https://<server IP>:<port>, mTLS). ufw is not changed (loopback).
+#   --console-proxy-port PORT         e.g. 8090; point the proxy at http://127.0.0.1:PORT (remembered)
+#   --no-console-proxy                remove that listener
+#
 # Re-running (same role) upgrades: keys, certificates, tokens, config and data are kept;
 # a verified backup is taken first and the previous binaries are kept in /opt/offpatch/bin.prev.
 set -euo pipefail
@@ -98,6 +106,7 @@ DEFAULT_DOMAIN="dsspatcher.local"   # --domain default: .local is resolved by mD
 DOMAIN_IN="" SERVER_IP_IN="" SERVER_NAME=""
 PUBLIC_DOMAIN_IN="" PUBLIC_CERT_IN="" PUBLIC_KEY_IN="" ACME_CHALLENGE="" CF_CREDS="" ACME_EMAIL="" AGENT_URL_IN=""
 OTHER_ARGS=0                         # 1 = an option other than the public-certificate ones was given
+CONSOLE_PROXY_PORT_IN="" NO_CONSOLE_PROXY=0   # --console-proxy-port / --no-console-proxy
 
 PREFIX=/opt/offpatch                 # binaries
 ETC=/etc/offpatch                    # config, PKI, keys
@@ -136,7 +145,7 @@ usage() { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; ex
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --role|--port|--hosts|--go-version|--server|--token|--ca|--pubkey|--root-pubkey|--audit-dir|--allow-from|--backup-dir|--backup-keep|--admin-email|--export-root-key|--public-domain|--public-cert|--public-key|--acme-challenge|--cloudflare-credentials|--acme-email|--agent-url|--domain|--server-ip)
+    --role|--port|--hosts|--go-version|--server|--token|--ca|--pubkey|--root-pubkey|--audit-dir|--allow-from|--backup-dir|--backup-keep|--admin-email|--export-root-key|--public-domain|--public-cert|--public-key|--acme-challenge|--cloudflare-credentials|--acme-email|--agent-url|--domain|--server-ip|--console-proxy-port)
       [ $# -ge 2 ] || die "$1 needs a value" ;;
   esac
   case "$1" in
@@ -180,6 +189,8 @@ while [ $# -gt 0 ]; do
     --agent-url) AGENT_URL_IN="${2%/}"; shift ;;
     --domain) DOMAIN_IN=$(printf '%s' "$2" | tr 'A-Z' 'a-z'); DOMAIN_IN=${DOMAIN_IN%.}; shift ;;
     --server-ip) SERVER_IP_IN="$2"; shift ;;
+    --console-proxy-port) CONSOLE_PROXY_PORT_IN="$2"; shift ;;
+    --no-console-proxy) NO_CONSOLE_PROXY=1 ;;
     -h|--help) usage 0 ;;
     *) echo "unknown option: $1"; usage 1 ;;
   esac
@@ -223,6 +234,14 @@ if [ -n "$AGENT_URL_IN" ]; then
 fi
 PUBLIC_DOMAIN=$PUBLIC_DOMAIN_IN PUBLIC_MODE="" PUBLIC_NAMES="" ACME_METHOD=""
 [ -z "$DOMAIN_IN" ] || valid_domain "$DOMAIN_IN" || die "--domain must be a DNS name such as patcher.bank.example (got: $DOMAIN_IN)"
+# Console behind a reverse proxy: plain-HTTP loopback listener (remembered; --no-console-proxy removes it).
+[ -z "$CONSOLE_PROXY_PORT_IN" ] || [ $NO_CONSOLE_PROXY = 0 ] || die "--console-proxy-port and --no-console-proxy exclude each other"
+if [ -n "$CONSOLE_PROXY_PORT_IN" ]; then
+  [[ "$CONSOLE_PROXY_PORT_IN" =~ ^[0-9]+$ ]] && [ "$CONSOLE_PROXY_PORT_IN" -ge 1 ] && [ "$CONSOLE_PROXY_PORT_IN" -le 65535 ] \
+    || die "--console-proxy-port must be 1-65535 (got: $CONSOLE_PROXY_PORT_IN)"
+  [ "$ROLE" = all ] || [ "$ROLE" = server ] || die "--console-proxy-port is for --role all or server (the console)"
+fi
+if [ $NO_CONSOLE_PROXY = 1 ]; then CONSOLE_PROXY_PORT=""; else CONSOLE_PROXY_PORT=${CONSOLE_PROXY_PORT_IN:-$(state_get CONSOLE_PROXY_PORT)}; fi
 # ufw sources given on an earlier run stay in force unless new --allow-from values are given.
 if [ ${#ALLOW_FROM[@]} -eq 0 ]; then read -r -a ALLOW_FROM <<< "$(state_get ALLOW_FROM)"; fi
 for c in ${ALLOW_FROM[@]+"${ALLOW_FROM[@]}"}; do
@@ -1671,6 +1690,32 @@ PY
       warn "python3 not found: set \"acquisition_requests_dir\": \"$ACQ_REQ_DIR\" and \"deployment_mode\": \"single-server\" in $ETC/pmserver.json by hand"
     fi
   fi
+  # Console behind a reverse proxy (Temps, nginx): console_proxy listens on loopback in plain HTTP.
+  if [ -n "$CONSOLE_PROXY_PORT" ] || [ $NO_CONSOLE_PROXY = 1 ]; then
+    cfg_port=$(cfg_get listen); cfg_port=${cfg_port##*:}
+    [ -z "$CONSOLE_PROXY_PORT" ] || [ "$CONSOLE_PROXY_PORT" != "${cfg_port:-$PORT}" ] \
+      || die "--console-proxy-port $CONSOLE_PROXY_PORT is the server port; pick another one (e.g. 8090)"
+    command -v python3 >/dev/null || die "python3 is required to edit $ETC/pmserver.json (console_proxy)"
+    if msg=$(python3 - "$ETC/pmserver.json" "$CONSOLE_PROXY_PORT" <<'PY'
+import json, sys
+p, port = sys.argv[1], sys.argv[2]
+c = json.load(open(p))
+want = {"listen": "127.0.0.1:" + port, "trusted_proxies": ["127.0.0.1/32", "::1/128"]} if port else None
+if c.get("console_proxy") != want:
+    if want:
+        c["console_proxy"] = want
+        print("console_proxy listens on http://127.0.0.1:" + port + " for the reverse proxy")
+    else:
+        c.pop("console_proxy", None)
+        print("console_proxy removed (no reverse-proxy listener)")
+    json.dump(c, open(p, "w"), indent=2)
+PY
+); then
+      if [ -n "$msg" ]; then ok "$ETC/pmserver.json: $msg"; fi
+    else
+      die "could not update console_proxy in $ETC/pmserver.json"
+    fi
+  fi
   chown root:"$SVC_USER" "$ETC/pmserver.json"; chmod 0640 "$ETC/pmserver.json"
 
   # Offer agent binaries for download in the console (Agent setup page and the
@@ -1720,6 +1765,13 @@ PY
     sleep 1
   done
   curl -fs -o /dev/null ${CURL_CA[@]+"${CURL_CA[@]}"} "$URL_LOCAL/" || die "server did not start; check: journalctl -u offpatch-server (or $SRV_DATA/pmserver.log)"
+  if [ -n "$CONSOLE_PROXY_PORT" ]; then
+    if curl -fs -o /dev/null -H 'X-Forwarded-Proto: https' "http://127.0.0.1:$CONSOLE_PROXY_PORT/"; then
+      ok "console reverse-proxy listener answers on http://127.0.0.1:$CONSOLE_PROXY_PORT"
+    else
+      warn "the console reverse-proxy listener http://127.0.0.1:$CONSOLE_PROXY_PORT does not answer (journalctl -u offpatch-server)"
+    fi
+  fi
   echo "$URL_PUBLIC" > "$ETC/console-url.txt"
   ok "server running at $URL_PUBLIC"
   [ $PUBLIC_OK = 0 ] || check_public_https "$PORT"
@@ -2065,6 +2117,7 @@ MDNS_PKGS=$MDNS_PKGS_NOW
 MDNS_UFW=$MDNS_UFW_NOW
 PUBLIC_MODE=$( [ $PUBLIC_OK = 1 ] && echo "$PUBLIC_MODE" || state_get PUBLIC_MODE )
 PUBLIC_NAMES=$( [ $PUBLIC_OK = 1 ] && echo "$PUBLIC_NAMES" || state_get PUBLIC_NAMES )
+CONSOLE_PROXY_PORT=$( [ $IS_SERVER = 1 ] && echo "$CONSOLE_PROXY_PORT" || state_get CONSOLE_PROXY_PORT )
 EOF
 chmod 0644 "$STATE_FILE"
 
@@ -2081,6 +2134,11 @@ if [ $IS_SERVER = 1 ]; then
     echo "                  (sign in with email + password)"
   else
     echo "  Console:        $URL_PUBLIC   (sign in with email + password)"
+  fi
+  if [ -n "$CONSOLE_PROXY_PORT" ]; then
+    echo "  Console behind your reverse proxy: point it at http://127.0.0.1:$CONSOLE_PROXY_PORT (plain HTTP on loopback; TLS at the proxy)"
+    echo "                  e.g. Temps: temps load-balancer create -d <name> -t http://127.0.0.1:$CONSOLE_PROXY_PORT"
+    echo "                  console only: agents keep connecting to the agent URL below (mTLS); remove: --no-console-proxy"
   fi
   AGENT_URL_NOW=${AGENT_URL_NOW:-$(cfg_get agent_url)}; AGENT_URL_NOW=${AGENT_URL_NOW:-$URL_AGENT}
   [ $PUBLIC_OK = 1 ] || echo "  Agents connect to: $AGENT_URL_NOW   (by IP: no DNS or hosts-file entry on the PCs)"

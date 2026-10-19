@@ -209,10 +209,25 @@ func run(cfgPath string, log *slog.Logger) error {
 			"names", strings.Join(cfg.PublicTLS.Names, ","), "cert_file", cfg.PublicTLS.CertFile)
 	}
 	h.ConfigureHTTPServer(srv) // TLS (internal + public certificate) and connection hooks
+	proxyFailed := make(chan error, 1)
+	psrv, err := startConsoleProxy(cfg, h, log, proxyFailed)
+	if err != nil {
+		return err
+	}
+	var proxyErr error
 	background(func() {
-		<-ctx.Done()
+		select {
+		case <-ctx.Done():
+		case proxyErr = <-proxyFailed: // the console listener died: stop, do not run half-reachable
+			log.Error("console proxy listener failed; stopping", "err", proxyErr)
+		}
 		sctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		if psrv != nil {
+			if err := psrv.Shutdown(sctx); err != nil {
+				log.Warn("shutdown: in-flight console proxy requests did not finish", "err", err)
+			}
+		}
 		if err := srv.Shutdown(sctx); err != nil {
 			log.Warn("shutdown: in-flight requests did not finish", "err", err)
 		}
@@ -227,7 +242,9 @@ func run(cfgPath string, log *slog.Logger) error {
 		err = srv.ListenAndServe()
 	}
 	if err == http.ErrServerClosed {
-		return nil
+		stop()
+		wg.Wait()
+		return proxyErr
 	}
 	return err
 }

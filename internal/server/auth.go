@@ -124,7 +124,7 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	u, ls := p.AuthURL(safeReturn(r.URL.Query().Get("return")))
 	b, _ := json.Marshal(ls)
-	http.SetCookie(w, &http.Cookie{Name: stateCookie, Value: s.sign(b), Path: "/auth/", HttpOnly: true, Secure: r.TLS != nil,
+	http.SetCookie(w, &http.Cookie{Name: stateCookie, Value: s.sign(b), Path: "/auth/", HttpOnly: true, Secure: secureRequest(r),
 		SameSite: http.SameSiteLaxMode, MaxAge: 600})
 	http.Redirect(w, r, u, http.StatusFound)
 }
@@ -198,7 +198,7 @@ func (s *Server) authCallback(w http.ResponseWriter, r *http.Request) {
 
 // setSessionCookie: the console session (SSO and local users alike).
 func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, tok string) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: tok, Path: "/", HttpOnly: true, Secure: r.TLS != nil,
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: tok, Path: "/", HttpOnly: true, Secure: secureRequest(r),
 		SameSite: http.SameSiteStrictMode, MaxAge: int(s.cfg.SessionTTL.Seconds())})
 }
 
@@ -212,7 +212,7 @@ func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
 		}
 		s.store.Logout(r.Context(), c.Value)
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: secureRequest(r), SameSite: http.SameSiteStrictMode})
 	resp := map[string]string{}
 	if s.auth.provider != nil && s.auth.provider.EndSessionURL() != "" {
 		resp["end_session_url"] = s.auth.provider.EndSessionURL()

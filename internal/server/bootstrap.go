@@ -52,6 +52,9 @@ func (s *Server) serverURL(r *http.Request) (string, bool) {
 	if s.cfg.AgentURL != "" {
 		return s.cfg.AgentURL, true
 	}
+	if proxiedInfo(r) != nil {
+		return s.agentURL(), true // the reverse proxy's address never reaches agents
+	}
 	host := r.Host
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h

@@ -713,3 +713,22 @@ Types:
 | `POST /api/acquisition-requests` | user | **400** `can't import: <winget id>: <reason>[; …]` when any requested app is `importable: "no"` (fleet rows: as on `/api/updates`; Library items: with the chosen architecture). No request is created or audited. `unknown` is accepted (pmctl decides). |
 
 The catalog column of `/api/updates` and `/api/fleet/status` also links app rows to `exe` packages, by `exe.detect.product_code` (the ARP key inventory reports as the item id) or normalised `package_name`.
+
+## v1.12 additions — console behind a reverse proxy (`console_proxy`)
+
+Optional second listener (`console_proxy.listen`, plain HTTP on loopback or a private address) for
+a reverse proxy that terminates TLS (Temps, nginx); see
+[07-admin-guide.md §5.6](07-admin-guide.md#56-console-behind-a-reverse-proxy-temps-nginx-load-balancer).
+
+| Route / behaviour | Contract |
+|---|---|
+| any request from outside `console_proxy.trusted_proxies` | **403** |
+| `/api/agent/*`, `/api/agent-setup/bootstrap/*` | **421** (agents use the main listener, mTLS) |
+| `/metrics` | **404** |
+| `X-Forwarded-Proto` not `https` | `GET`/`HEAD`: **308** to `https://<X-Forwarded-Host or Host><path>?<query>`; other methods **403** |
+| everything else (console, `/api/*` admin routes, `/auth/*`, `/api/auth/*`) | as on the main listener, plus `Strict-Transport-Security: max-age=31536000`; cookies `Secure` |
+| `GET /api/system` (viewer) | gains `console_proxy: {listen, trusted_proxies}` when configured |
+
+Client address on that listener (trusted proxy only): right-most `X-Forwarded-For` entry that is
+not a trusted proxy, else `X-Real-IP`, else the proxy. It keys the sign-in rate limit and appears
+in logs. The main listener never reads `X-Forwarded-*` / `X-Real-IP`.

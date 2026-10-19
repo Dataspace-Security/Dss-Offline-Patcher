@@ -129,6 +129,9 @@ func (s *Server) system(w http.ResponseWriter, r *http.Request) {
 		"server_name": c.ServerName,
 		"agent_ip":    s.agentIP(),
 	}
+	if cp := c.consoleProxyStatus(); cp != nil {
+		out["console_proxy"] = cp
+	}
 	if s.pub != nil {
 		out["public_tls"] = s.pub.status(c.PublicTLS.Names)
 	}
