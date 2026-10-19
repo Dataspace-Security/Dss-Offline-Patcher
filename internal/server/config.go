@@ -103,17 +103,18 @@ type Config struct {
 	// served only to browsers asking for one of its names (SNI); agents keep
 	// the internal CA and mTLS (publictls.go).
 	PublicTLS *PublicTLSConfig `json:"public_tls"`
-	// ServerName: DNS name of this server (e.g. patcher.bank.example). The
-	// console, the enrollment commands and agents use
-	// https://<server_name>:<port>; the internal server certificate must
-	// include it.
+	// ServerName: DNS name of this server (e.g. patcher.bank.example) for
+	// the console only: browsers open https://<server_name>:<port> (the name
+	// resolves through internal DNS or admins' hosts files). Agents never use
+	// it unless agent_url is set to it explicitly. The internal server
+	// certificate must include it.
 	ServerName string `json:"server_name"`
-	// AgentIP: the server's IP as endpoints reach it; the enrollment writes
-	// "<agent_ip> <server_name>" into endpoints' hosts files when the name
-	// does not resolve there (offline networks without DNS). Default: detected.
+	// AgentIP: the server's IP as endpoints reach it; agents connect to
+	// https://<agent_ip>:<port>. Default: detected (listen address, the
+	// internal certificate's IP, else this host's first IPv4 address).
 	AgentIP string `json:"agent_ip"`
-	// AgentURL: base URL agents enroll against. Default
-	// https://<server_name>:<port>, else https://<server IP>:<port>.
+	// AgentURL: base URL agents enroll against (explicit override). Default
+	// https://<agent_ip>:<port>; never derived from server_name.
 	AgentURL string `json:"agent_url"`
 
 	dir string // directory of the config file; relative paths resolve from here

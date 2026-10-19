@@ -29,13 +29,13 @@ single-server deployment. Then:
 
 1. Move the offline root key off the server: `sudo ./install-ubuntu.sh --export-root-key /media/usb`.
 2. Sign in at the URL the installer prints (`https://<server name>:8443`; the name is `--domain`,
-   default `dsspatcher.internal`, and must resolve to the server: internal DNS or the
-   hosts-file line the installer prints, see §5.5) as
+   default `dsspatcher.internal`, and must resolve to the server on the admins' PCs: internal DNS
+   or the hosts-file line the installer prints, see §5.5) as
    `superadmin@dataspacesecurity.com` with the default password (vendor handbook) and change the password.
 3. **Settings → Users**: create the bank's Admin.
 4. **Endpoints → Create enrollment token** → run the PowerShell line on each PC as Administrator
-   (§5.1). Each PC needs TCP 8443 to the server's IP; the command maps the server name to that
-   IP in the PC's hosts file when the name does not resolve there.
+   (§5.1). Each PC needs TCP 8443 to the server's IP. Agents connect by that IP
+   (`https://<server IP>:8443`), never by the server name: no DNS or hosts-file entry on PCs.
 5. **Patches → Needed → Import**, **Catalog → Approve**, **Patch this** (2 approvals).
 
 A two-machine layout (`--role server` in the isolated zone, `--role acquisition` in the connected
@@ -623,16 +623,14 @@ The full commands are in [runbooks/02-acquisition-zone-setup-and-monthly-run.md]
 2. **Windows (usual way):** paste the one-line PowerShell command from the dialog into **Windows
    PowerShell as Administrator** on the PC. It pins the server's CA by SHA-256 fingerprint,
    downloads `pmagent.exe` from the server and checks its SHA-256, enrolls the PC and starts the
-   `offpatch-agent` service. The command uses the agent URL `https://<server name>:8443` (the
-   console fills it in whatever address it is open on; editable). When the name does not resolve
-   to the server's IP on the PC (offline network without DNS), it first adds one line
-   `<server IP> <server name> # DSS Patcher` to `C:\Windows\System32\drivers\etc\hosts`
-   (replaced on re-runs, untouched when the name already resolves there); the generated installer
-   does the same. The PC needs TCP 8443 (the server port) to the server's IP. Manual alternative,
-   in an elevated shell:
+   `offpatch-agent` service. The command uses the agent URL from the server (`agent_url`, by
+   default `https://<server IP>:8443`), also when the console is open on the server name, and the
+   generated installer downloads from and enrolls against that same URL. Nothing else changes on
+   the PC: no hosts-file or DNS entry (the IP is in the internal certificate). The PC needs TCP
+   8443 (the server port) to the server's IP. Manual alternative, in an elevated shell:
 
 ```powershell
-pmagent.exe enroll -server https://pm.corp.internal:8443 -token enr_… -pubkey bundle.pub -ca ca.pem -root-pubkey root.pub
+pmagent.exe enroll -server https://10.0.0.5:8443 -token enr_… -pubkey bundle.pub -ca ca.pem -root-pubkey root.pub
 pmagent.exe service install
 sc.exe start offpatch-agent
 ```
@@ -678,13 +676,16 @@ that was offline past its certificate expiry cannot renew and must be re-enrolle
 
 ### 5.5 Server name and certificates
 
-**The server is addressed by name.** The installer's `--domain NAME` (default
+**The name is for the console; agents use the IP.** The installer's `--domain NAME` (default
 `dsspatcher.internal`, or the name an earlier install used) becomes `server_name` in
-`pmserver.json`; the console URL, the agent URL, the enrollment commands and the agents all use
-`https://<server name>:8443`. The internal server certificate always names it together with the
-server's IP (`init-pki`; on upgrades the installer reissues it when either is missing; agents
-pin the CA, not this certificate, so they keep working). `agent_ip` (default: detected) is the
-IP endpoints map the name to.
+`pmserver.json`: browsers open the console at `https://<server name>:8443`. Agents never use the
+name: they connect to `agent_url`, by default `https://<agent_ip>:8443`, where `agent_ip` is the
+server's IP (detected; set it in `pmserver.json` on servers with several addresses). The
+enrollment commands use that URL whatever address the console is open on, so endpoints need no
+DNS record and no hosts-file entry. The internal server certificate always names both the server
+name and the IP (`init-pki`; on upgrades the installer reissues it when either is missing; agents
+pin the CA, not this certificate, so they keep working). `agent_url` can still be set explicitly
+(for example to a name the endpoints resolve); agents then select their certificate by ALPN.
 
 **Do not pick a name under a public domain that sends HSTS with `includeSubDomains`** (check:
 `curl -sI https://example.com | grep -i strict-transport`) unless the console gets a public or
@@ -693,8 +694,9 @@ and remove "Proceed anyway", so the internal certificate is blocked outright unt
 CA is trusted on that PC. That is why the default is `dsspatcher.internal`: `.internal` is
 reserved for private networks and never has public DNS or HSTS.
 
-The name must resolve to the server's IP for browsers and PCs, either by an internal DNS A
-record or by one hosts-file line, which the installer prints, for example:
+The name must resolve to the server's IP **on the admins' PCs only** (browsers), either by an
+internal DNS A record or by one hosts-file line on each admin PC, which the installer prints, for
+example:
 
 ```text
 10.0.0.5 patcher.bank.example # DSS Patcher
@@ -704,11 +706,13 @@ record or by one hosts-file line, which the installer prints, for example:
   `Add-Content -Path "$env:SystemRoot\System32\drivers\etc\hosts" -Value "10.0.0.5 patcher.bank.example # DSS Patcher"`
 - Linux / macOS: `echo '10.0.0.5 patcher.bank.example # DSS Patcher' | sudo tee -a /etc/hosts`
 
-The Windows enrollment command adds that line by itself on each PC when the name does not resolve
-there; Ubuntu agents get it from `install-ubuntu.sh --role agent --server https://<name>:8443
---server-ip <IP>`. Agents 0.9.0 and older were enrolled by IP and keep their server URL (the agent
-cannot be told a new one): they keep working unchanged and switch to the name only when they are
-re-enrolled with a new token (the existing identity is replaced).
+Endpoints never need it: the Windows enrollment command does not touch the hosts file, and
+Ubuntu agents are installed with `install-ubuntu.sh --role agent --server https://<server IP>:8443`
+(`--server-ip` is still accepted and ignored). An agent keeps the server URL it was enrolled with
+(it cannot be told a new one). Agents enrolled by IP keep working unchanged; an agent that was
+enrolled by the name under an earlier release keeps needing that name to resolve until it is
+re-enrolled: run the current one-line command with a new token (the installer sees the different
+server URL and enrolls the PC afresh against the IP).
 
 **Browsers and the certificate.** Without anything else, browsers see the internal CA's
 certificate. Choose one:
@@ -773,8 +777,9 @@ Configuration (method B, or by hand):
 "public_tls": {"names": ["patcher.bank.example"], "cert_file": "/etc/offpatch/pki/public/cert.pem", "key_file": "/etc/offpatch/pki/public/key.pem"}
 ```
 
-`server_name`: a DNS name (no IP). `agent_ip`: an IP, not loopback. `agent_url` (optional): the
-URL agents enroll against, default `https://<server_name>:<port>`. `public_tls.names`: DNS names
+`server_name`: a DNS name (no IP), for the console only. `agent_ip`: an IP, not loopback
+(default: detected). `agent_url` (optional override): the URL agents enroll against, default
+`https://<agent_ip>:<port>`; it is never derived from `server_name`. `public_tls.names`: DNS names
 (no IPs, no wildcards), matched case-insensitively against the SNI; `cert_file`/`key_file`
 default to `<pki_dir>/public/cert.pem` and `key.pem`. pmserver warns at start when the internal
 certificate does not name `server_name` or the agent URL's host.

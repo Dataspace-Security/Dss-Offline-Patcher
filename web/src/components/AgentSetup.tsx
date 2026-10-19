@@ -67,29 +67,15 @@ const PIN_CSHARP =
   "X509Certificate2 root=ch.ChainElements[ch.ChainElements.Count-1].Certificate;" +
   "using(SHA256 h=SHA256.Create()){return BitConverter.ToString(h.ComputeHash(root.RawData)).Replace(\"-\",\"\")==pin;}};}}";
 
-const DNS_NAME = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/;
-const IP_ADDR = /^(\d{1,3}(\.\d{1,3}){3}|[0-9a-fA-F:]*:[0-9a-fA-F:.]*)$/;
-
 /**
- * PowerShell that maps name to ip in the hosts file (one line tagged
- * "# DSS Patcher", replaced on re-runs) unless the name already resolves to
- * that IP: offline networks without DNS. "" when either value is unsafe to embed.
+ * `agentURL` is the agent URL from /api/agent-setup (by default the server's
+ * IP), never the address this console is open on: endpoints need no DNS or
+ * hosts-file entry. The line changes nothing on the PC besides the agent.
  */
-export function hostsPrelude(name: string, ip: string): string {
-  if (!DNS_NAME.test(name) || !IP_ADDR.test(ip)) return "";
+export function windowsOneLiner(agentURL: string, token: string, caSha256: string, opts: { web?: boolean } = {}): string {
   return (
-    `$n='${name}'; $i='${ip}'; $h="$env:SystemRoot\\System32\\drivers\\etc\\hosts"; $r=@(); ` +
-    `try { $r=@([Net.Dns]::GetHostAddresses($n) | % { $_.IPAddressToString }) } catch {}; ` +
-    `if ($r -notcontains $i) { $k=@(Get-Content $h | ? { -not ($_.Contains('# DSS Patcher') -and (($_ -split '\\s+') -contains $n)) }); ` +
-    `$k += "$i $n # DSS Patcher"; Set-Content $h $k -Encoding ASCII; Clear-DnsClientCache -EA 0 }; `
-  );
-}
-
-export function windowsOneLiner(url: string, token: string, caSha256: string, opts: { hostsName?: string; hostsIP?: string; web?: boolean } = {}): string {
-  const hosts = opts.hostsName && opts.hostsIP ? hostsPrelude(opts.hostsName, opts.hostsIP) : "";
-  return (
-    `$t='${token}'; ${hosts}Add-Type -TypeDefinition '${PIN_CSHARP}'; [OffpatchPin2]::Install('${caSha256.toUpperCase()}', $${opts.web ? "true" : "false"}); ` +
-    `iex (irm '${url}/api/agent-setup/bootstrap/windows.ps1' -Headers @{'X-Enrollment-Token'=$t})`
+    `$t='${token}'; Add-Type -TypeDefinition '${PIN_CSHARP}'; [OffpatchPin2]::Install('${caSha256.toUpperCase()}', $${opts.web ? "true" : "false"}); ` +
+    `iex (irm '${agentURL}/api/agent-setup/bootstrap/windows.ps1' -Headers @{'X-Enrollment-Token'=$t})`
   );
 }
 
@@ -100,11 +86,11 @@ export function windowsOneLiner(url: string, token: string, caSha256: string, op
 export function AgentSetupGuide({ token, groups, site }: { token?: string; groups?: string[]; site?: string }) {
   const { data, error } = useLoad(() => api.get<AgentSetup>("/api/agent-setup"), []);
   const [platform, setPlatform] = useState<Platform>("windows");
-  const [serverURL, setServerURL] = useState(window.location.origin);
+  // Agents connect to the agent URL the server hands out (https://<server IP>:<port> unless
+  // agent_url is set), never to the address this console is open on (often the server name).
+  const [serverURL, setServerURL] = useState("");
   const [urlEdited, setUrlEdited] = useState(false);
   const publicNames = data?.public_names ?? [];
-  // Agents use the agent URL the server hands out (https://<server name>:<port>), whatever
-  // address this console is open on.
   useEffect(() => {
     if (!urlEdited && data?.agent_url) setServerURL(data.agent_url);
   }, [data?.agent_url, urlEdited]);
@@ -133,9 +119,6 @@ export function AgentSetupGuide({ token, groups, site }: { token?: string; group
   const hostInCert = certHosts.length === 0 || certHosts.includes(host.replace(/^\[|\]$/g, ""));
   const hostIsPublic = publicNames.includes(host.toLowerCase());
   const canOneLiner = hasCA && !isHttp && urlValid && hostInCert && !!data?.windows_bootstrap && !!data?.ca_sha256;
-  // Offline networks: the command maps the server name to its IP in the PC's hosts file.
-  const hostsName = data?.server_name && host.toLowerCase() === data.server_name ? data.server_name : "";
-  const hostsIP = hostsName ? data?.agent_ip ?? "" : "";
 
   const winCmds = useMemo(() => {
     const pub = keys.map((_, i) => `C:\\offpatch\\${keyFile(i)}`).join(",") || "C:\\offpatch\\bundle.pub";
@@ -192,7 +175,7 @@ Remove-Item -Recurse -Force C:\\ProgramData\\offpatch`,
 
       <div className="form-grid">
         <label className="field">
-          <span>Server URL <em className="muted">as the endpoint reaches this server</em></span>
+          <span>Agent URL <em className="muted">agents connect by the server's IP (from the server's agent_url)</em></span>
           <input className="mono" value={serverURL} onChange={(e) => { setUrlEdited(true); setServerURL(e.target.value); }} />
         </label>
         {platform === "sim" ? (
@@ -218,7 +201,7 @@ Remove-Item -Recurse -Force C:\\ProgramData\\offpatch`,
           <span className="hint"> — only if you have the offline root public key; it lets the agent accept rotated bundle-signing keys via signed trust documents.</span>
         </span>
       </label>
-      {!urlValid && <div className="banner banner-error">Enter the URL as <Mono>http(s)://host:port</Mono> with no path.</div>}
+      {data && !urlValid && <div className="banner banner-error">Enter the URL as <Mono>http(s)://host:port</Mono> with no path.</div>}
       {hasCA && isHttp && (
         <div className="banner banner-warn">
           This server uses agent client certificates (mTLS), which require HTTPS. Use the <Mono>https://</Mono> address of the server.
@@ -251,7 +234,7 @@ Remove-Item -Recurse -Force C:\\ProgramData\\offpatch`,
             token; the existing enrollment is kept. Routine agent upgrades go through signed agent packages.
           </div>
           {token ? (
-            <CodeBlock lang="PowerShell (Administrator)" code={windowsOneLiner(url, tok, data?.ca_sha256 ?? "", { hostsName, hostsIP, web: hostIsPublic })} />
+            <CodeBlock lang="PowerShell (Administrator)" code={windowsOneLiner(url, tok, data?.ca_sha256 ?? "", { web: hostIsPublic })} />
           ) : (
             <div className="banner banner-info">
               The command contains an enrollment token. <Link to="/endpoints">Endpoints → Create enrollment token</Link> shows
@@ -259,12 +242,6 @@ Remove-Item -Recurse -Force C:\\ProgramData\\offpatch`,
             </div>
           )}
           <div className="hint">CA SHA-256 <Mono>{data?.ca_sha256}</Mono></div>
-        </div>
-      )}
-      {platform === "windows" && canOneLiner && hostsName && hostsIP && (
-        <div className="hint">
-          The command also maps <Mono>{hostsName}</Mono> to <Mono>{hostsIP}</Mono> in the PC's hosts file (one line tagged
-          <Mono># DSS Patcher</Mono>) unless the name already resolves there, so it works without internal DNS.
         </div>
       )}
       {platform === "windows" && hasCA && urlValid && !hostInCert && (

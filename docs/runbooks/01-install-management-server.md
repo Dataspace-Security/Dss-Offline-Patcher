@@ -79,8 +79,9 @@ MFA key, hardened `offpatch-server.service`, daily backup, ufw), plus:
   runs on the management server and that egress is limited to the downloader account by host
   firewall rules. `acquisition_stale_after` defaults to 3h (hourly runs).
 
-The summary ends with the next steps: the console URL with the server name (`--domain`), the
-hosts-file line for browsers and PCs without internal DNS, the super admin
+The summary ends with the next steps: the console URL with the server name (`--domain`, for
+browsers), the URL agents connect to (`https://<server IP>:8443`), the hosts-file line for the
+admins' PCs when there is no internal DNS (never needed on endpoints), the super admin
 email (default password), then 1. sign in and change the password, 2. Settings → Users: create the
 bank's Admin, 3. Endpoints → Create enrollment token → run the PowerShell line on each PC (as
 Administrator), 4. Patches → Needed → Import, Catalog → Approve, Patch this (2 approvals). Each PC
@@ -97,10 +98,13 @@ Details and configuration keys: [admin guide section 5.5](../07-admin-guide.md#5
    name of the earlier install). The installer writes `server_name` and `agent_ip` into
    `pmserver.json`, makes sure the internal server certificate names it and the server's IP
    (reissuing it on upgrades when not; agents keep working, they pin the CA) and prints the URL
-   `https://<name>:8443`. Create an internal DNS A record, or give admins the printed hosts-file
-   line (`<IP> <name> # DSS Patcher`). The Windows enrollment command adds that line on PCs by
-   itself; Ubuntu agents: `--role agent --server https://<name>:8443 --server-ip <IP>`. Agents
-   0.9.0 and older keep the IP they were enrolled with until re-enrolled.
+   `https://<name>:8443` for the console. Create an internal DNS A record, or give admins the
+   printed hosts-file line (`<IP> <name> # DSS Patcher`) for their own PCs. Agents do not use the
+   name: they connect to `https://<IP>:8443` (`agent_url`, printed as "Agents connect to"), so
+   endpoints need no DNS or hosts-file entry. The Windows enrollment command uses that URL;
+   Ubuntu agents: `--role agent --server https://<IP>:8443` (`--server-ip` is accepted and
+   ignored). Agents enrolled by the name under an earlier release keep that URL until
+   re-enrolled with a new token.
 2. **Browser certificate**, one of:
    - Group Policy: distribute `/etc/offpatch/pki/ca.pem` as a Trusted Root Certification Authority (no change on the server).
    - The bank's own certificate (recommended for isolated networks; no internet):

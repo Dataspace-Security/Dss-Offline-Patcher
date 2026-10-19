@@ -53,27 +53,6 @@ try {
   Step 'Preparing folders'
   Secure-Dir $Dir
   Secure-Dir $State
-{{- if .HostsName}}
-
-  # Offline networks without DNS: map the server name to its IP in the hosts file
-  # (one line tagged "# DSS Patcher", replaced on re-runs; untouched when the name already
-  # resolves to that IP).
-  $HostsName = '{{.HostsName}}'
-  $HostsIP   = '{{.HostsIP}}'
-  $HostsTag  = '# DSS Patcher'
-  $resolved = @()
-  try { $resolved = @([Net.Dns]::GetHostAddresses($HostsName) | ForEach-Object { $_.IPAddressToString }) } catch { }
-  if ($resolved -contains $HostsIP) {
-    Step "Name resolution: $HostsName already resolves to $HostsIP"
-  } else {
-    Step "Name resolution: adding '$HostsIP $HostsName' to the hosts file"
-    $HostsFile = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
-    $lines = @(Get-Content -LiteralPath $HostsFile -ErrorAction SilentlyContinue | Where-Object { -not ($_.Contains($HostsTag) -and (($_ -split '\s+') -contains $HostsName)) })
-    $lines += "$HostsIP $HostsName $HostsTag"
-    Set-Content -LiteralPath $HostsFile -Value $lines -Encoding ASCII
-    Clear-DnsClientCache -ErrorAction SilentlyContinue
-  }
-{{- end}}
   $stateFile = Join-Path $State 'agent.json'
   $enrolled = Test-Path -LiteralPath $stateFile
   if ($enrolled) {

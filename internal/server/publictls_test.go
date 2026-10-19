@@ -330,9 +330,9 @@ func TestPublicTLSRefusesAgentAPI(t *testing.T) {
 	}
 }
 
-// The agent URL: agent_url, else https://<server_name>:<port>, else the IP.
-// agent-setup reports it, and an installer requested with a public Host that
-// the internal certificate does not cover names the agent URL.
+// The agent URL: agent_url, else https://<server IP>:<port> (never the server
+// name). agent-setup reports it, and an installer requested by any name gets
+// the agent URL; one requested by IP keeps that IP.
 func TestPublicTLSAgentURL(t *testing.T) {
 	e := newPublicTLSServer(t, "", true)
 	if got := e.s.agentURL(); got != "https://169.58.36.46:8443" {
@@ -342,7 +342,7 @@ func TestPublicTLSAgentURL(t *testing.T) {
 		pubName + ":8443":        "https://169.58.36.46:8443",
 		"Patch.Example.Test":     "https://169.58.36.46:8443",
 		"169.58.36.46:8443":      "https://169.58.36.46:8443",
-		"pm.corp.internal:8443":  "https://pm.corp.internal:8443",
+		"pm.corp.internal:8443":  "https://169.58.36.46:8443",
 		"[2001:db8::1]:8443":     "https://[2001:db8::1]:8443",
 		"evil.example/../x:8443": "",
 		"a'b.example:8443":       "",
@@ -378,36 +378,39 @@ func TestPublicTLSAgentURL(t *testing.T) {
 	if got := e2.s.agentURL(); got != "https://10.0.0.5:8443" {
 		t.Fatalf("configured agent_url: %q", got)
 	}
-	// A public name may be the agent URL too: agents select their certificate by ALPN.
+	// server_name never becomes the agent URL by default.
 	e3 := newPublicTLSServer(t, `"server_name": "`+pubName+`",`, true)
-	if got := e3.s.agentURL(); got != "https://"+pubName+":8443" {
-		t.Fatalf("agent URL on a public name: %q", got)
+	if got := e3.s.agentURL(); got != "https://169.58.36.46:8443" {
+		t.Fatalf("agent URL with server_name set: %q, want the IP", got)
+	}
+	// A name may still be the agent URL when set explicitly: agents select
+	// their certificate by ALPN.
+	e4 := newPublicTLSServer(t, `"agent_url": "https://`+pubName+`:8443",`, true)
+	if got := e4.s.agentURL(); got != "https://"+pubName+":8443" {
+		t.Fatalf("explicit agent_url on a public name: %q", got)
 	}
 }
 
-// server_name: every URL handed out uses it; the enrollment adds
-// "<agent_ip> <server_name>" to the endpoint's hosts file when the URL uses
-// the name (offline networks without DNS).
-func TestServerNameAndHostsLine(t *testing.T) {
+// server_name is for the console only: agents get https://<agent_ip>:<port>
+// and the generated installer never edits the hosts file.
+func TestServerNameConsoleOnlyAgentsByIP(t *testing.T) {
 	e := newPublicTLSServer(t, `"server_name": "Patcher.Bank.Example.", "agent_ip": "10.0.0.5",`, true)
-	if e.s.cfg.ServerName != serverName || e.s.agentURL() != "https://"+serverName+":8443" {
-		t.Fatalf("server_name %q, agent URL %q", e.s.cfg.ServerName, e.s.agentURL())
-	}
-	if n, ip := e.s.hostsEntry("PATCHER.bank.example"); n != serverName || ip != "10.0.0.5" {
-		t.Fatalf("hosts entry for the server name: %q %q", n, ip)
-	}
-	for _, h := range []string{"10.0.0.5", "169.58.36.46", pubName, "other.bank.example"} {
-		if n, ip := e.s.hostsEntry(h); n != "" || ip != "" {
-			t.Fatalf("hosts entry for %s: %q %q", h, n, ip)
-		}
+	if e.s.cfg.ServerName != serverName || e.s.agentURL() != "https://10.0.0.5:8443" {
+		t.Fatalf("server_name %q, agent URL %q (want the IP)", e.s.cfg.ServerName, e.s.agentURL())
 	}
 	// Without agent_ip the detected address is used (the internal certificate's IP here).
 	e2 := newPublicTLSServer(t, `"server_name": "`+serverName+`",`, true)
-	if _, ip := e2.s.hostsEntry(serverName); ip != "169.58.36.46" {
-		t.Fatalf("detected agent IP %q", ip)
+	if got := e2.s.agentURL(); got != "https://169.58.36.46:8443" {
+		t.Fatalf("detected agent URL %q", got)
 	}
 
-	// The generated installer: hosts step only when the URL uses server_name.
+	// The template itself has no hosts-file step.
+	for _, bad := range []string{`etc\hosts`, "Hosts", "Clear-DnsClientCache"} {
+		if strings.Contains(windowsBootstrapSrc, bad) {
+			t.Fatalf("bootstrap template contains %q", bad)
+		}
+	}
+
 	ctx := context.Background()
 	tok, err := e.s.store.CreateEnrollmentToken(ctx, "user:test", []string{"windows"}, "hq", 1, 5)
 	if err != nil {
@@ -428,21 +431,18 @@ func TestServerNameAndHostsLine(t *testing.T) {
 		}
 		return w.Body.String()
 	}
-	ps := script(serverName + ":8443")
-	for _, want := range []string{
-		"$Server  = 'https://" + serverName + ":8443'",
-		"$HostsName = '" + serverName + "'",
-		"$HostsIP   = '10.0.0.5'",
-		"$HostsTag  = '# DSS Patcher'",
-		`Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'`,
-		"-contains $HostsIP",
-	} {
-		if !strings.Contains(ps, want) {
-			t.Fatalf("installer by name lacks %q", want)
+	// Requested by the server name or by IP: the installer downloads from and
+	// enrolls against the IP, and has no hosts-file step.
+	for _, host := range []string{serverName + ":8443", "10.0.0.5:8443"} {
+		ps := script(host)
+		if !strings.Contains(ps, "$Server  = 'https://10.0.0.5:8443'") || !strings.Contains(ps, `-Uri "$Server/api/agent-setup/bootstrap/files/pmagent.exe"`) {
+			t.Fatalf("installer requested via %s does not use the agent URL", host)
 		}
-	}
-	if ps := script("10.0.0.5:8443"); strings.Contains(ps, "HostsName") || !strings.Contains(ps, "$Server  = 'https://10.0.0.5:8443'") {
-		t.Fatal("installer by IP must not touch the hosts file")
+		for _, bad := range []string{serverName, `drivers\etc\hosts`, "Hosts", "DSS Patcher"} {
+			if strings.Contains(ps, bad) {
+				t.Fatalf("installer requested via %s contains %q", host, bad)
+			}
+		}
 	}
 }
 

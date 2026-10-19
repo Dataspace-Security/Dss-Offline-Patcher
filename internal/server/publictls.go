@@ -411,7 +411,8 @@ func (s *Server) ReloadPublicCert() {
 }
 
 // agentURL is the base URL agents enroll against and the console hands out:
-// agent_url, else https://<server_name>:<port>, else https://<server IP>:<port>.
+// agent_url when set, else https://<agent IP>:<port>. server_name is for the
+// console (browsers) only and never ends up here unless set as agent_url.
 func (s *Server) agentURL() string {
 	if s.cfg.AgentURL != "" {
 		return s.cfg.AgentURL
@@ -424,17 +425,14 @@ func (s *Server) agentURL() string {
 	if err != nil {
 		port = "8443"
 	}
-	h := s.cfg.ServerName
-	if h == "" {
-		h = s.agentIP()
-	}
+	h := s.agentIP()
 	if h == "" {
 		h = "localhost"
 	}
 	return scheme + "://" + net.JoinHostPort(h, port)
 }
 
-// agentIP is the server's address for endpoints' hosts files: agent_ip,
+// agentIP is the server's address as agents reach it: agent_ip,
 // else the listen address, else the first non-loopback IP of the internal
 // server certificate, else of this host ("" when none).
 func (s *Server) agentIP() string {
@@ -454,19 +452,6 @@ func (s *Server) agentIP() string {
 		return ip.String()
 	}
 	return ""
-}
-
-// hostsEntry: the name and IP endpoints put in their hosts file when they
-// reach the server by server_name (offline networks without DNS); empty
-// unless host is server_name and the IP is known.
-func (s *Server) hostsEntry(host string) (name, ip string) {
-	if s.cfg.ServerName == "" || normHost(host) != s.cfg.ServerName {
-		return "", ""
-	}
-	if ip = s.agentIP(); ip == "" {
-		return "", ""
-	}
-	return s.cfg.ServerName, ip
 }
 
 // firstHostIP: the first global unicast IPv4 address of this machine.

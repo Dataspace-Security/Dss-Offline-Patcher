@@ -62,8 +62,8 @@ export default function ServerPage() {
                 ["Two-person approval", s.policy.approval_policy && Object.keys(s.policy.approval_policy).length
                   ? Object.entries(s.policy.approval_policy).map(([k, v]) => `${k}: ${v}`).join(", ") : "1 approver for all severities"],
                 ["Separation of duties", yes(s.policy.separation_of_duties)],
-                ["Server name", s.server_name ? <Mono>{s.server_name}</Mono> : <span className="text-amber">not set (server_name)</span>],
-                ["Agent URL", <><Mono>{s.agent_url}</Mono>{s.agent_ip && <span className="muted"> · hosts line {s.agent_ip} {s.server_name}</span>}</>],
+                ["Console name", s.server_name ? <><Mono>{s.server_name}</Mono><span className="muted"> · browsers only</span></> : <span className="text-amber">not set (server_name)</span>],
+                ["Agent URL", <><Mono>{s.agent_url}</Mono><span className="muted"> · agents connect by IP</span></>],
                 ["Public console certificate", s.public_tls ? (
                   <>
                     <Pill state={s.public_tls.active ? (s.public_tls.days_left !== undefined && s.public_tls.days_left < 14 ? "pending_reboot" : "verified") : "failed"}

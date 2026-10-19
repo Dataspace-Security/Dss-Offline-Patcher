@@ -14,7 +14,7 @@
 #   isolated zone   sudo ./install-ubuntu.sh --role server --hosts pm.corp.local,10.0.0.5 \
 #                        --pubkey bundle.pub --root-pubkey root.pub --allow-from 10.0.0.0/16
 #   connected zone  sudo ./install-ubuntu.sh --role acquisition
-#   endpoint        sudo ./install-ubuntu.sh --role agent --server https://pm.example:8443 \
+#   endpoint        sudo ./install-ubuntu.sh --role agent --server https://10.0.0.5:8443 \
 #                        --token enr_... --ca ca.pem --pubkey bundle.pub [--root-pubkey root.pub]
 #
 #   sudo ./install-ubuntu.sh --status
@@ -23,13 +23,14 @@
 #
 # Options:
 #   --role all|server|acquisition|agent  default: the role of an earlier install, else all
-#   --domain NAME                     the server's DNS name; the console, enrollment commands and agents
-#                                     use https://NAME:<port>, and the internal certificate includes it
-#                                     (default dsspatcher.internal, or the name of an earlier
-#                                     install). Resolve it by internal DNS or a hosts-file line (summary)
+#   --domain NAME                     the console's DNS name: browsers open https://NAME:<port>, and the
+#                                     internal certificate includes it (default dsspatcher.internal, or
+#                                     the name of an earlier install). Resolve it by internal DNS or a
+#                                     hosts-file line on the ADMINS' PCs only. Agents never use it: they
+#                                     connect to https://<server IP>:<port> (no DNS/hosts on endpoints)
 #   --hosts "pm.corp.local,10.0.0.5"  extra names/IPs for the server certificate (first install)
-#   --server-ip IP                    role agent: map the --server name to IP in /etc/hosts when it does
-#                                     not resolve (offline networks without DNS)
+#   --server-ip IP                    accepted for compatibility and ignored: agents connect by IP
+#                                     (--server https://<server IP>:<port>); /etc/hosts is not changed
 #   --port 8443                       server port (first install; re-runs use pmserver.json)
 #   --pubkey FILE / --root-pubkey FILE  role server: public keys from the acquisition host and the
 #                                     offline root key (first install; never overwritten later).
@@ -195,7 +196,6 @@ safe_path() { [[ "$1" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "$2 must be an absolute p
 [ -z "$BACKUP_KEEP_IN" ] || { [[ "$BACKUP_KEEP_IN" =~ ^[0-9]+$ ]] && [ "$BACKUP_KEEP_IN" -ge 1 ]; } || die "--backup-keep must be a number >= 1"
 # Public console certificate (values end up in JSON and a hook: plain values only).
 valid_domain() { [[ "$1" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; }
-url_host() { local h=${1#*://}; h=${h%%/*}; case "$h" in \[*) h=${h%%]*}; h=${h#[} ;; *) h=${h%:*} ;; esac; printf '%s' "$h" | tr 'A-Z' 'a-z'; }
 PUBLIC_WANTED=0; { [ -n "$PUBLIC_DOMAIN_IN" ] || [ -n "$PUBLIC_CERT_IN" ] || [ -n "$PUBLIC_KEY_IN" ]; } && PUBLIC_WANTED=1
 [ -z "$PUBLIC_DOMAIN_IN" ] || valid_domain "$PUBLIC_DOMAIN_IN" || die "--public-domain must be a DNS name such as patch.bank.example (got: $PUBLIC_DOMAIN_IN)"
 { [ -n "$PUBLIC_CERT_IN" ] && [ -n "$PUBLIC_KEY_IN" ]; } || { [ -z "$PUBLIC_CERT_IN" ] && [ -z "$PUBLIC_KEY_IN" ]; } || die "--public-cert and --public-key go together"
@@ -214,8 +214,6 @@ if [ -n "$AGENT_URL_IN" ]; then
 fi
 PUBLIC_DOMAIN=$PUBLIC_DOMAIN_IN PUBLIC_MODE="" PUBLIC_NAMES="" ACME_METHOD=""
 [ -z "$DOMAIN_IN" ] || valid_domain "$DOMAIN_IN" || die "--domain must be a DNS name such as patcher.bank.example (got: $DOMAIN_IN)"
-valid_ip() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$1" =~ ^[0-9A-Fa-f]*:[0-9A-Fa-f:.]*$ ]]; }
-[ -z "$SERVER_IP_IN" ] || valid_ip "$SERVER_IP_IN" || die "--server-ip must be an IP address (got: $SERVER_IP_IN)"
 # ufw sources given on an earlier run stay in force unless new --allow-from values are given.
 if [ ${#ALLOW_FROM[@]} -eq 0 ]; then read -r -a ALLOW_FROM <<< "$(state_get ALLOW_FROM)"; fi
 for c in ${ALLOW_FROM[@]+"${ALLOW_FROM[@]}"}; do
@@ -502,7 +500,7 @@ public_summary() { # port
     echo "  Console:        https://$first:$1   (public certificate, renews automatically)"
   fi
   [ "$first" = "$PUBLIC_NAMES" ] || echo "                  names: $PUBLIC_NAMES"
-  echo "  Agent URL:      ${AGENT_URL_NOW:-?}   (internal CA + client certificates; the enrollment command uses it)"
+  echo "  Agents connect to: ${AGENT_URL_NOW:-?}   (internal CA + client certificates; the enrollment command uses it)"
 }
 
 # Browsers: the public name must verify against the system trust store (checked locally).
@@ -525,7 +523,10 @@ svc_state() { if [ $HAVE_SYSTEMD = 1 ]; then systemctl is-active "$1" 2>/dev/nul
 
 if [ $STATUS = 1 ]; then
   echo "installed role:    $(state_get ROLE || true)"
-  [ -z "$(cfg_get server_name)" ] || echo "server name:       $(cfg_get server_name) ($(cfg_get agent_ip))"
+  [ -z "$(cfg_get server_name)" ] || echo "console name:      $(cfg_get server_name) (browsers only)"
+  st_agent=$(cfg_get agent_url)
+  [ -n "$st_agent" ] || [ -z "$(cfg_get agent_ip)" ] || st_agent="https://$(cfg_get agent_ip):$(cfg_get listen | sed 's/.*://')"
+  [ -z "$st_agent" ] || echo "agents connect to: $st_agent"
   echo "pmserver:          $(svc_state offpatch-server 'offpatch/bin/pmserver')"
   echo "agent:             $(svc_state offpatch-agent 'offpatch/bin/pmagent run')"
   echo "acquisition timer: $( [ $HAVE_SYSTEMD = 1 ] && systemctl is-active offpatch-acquire.timer 2>/dev/null || echo 'cron/manual')"
@@ -673,9 +674,8 @@ if [ $PUBLIC_WANTED = 1 ] && [ $OTHER_ARGS = 0 ] && [ -f "$ETC/pmserver.json" ];
   [[ "$port" =~ ^[0-9]+$ ]] || die "cannot read the port from \"listen\": \"$listen\" in $ETC/pmserver.json"
   public_precheck
   default_agent=""
-  sn=$(cfg_get server_name)
-  if [ -n "$sn" ]; then default_agent="https://$sn:$port"
-  elif [ -f "$ETC/console-url.txt" ]; then default_agent=$(head -n 1 "$ETC/console-url.txt"); fi
+  aip=$(cfg_get agent_ip)
+  [ -z "$aip" ] || default_agent="https://$aip:$port"   # agents: by IP, never the console name
   cp -p "$ETC/pmserver.json" "$ETC/pmserver.json.before-public-tls"
   setup_public_tls "$default_agent" || { rm -f "$ETC/pmserver.json.before-public-tls"; die "no certificate obtained; nothing was changed"; }
   if [ $HAVE_SYSTEMD = 1 ]; then systemctl restart offpatch-server; else
@@ -781,9 +781,9 @@ fi
 if [ $IS_SERVER = 1 ]; then
   SERVER_NAME=${DOMAIN_IN:-$(cfg_get server_name)}; SERVER_NAME=${SERVER_NAME:-$DEFAULT_DOMAIN}
 elif [ -n "$DOMAIN_IN" ]; then
-  die "--domain is for --role all or server; agents get the name from --server"
+  die "--domain is for --role all or server (the console's name); agents connect by IP: --server https://<server IP>:<port>"
 fi
-[ -z "$SERVER_IP_IN" ] || [ "$ROLE" = agent ] || die "--server-ip is for --role agent"
+[ -z "$SERVER_IP_IN" ] || warn "--server-ip is ignored: agents connect by IP (--server https://<server IP>:<port>); /etc/hosts is not changed"
 
 if [ $PUBLIC_WANTED = 1 ]; then
   [ $IS_SERVER = 1 ] || die "--public-domain / --public-cert are for --role all or server (the console)"
@@ -1037,7 +1037,7 @@ else
 fi
 
 SCHEME=https; [ $INSECURE = 1 ] && SCHEME=http
-# The address people and agents use: an IPv4 given in --hosts that this machine owns, else
+# The address agents use (and the console name resolves to): an IPv4 given in --hosts that this machine owns, else
 # the source address of the default route, else the first address that is not loopback or
 # a container/virtual bridge (docker0 172.17.x, libvirt 192.168.122.x, lxd/podman 10.x on bridges).
 local_ips() {
@@ -1063,7 +1063,8 @@ OTHER_IPS=$(local_ips | grep -vxF "${IP:-}" | paste -sd' ' - || true)
 HOSTS=$(printf '%s\n' "$SERVER_NAME" "$(hostname)" localhost 127.0.0.1 "$IP" "$EXTRA_HOSTS" | tr ',' '\n' | awk 'NF && !seen[$0]++' | paste -sd, -)
 case "$LISTEN_HOST" in ""|0.0.0.0|"::"|"[::]") LOCAL_HOST=127.0.0.1 ;; *) LOCAL_HOST=$LISTEN_HOST ;; esac
 URL_LOCAL="$SCHEME://$LOCAL_HOST:$PORT"
-URL_PUBLIC="$SCHEME://${SERVER_NAME:-${IP:-$(hostname)}}:$PORT"   # what people and agents use
+URL_PUBLIC="$SCHEME://${SERVER_NAME:-${IP:-$(hostname)}}:$PORT"   # the console (browsers)
+URL_AGENT="$SCHEME://${IP:-$(hostname)}:$PORT"                      # agents: always the IP, never the name
 
 # ---------------------------------------------------------------- keys
 install_pub() { # source-file name
@@ -1284,8 +1285,8 @@ if [ $IS_SERVER = 1 ]; then
     "$PREFIX/bin/pmserver" init-pki -dir "$ETC/pki" -hosts "$HOSTS" >/dev/null
     ok "created internal CA and server certificate for: $HOSTS"
   elif [ $INSECURE = 0 ] && [ -f "$ETC/pki/server.pem" ] && command -v openssl >/dev/null; then
-    # The certificate must name server_name and this machine's IP: agents connect by name,
-    # older agents by IP. Reissue (same CA: agents pin the CA, not this certificate) when not.
+    # The certificate must name server_name (browsers) and this machine's IP (agents).
+    # Reissue (same CA: agents pin the CA, not this certificate) when not.
     sans=$(openssl x509 -in "$ETC/pki/server.pem" -noout -ext subjectAltName 2>/dev/null | tail -n +2 | tr ',' '\n' \
            | sed -n 's/^[[:space:]]*DNS://p; s/^[[:space:]]*IP Address://p' | tr -d ' ' || true)
     need=""
@@ -1457,7 +1458,7 @@ PY
   fi
   if [ $PUBLIC_WANTED = 1 ]; then
     step "Public certificate for the console"
-    if setup_public_tls "$URL_PUBLIC"; then PUBLIC_OK=1
+    if setup_public_tls "$URL_AGENT"; then PUBLIC_OK=1
     else warn "continuing without the public certificate; once fixed, re-run with the same --public-* options"; fi
   fi
   start_server
@@ -1713,18 +1714,6 @@ EOF
 fi
 
 # ---------------------------------------------------------------- local agent
-# Offline networks without DNS: map the server name to its IP in /etc/hosts (one line tagged
-# "# DSS Patcher", replaced on re-runs; nothing changes when the name already resolves to it).
-ensure_hosts_line() { # name ip
-  local name=$1 ip=$2 tmp
-  if getent ahosts "$name" 2>/dev/null | awk '{print $1}' | grep -qxF "$ip"; then ok "$name resolves to $ip"; return 0; fi
-  tmp=$(mktemp)
-  awk -v n="$name" '{ keep = 1; if (index($0, "# DSS Patcher")) { for (i = 2; i <= NF; i++) if (tolower($i) == n) keep = 0 } } keep' /etc/hosts > "$tmp"
-  printf '%s %s # DSS Patcher\n' "$ip" "$name" >> "$tmp"
-  cat "$tmp" > /etc/hosts; rm -f "$tmp"
-  ok "/etc/hosts: $ip $name # DSS Patcher"
-  getent ahosts "$name" 2>/dev/null | awk '{print $1}' | grep -qxF "$ip"     || warn "$name still does not resolve to $ip (another /etc/hosts line or DNS wins): fix that entry"
-}
 enroll_agent() { # server token ca pub root
   local args=(enroll -server "$1" -token "$2" -pubkey "$4" -platform linux -state-dir "$AGENT_STATE")
   [ -n "$3" ] && args+=(-ca "$3")
@@ -1742,15 +1731,6 @@ start_agent() {
 
 if [ "$ROLE" = agent ]; then
   step "Endpoint agent"
-  if [ -n "$SERVER_IP_IN" ]; then
-    srv_url=$AGENT_SERVER
-    if [ -z "$srv_url" ] && [ -f "$AGENT_STATE/agent.json" ]; then
-      srv_url=$(sed -n 's/.*"server_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$AGENT_STATE/agent.json" | head -n 1)
-    fi
-    srv_host=$(url_host "$srv_url")
-    if [ -n "$srv_host" ] && valid_domain "$srv_host"; then ensure_hosts_line "$srv_host" "$SERVER_IP_IN"
-    else warn "--server-ip ignored: the server URL does not use a DNS name"; fi
-  fi
   if [ ! -f "$AGENT_STATE/agent.json" ]; then
     enroll_agent "$AGENT_SERVER" "$AGENT_TOKEN" "$AGENT_CA" "$PUBKEY_IN" "$ROOTPUB_IN"
   else
@@ -1834,10 +1814,12 @@ if [ $IS_SERVER = 1 ]; then
   else
     echo "  Console:        $URL_PUBLIC   (sign in with email + password)"
   fi
-  echo "  PCs need:       TCP $PORT from every PC to ${IP:-this server} (agents connect to ${AGENT_URL_NOW:-$URL_PUBLIC}; nothing connects to the PCs)"
+  AGENT_URL_NOW=${AGENT_URL_NOW:-$(cfg_get agent_url)}; AGENT_URL_NOW=${AGENT_URL_NOW:-$URL_AGENT}
+  [ $PUBLIC_OK = 1 ] || echo "  Agents connect to: $AGENT_URL_NOW   (by IP: no DNS or hosts-file entry on the PCs)"
+  echo "  PCs need:       TCP $PORT from every PC to ${IP:-this server} (nothing connects to the PCs)"
   if [ -n "$SERVER_NAME" ] && [ -n "${IP:-}" ]; then
-    echo "  Name:           $SERVER_NAME must resolve to $IP for browsers and PCs: an internal DNS A record, or this"
-    echo "                  hosts-file line (the PowerShell enrollment command adds it on PCs by itself):"
+    echo "  Console name:   $SERVER_NAME is for the admins' browsers only: it must resolve to $IP on the ADMIN PCs"
+    echo "                  (internal DNS A record, or this hosts-file line on each admin PC; never needed on endpoints):"
     echo "                    $IP $SERVER_NAME # DSS Patcher"
     echo "                  Windows (PowerShell as Administrator):"
     echo "                    Add-Content -Path \"\$env:SystemRoot\\System32\\drivers\\etc\\hosts\" -Value \"$IP $SERVER_NAME # DSS Patcher\""
@@ -1879,7 +1861,7 @@ if [ $IS_SERVER = 1 ]; then
        (Windows PowerShell as Administrator; the PC needs TCP $PORT to ${IP:-this server}).
     4. Patches → Needed → Import, Catalog → Approve, Patch this (2 approvals).
 
-  Ubuntu endpoints: sudo ./install-ubuntu.sh --role agent --server $URL_PUBLIC${IP:+ --server-ip $IP} --token <enr_…> \\
+  Ubuntu endpoints: sudo ./install-ubuntu.sh --role agent --server $AGENT_URL_NOW --token <enr_…> \\
                          --ca ca.pem --pubkey bundle.pub --root-pubkey root.pub
                     (copy ca.pem, bundle.pub, root.pub from $ETC/pki and $ETC/keys)
 EOF

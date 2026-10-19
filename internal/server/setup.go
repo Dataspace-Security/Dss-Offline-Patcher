@@ -102,7 +102,7 @@ func (s *Server) agentSetup(w http.ResponseWriter, r *http.Request) {
 		"agent_url":            s.agentURL(),
 		"agent_url_configured": s.cfg.AgentURL != "",
 		"public_names":         s.publicNames(),
-		// hosts-file line the enrollment adds when the URL uses server_name.
+		// server_name is for the console (browsers); agents use agent_url (agent_ip).
 		"server_name": s.cfg.ServerName,
 		"agent_ip":    s.agentIP(),
 	})
