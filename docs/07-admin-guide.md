@@ -29,7 +29,7 @@ single-server deployment. Then:
 
 1. Move the offline root key off the server: `sudo ./install-ubuntu.sh --export-root-key /media/usb`.
 2. Sign in at the URL the installer prints (`https://<server name>:8443`; the name is `--domain`,
-   default `patcher.dataspacesecurity.com`, and must resolve to the server: internal DNS or the
+   default `dsspatcher.internal`, and must resolve to the server: internal DNS or the
    hosts-file line the installer prints, see §5.5) as
    `superadmin@dataspacesecurity.com` with the default password (vendor handbook) and change the password.
 3. **Settings → Users**: create the bank's Admin.
@@ -679,12 +679,19 @@ that was offline past its certificate expiry cannot renew and must be re-enrolle
 ### 5.5 Server name and certificates
 
 **The server is addressed by name.** The installer's `--domain NAME` (default
-`patcher.dataspacesecurity.com`, or the name an earlier install used) becomes `server_name` in
+`dsspatcher.internal`, or the name an earlier install used) becomes `server_name` in
 `pmserver.json`; the console URL, the agent URL, the enrollment commands and the agents all use
 `https://<server name>:8443`. The internal server certificate always names it together with the
 server's IP (`init-pki`; on upgrades the installer reissues it when either is missing; agents
 pin the CA, not this certificate, so they keep working). `agent_ip` (default: detected) is the
 IP endpoints map the name to.
+
+**Do not pick a name under a public domain that sends HSTS with `includeSubDomains`** (check:
+`curl -sI https://example.com | grep -i strict-transport`) unless the console gets a public or
+bank certificate. Browsers then accept only certificates they already trust for every subdomain
+and remove "Proceed anyway", so the internal certificate is blocked outright until the internal
+CA is trusted on that PC. That is why the default is `dsspatcher.internal`: `.internal` is
+reserved for private networks and never has public DNS or HSTS.
 
 The name must resolve to the server's IP for browsers and PCs, either by an internal DNS A
 record or by one hosts-file line, which the installer prints, for example:

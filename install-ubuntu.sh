@@ -25,7 +25,7 @@
 #   --role all|server|acquisition|agent  default: the role of an earlier install, else all
 #   --domain NAME                     the server's DNS name; the console, enrollment commands and agents
 #                                     use https://NAME:<port>, and the internal certificate includes it
-#                                     (default patcher.dataspacesecurity.com, or the name of an earlier
+#                                     (default dsspatcher.internal, or the name of an earlier
 #                                     install). Resolve it by internal DNS or a hosts-file line (summary)
 #   --hosts "pm.corp.local,10.0.0.5"  extra names/IPs for the server certificate (first install)
 #   --server-ip IP                    role agent: map the --server name to IP in /etc/hosts when it does
@@ -87,7 +87,7 @@ UNINSTALL=0 PURGE=0 STATUS=0 YES=0
 EGRESS_LOCK_IN=""                    # 1 / 0 from --egress-lock / --no-egress-lock; empty = remembered or 1
 EXPORT_ROOT_KEY=""                   # --export-root-key DIR
 ADMIN_EMAIL_SET=0
-DEFAULT_DOMAIN="patcher.dataspacesecurity.com"   # --domain default (the only built-in name)
+DEFAULT_DOMAIN="dsspatcher.internal"   # --domain default: .internal is reserved for private networks (ICANN 2024), never public, no HSTS
 DOMAIN_IN="" SERVER_IP_IN="" SERVER_NAME=""
 PUBLIC_DOMAIN_IN="" PUBLIC_CERT_IN="" PUBLIC_KEY_IN="" ACME_CHALLENGE="" CF_CREDS="" ACME_EMAIL="" AGENT_URL_IN=""
 OTHER_ARGS=0                         # 1 = an option other than the public-certificate ones was given

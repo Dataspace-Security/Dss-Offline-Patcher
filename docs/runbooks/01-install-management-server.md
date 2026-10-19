@@ -93,7 +93,7 @@ downloader then shares no machine with the server's data.
 
 Details and configuration keys: [admin guide section 5.5](../07-admin-guide.md#55-server-name-and-certificates).
 
-1. **Name.** `--domain patcher.bank.example` (default `patcher.dataspacesecurity.com`, or the
+1. **Name.** `--domain patcher.bank.example` (default `dsspatcher.internal`, or the
    name of the earlier install). The installer writes `server_name` and `agent_ip` into
    `pmserver.json`, makes sure the internal server certificate names it and the server's IP
    (reissuing it on upgrades when not; agents keep working, they pin the CA) and prints the URL
