@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"offpatch/internal/acqpolicy"
 )
@@ -103,39 +104,70 @@ func (s *Store) AcqPolicyHistory(ctx context.Context) ([]AcqPolicyVersion, error
 // 0 makes the save conditional (ErrConflict if another version was saved
 // since; -1 = unconditional). defaults is what version 0 meant (the
 // summary of the first save is relative to it).
+//
+// A save that adds a download source or changes one's address or
+// verification data is refused with ErrNeedsSecondApprover: it must be
+// proposed (ProposeAcqPolicy) and approved by another super admin (S-4).
 func (s *Store) SaveAcqPolicy(ctx context.Context, actor string, p acqpolicy.Policy, baseVersion int, defaults acqpolicy.Policy) (AcqPolicyRecord, error) {
 	if err := p.Normalize(); err != nil {
 		return AcqPolicyRecord{}, Errf(ErrInvalid, "%s", err.Error())
 	}
-	body := acqpolicy.Canonical(p)
-	rec := AcqPolicyRecord{EditedBy: actor, EditedAt: s.now(), SHA256: acqpolicy.Hash(p), Policy: p}
+	var rec AcqPolicyRecord
 	err := s.tx(ctx, func(tx *sql.Tx) error {
-		var last int
-		var prevBody string
-		err := tx.QueryRow(`SELECT version, policy FROM acq_policies ORDER BY version DESC LIMIT 1`).Scan(&last, &prevBody)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		last, prev, err := latestAcqPolicyTx(tx, baseVersion, defaults)
+		if err != nil {
 			return err
 		}
-		if baseVersion >= 0 && baseVersion != last {
-			return Errf(ErrConflict, "the auto-download policy was changed by someone else (now version %d, you started from version %d): reload the page and make your change again", last, baseVersion)
+		if ch := acqpolicy.SourceChanges(prev, p); len(ch) > 0 {
+			return fmt.Errorf("%w: %s", ErrNeedsSecondApprover, strings.Join(ch, "; "))
 		}
-		prev := defaults
-		if prevBody != "" {
-			prev = acqpolicy.Policy{}
-			json.Unmarshal([]byte(prevBody), &prev)
-			prev.Normalize()
-		}
-		rec.Summary = acqpolicy.Diff(prev, p)
-		if len(rec.Summary) == 0 {
-			rec.Summary = []string{"saved without changes"}
-		}
-		rec.Version = last + 1
-		if _, err := tx.Exec(`INSERT INTO acq_policies(version, policy, sha256, edited_by, edited_at, summary) VALUES(?,?,?,?,?,?)`,
-			rec.Version, string(body), rec.SHA256, actor, rec.EditedAt, mustJSON(rec.Summary)); err != nil {
-			return err
-		}
-		return s.audit(tx, Ev{Actor: actor, Action: "acquisition.policy_updated", ObjectType: "acquisition_policy", ObjectID: fmt.Sprint(rec.Version),
-			Details: map[string]any{"version": rec.Version, "sha256": rec.SHA256, "previous_version": last, "changes": rec.Summary}})
+		rec, err = s.insertAcqPolicyTx(tx, actor, p, last, acqpolicy.Diff(prev, p), nil)
+		return err
 	})
 	return rec, err
+}
+
+// ErrNeedsSecondApprover: the policy change adds or changes a download
+// source and needs a second super admin.
+var ErrNeedsSecondApprover = Errf(ErrForbidden, "this change adds or changes a download source: another super admin must approve it")
+
+// latestAcqPolicyTx returns the latest version number and its policy (the
+// defaults when none is saved), checking baseVersion (see SaveAcqPolicy).
+func latestAcqPolicyTx(tx *sql.Tx, baseVersion int, defaults acqpolicy.Policy) (int, acqpolicy.Policy, error) {
+	var last int
+	var prevBody string
+	err := tx.QueryRow(`SELECT version, policy FROM acq_policies ORDER BY version DESC LIMIT 1`).Scan(&last, &prevBody)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, acqpolicy.Policy{}, err
+	}
+	if baseVersion >= 0 && baseVersion != last {
+		return last, acqpolicy.Policy{}, Errf(ErrConflict, "the auto-download policy was changed by someone else (now version %d, you started from version %d): reload the page and make your change again", last, baseVersion)
+	}
+	prev := defaults
+	if prevBody != "" {
+		prev = acqpolicy.Policy{}
+		json.Unmarshal([]byte(prevBody), &prev)
+		prev.Normalize()
+	}
+	return last, prev, nil
+}
+
+// insertAcqPolicyTx stores normalized p as version last+1 and audits it
+// (extra: more audit details).
+func (s *Store) insertAcqPolicyTx(tx *sql.Tx, actor string, p acqpolicy.Policy, last int, summary []string, extra map[string]any) (AcqPolicyRecord, error) {
+	rec := AcqPolicyRecord{EditedBy: actor, EditedAt: s.now(), SHA256: acqpolicy.Hash(p), Policy: p, Version: last + 1}
+	rec.Summary = append([]string{}, summary...)
+	if len(rec.Summary) == 0 {
+		rec.Summary = []string{"saved without changes"}
+	}
+	if _, err := tx.Exec(`INSERT INTO acq_policies(version, policy, sha256, edited_by, edited_at, summary) VALUES(?,?,?,?,?,?)`,
+		rec.Version, string(acqpolicy.Canonical(p)), rec.SHA256, actor, rec.EditedAt, mustJSON(rec.Summary)); err != nil {
+		return rec, err
+	}
+	details := map[string]any{"version": rec.Version, "sha256": rec.SHA256, "previous_version": last, "changes": rec.Summary}
+	for k, v := range extra {
+		details[k] = v
+	}
+	return rec, s.audit(tx, Ev{Actor: actor, Action: "acquisition.policy_updated", ObjectType: "acquisition_policy", ObjectID: fmt.Sprint(rec.Version),
+		Details: details})
 }

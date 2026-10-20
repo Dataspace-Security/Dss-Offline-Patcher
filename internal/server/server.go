@@ -60,6 +60,7 @@ type Server struct {
 	proxyAuthLimit *ipLimiter
 	preAuth        preAuthStore // MFA pre-auth nonces (single use, mfa.go)
 	repKey         reportKey    // audit-signing key, for compliance packages
+	polKey         reportKey    // policy signing key (acqpolicy_sign.go)
 }
 
 func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger) (*Server, error) {
@@ -235,6 +236,9 @@ func (s *Server) Handler() http.Handler {
 	admin(store.RoleSuperAdmin, "GET /api/acquisition/policy/history", s.acqPolicyHistory)
 	admin(store.RoleSuperAdmin, "GET /api/acquisition/policy/file", s.acqPolicyFile)
 	admin(store.RoleSuperAdmin, "POST /api/acquisition/policy/queue", s.requeueAcqPolicy)
+	// A source change needs a second super admin (S-4): approve or reject the pending one.
+	admin(store.RoleSuperAdmin, "POST /api/acquisition/policy/pending/approve", s.approveAcqPolicy)
+	admin(store.RoleSuperAdmin, "POST /api/acquisition/policy/pending/reject", s.rejectAcqPolicy)
 	admin(store.RoleSuperAdmin, "POST /api/acquisition/run", s.runAcquisitionNow)
 	admin(viewer, "GET /api/packages-needs", s.packageNeeds)
 	admin(viewer, "GET /api/policy", s.policy)

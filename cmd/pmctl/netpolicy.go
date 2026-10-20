@@ -15,6 +15,10 @@ package main
 //     is refused and reported; requests to an accepted policy source,
 //     including redirects and the download links a mirrored catalog page
 //     returns, are held to the list too.
+//   - vendor-url sources (and their redirects) never go to shared hosting
+//     where anyone can publish a file (acquire.SharedHostingHosts:
+//     raw.githubusercontent.com), even though the winget feed uses it
+//     (finding S-4).
 //   - Installer URLs read from winget manifests point at each vendor's own
 //     host, so they are not held to the list: they get the SSRF guard, the
 //     manifest SHA-256 and, for EXE (and MSI on Windows hosts), the
@@ -33,6 +37,9 @@ import (
 type netPolicy struct {
 	base   *acquire.Guard // SSRF + https
 	strict *acquire.Guard // base + allowed_source_hosts
+	// vendor: strict, minus shared hosting (acquire.SharedHostingHosts):
+	// vendor-url downloads and their redirects (S-4).
+	vendor *acquire.Guard
 	// fromPolicy: upstreams (acqpolicy.Upstream*, or "vendor-url") whose
 	// address the auto-download policy set this run.
 	fromPolicy map[string]bool
@@ -65,9 +72,15 @@ func setupNet(c *autoConfig) error {
 	c.net = &netPolicy{
 		base:       &acquire.Guard{PrivateOK: priv},
 		strict:     &acquire.Guard{Hosts: hl, HostsWhat: "allowed_source_hosts (acquire.json)", PrivateOK: priv},
+		vendor:     vendorGuard(hl, priv),
 		fromPolicy: map[string]bool{},
 	}
 	return nil
+}
+
+func vendorGuard(hl acquire.HostList, priv map[string]bool) *acquire.Guard {
+	return &acquire.Guard{Hosts: hl, HostsWhat: "allowed_source_hosts (acquire.json)", PrivateOK: priv,
+		Deny: acquire.MustHostList(acquire.SharedHostingHosts...), DenyWhy: "hosts files anyone can publish: it is never a vendor-url download source"}
 }
 
 func normHostName(h string) string {
@@ -96,7 +109,8 @@ func (c *autoConfig) ownURLs() []string {
 func (c *autoConfig) netFor() *netPolicy {
 	if c.net == nil {
 		if err := setupNet(c); err != nil {
-			c.net = &netPolicy{base: &acquire.Guard{}, strict: &acquire.Guard{Hosts: acquire.MustHostList("default")}, fromPolicy: map[string]bool{}}
+			hl := acquire.MustHostList("default")
+			c.net = &netPolicy{base: &acquire.Guard{}, strict: &acquire.Guard{Hosts: hl}, vendor: vendorGuard(hl, nil), fromPolicy: map[string]bool{}}
 		}
 	}
 	return c.net
@@ -105,6 +119,13 @@ func (c *autoConfig) netFor() *netPolicy {
 // checkPolicyURL: nil if the policy may use raw as a download source.
 func (c *autoConfig) checkPolicyURL(raw string) error {
 	return c.netFor().strict.CheckRawURL(raw)
+}
+
+// checkVendorURL: nil if the policy may use raw as a vendor-url source
+// (allowed_source_hosts, and never shared hosting such as
+// raw.githubusercontent.com).
+func (c *autoConfig) checkVendorURL(raw string) error {
+	return c.netFor().vendor.CheckRawURL(raw)
 }
 
 // guarded wraps hc in the SSRF guard.

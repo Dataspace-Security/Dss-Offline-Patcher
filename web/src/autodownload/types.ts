@@ -40,8 +40,22 @@ export type KnownWindows = { product: string; build: number; arch: Arch; server?
 export type Downloader = {
   source: string; host: string; finished_at: string; outcome: string; schedule: string;
   policy_version: number; policy_sha256: string; policy_applied_at: string; policy_error?: string;
+  /** How the downloader verified the policy: the signing key id, or "not verified: …" (no pin in acquire.json). */
+  policy_signature?: string;
   run_request?: string; sources: SourceResult[]; reports_policy: boolean;
 };
+
+/** A change that adds or changes a download source, waiting for a second super admin. */
+export type PendingChange = {
+  base_version: number; proposed_by: string; proposed_at: string; sha256: string;
+  source_changes: string[]; summary: string[]; policy: AcqPolicy;
+};
+
+/** The server's policy signing key (pmctl pins it in acquire.json policy_public_keys). */
+export type PolicySigning = { key_id: string; public_key: string; error?: string };
+
+/** PUT answer when the change needs a second super admin (HTTP 202). */
+export type PolicyProposed = { needs_approval: true; pending: PendingChange };
 
 export type RunRequested = { run_id: string; requested_by: string; requested_at: string; queued_to: string };
 
@@ -50,6 +64,7 @@ export type PolicyResponse = {
   policy: AcqPolicy; is_default: boolean; default_source: "acquire.json" | "downloader" | "none"; banner?: string;
   default_feeds: string[]; downloader: Downloader | null; delivery: { direct: boolean };
   windows_choices: KnownWindows[]; last_run_request: RunRequested | null;
+  pending: PendingChange | null; can_approve: boolean; signing: PolicySigning;
 };
 
 export type PolicySaved = PolicyResponse & { queued_to: string; queued_error?: string };
@@ -68,7 +83,7 @@ export const SOURCE_HELP: Record<SourceType, string> = {
   winget: "Where app versions and installers are looked up. Leave the addresses empty to use the public winget community index.",
   "microsoft-catalog": "Where Windows update files come from. Switching it off stops all Windows downloads.",
   msrc: "Microsoft's monthly list of security updates. Switching it off stops all Windows downloads.",
-  "vendor-url": "One installer at a fixed https link from the vendor. It is only accepted if it matches the SHA-256 you enter (or, on a Windows downloader, the vendor's code-signing name).",
+  "vendor-url": "One installer at a fixed https link from the vendor (never raw.githubusercontent.com). The downloader always checks the vendor's code signature and keeps the signer it saw first; the SHA-256 you enter is checked as well. Adding or changing a source needs a second super admin.",
   "internal-mirror": "A bank-approved copy of a public source. The downloader uses it instead of the public address.",
 };
 
@@ -159,7 +174,6 @@ export function sourceProblems(s: SourceEntry, others: SourceEntry[]): string[] 
       if (!s.name?.trim()) out.push("Enter the product name.");
       const sha = (s.expected_sha256 ?? "").trim(), signer = (s.signer ?? "").trim();
       if (!sha && !signer) out.push("Enter the SHA-256 the vendor publishes, or the code-signing name: unverified downloads are never accepted.");
-      if (sha && signer) out.push("Enter the SHA-256 or the code-signing name, not both.");
       if (sha && !HEX64.test(sha)) out.push("SHA-256: 64 characters 0-9 and a-f.");
       if (!VERSION.test((s.version ?? "").trim())) out.push("Version: like 1.2.3 (the version this link downloads).");
       if (s.kind === "msu" && !KB.test((s.kb ?? "").trim())) out.push("An .msu needs its KB number (like KB5044284).");

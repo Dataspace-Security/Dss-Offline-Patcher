@@ -46,6 +46,15 @@ var DefaultSourceHosts = []string{
 	"download.microsoft.com",
 }
 
+// SharedHostingHosts serve files anyone can publish (a GitHub account is
+// enough). They stay allowed for the winget index / manifests feed, whose
+// content is checked against the manifest hashes, but are never a
+// vendor-url download source or redirect target (finding S-4).
+var SharedHostingHosts = []string{
+	"raw.githubusercontent.com",
+	"gist.githubusercontent.com",
+}
+
 // ErrNetworkRefused marks a request the guard did not send.
 var ErrNetworkRefused = errors.New("refused by the acquisition network policy")
 
@@ -183,6 +192,10 @@ type Guard struct {
 	Hosts HostList
 	// HostsWhat names the list in messages (e.g. "allowed_source_hosts").
 	HostsWhat string
+	// Deny: hosts never contacted, even when Hosts lists them; DenyWhy
+	// says why in messages.
+	Deny    HostList
+	DenyWhy string
 	// PrivateOK: exact host names (or IP literals) that may resolve to
 	// non-public addresses.
 	PrivateOK map[string]bool
@@ -205,6 +218,9 @@ func (g *Guard) CheckURL(u *url.URL) error {
 		return fmt.Errorf("%w: %s is not https", ErrNetworkRefused, u.Redacted())
 	}
 	host := normHost(u.Hostname())
+	if g.Deny.Allows(host) {
+		return fmt.Errorf("%w: host %s %s", ErrNetworkRefused, host, g.DenyWhy)
+	}
 	if !g.Hosts.Empty() && !g.Hosts.Allows(host) {
 		what := g.HostsWhat
 		if what == "" {

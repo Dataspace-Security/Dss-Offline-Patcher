@@ -483,7 +483,7 @@ What the policy holds (`internal/acqpolicy`):
 |---|---|---|
 | Windows updates | `{product, build, arch, classification: security\|all, enabled}`, chosen from the releases the downloader knows plus those in the update intelligence | Adds the release to the Microsoft feed (`catalog_product` from the known list; Windows Server entries get the package suffix `-server`), or re-classifies the matching `acquire.json` product (`all` = every severity, `security` = `acquire.json`'s `min_severity`, `important` if `acquire.json` has no Microsoft section). `enabled: false` removes the matching `acquire.json` product. |
 | Apps | `{source: winget, id, arch[], channel: latest, enabled, note}` | Kept at the newest version the update intelligence's Library knows (the id is added to the Library list, so its newest version is looked up by the same run's intelligence and downloaded on the next run). One MSI per architecture, checked against the winget manifest's SHA-256, package id `<id>-<version>[-<arch>]`. An app that an `acquire.json` app feed covers (same `winget_id`) is left to that feed; `enabled: false` also skips that feed. |
-| Sources | `winget` (index `url`, `manifests_url`), `microsoft-catalog` / `msrc` (`url`), `vendor-url`, `internal-mirror` | URL overrides replace `intel.winget_url`, `winget_manifests_url`, `catalog_url`, `msrc_url`. Switching off `microsoft-catalog` or `msrc` stops all Windows downloads; switching off `winget` stops policy apps. `internal-mirror {url, replaces: winget-index\|winget-manifests\|microsoft-catalog\|msrc}` wins over the source's own URL. `vendor-url {name, url, kind msi\|msu, version, expected_sha256 \| signer, product_code?, kb (msu), arch?, vendor?}` is fetched like `pmctl fetch-url`: the file must match `expected_sha256`, or (Windows downloader only) carry a valid Authenticode signature from exactly `signer` (a CN, or `CN=…, O=…` with both compared; never a substring) and pass the signer pin; package id `<source id>-<version>`; an MSI without `product_code` has it read from the file. EXE installers are refused. |
+| Sources | `winget` (index `url`, `manifests_url`), `microsoft-catalog` / `msrc` (`url`), `vendor-url`, `internal-mirror` | URL overrides replace `intel.winget_url`, `winget_manifests_url`, `catalog_url`, `msrc_url`. Switching off `microsoft-catalog` or `msrc` stops all Windows downloads; switching off `winget` stops policy apps. `internal-mirror {url, replaces: winget-index\|winget-manifests\|microsoft-catalog\|msrc}` wins over the source's own URL. `vendor-url {name, url, kind msi\|msu, version, expected_sha256 and/or signer, product_code?, kb (msu), arch?, vendor?}` is fetched like `pmctl fetch-url`: the file must carry a valid Authenticode signature (from exactly `signer` when given: a CN, or `CN=…, O=…` with both compared; never a substring), pass the signer pin and CRL check, and also match `expected_sha256` when given (S-4: the hash is an additional check, never a replacement). Where Authenticode cannot be checked (MSI / MSU on a Linux downloader) the source is refused (`unsupported`) unless `acquire.json` `vendor_sha256_pins` (`{"<source id>": "<sha256>"}`, set by the acquisition host's operator) confirms its `expected_sha256`. Never from `raw.githubusercontent.com` (see below); package id `<source id>-<version>`; an MSI without `product_code` has it read from the file. EXE installers are refused. |
 | Limits | `max_download_gb_per_run` (0 = none), `keep_last_n_versions` (0 = by age) | A run stops downloading once this much was read (the rest fails for this run and is retried next run). Downloaded files of policy apps and vendor downloads beyond the newest N sent versions are deleted (state `families`). |
 | Schedule | read-only | Shown from the status report (`schedule` in `acquire.json`); the timer belongs to the installer. |
 
@@ -493,8 +493,8 @@ no `#fragment`, no query parameter that looks like a credential (`token`, `key`,
 most 50 Windows entries, 500 apps and 100 sources, one enabled source per type (vendor
 downloads excepted) and per mirrored upstream, limits 0–10000 GB and 0–100 versions.
 
-**What only `acquire.json` decides (the policy cannot extend it).** The policy file is not
-signed offline, so pmctl bounds what it can do (`cmd/pmctl/netpolicy.go`):
+**What only `acquire.json` decides (the policy cannot extend it).** pmctl bounds what even a
+correctly signed policy can do (`cmd/pmctl/netpolicy.go`):
 
 - `allowed_source_hosts`: every address a policy sets (winget index / manifests, catalog, MSRC,
   internal mirrors, vendor-url) must be https on a listed host: exact names or `*.domain`
@@ -507,6 +507,11 @@ signed offline, so pmctl bounds what it can do (`cmd/pmctl/netpolicy.go`):
   and a `policy_error`; the default address stays. Once accepted, every request to that
   upstream, **redirects included**, and the download links a mirrored catalog page returns
   must stay on the list.
+- **No shared hosting for vendor downloads** (S-4): `raw.githubusercontent.com` and
+  `gist.githubusercontent.com` serve files anyone can publish. They stay allowed for the
+  winget index / manifests feed (checked against the manifest hashes), but a `vendor-url`
+  source, or a redirect of its download, to them is refused even when `allowed_source_hosts`
+  lists them.
 - **SSRF guard** on every request pmctl auto makes: https only, never to loopback, RFC 1918,
   link-local (169.254/16, cloud metadata), CGNAT, multicast or reserved addresses. IP literals
   are refused before sending; host names are resolved at dial time and the connection goes to
@@ -531,8 +536,40 @@ changed), audited `acquisition.policy_updated`. The delivered file is
 ```json
 { "format": "offpatch.acquisition-policy", "version": 1, "policy_version": 3,
   "edited_by": "user:sam@vendor", "edited_at": "2026-10-18T10:00:00Z",
-  "sha256": "<hex SHA-256 of the compact policy JSON>", "policy": { "windows": [], "apps": [], "sources": [], "limits": {} } }
+  "sha256": "<hex SHA-256 of the compact policy JSON>", "policy": { "windows": [], "apps": [], "sources": [], "limits": {} },
+  "signature": { "alg": "ed25519", "key_id": "ed25519:<16 hex>", "value": "<base64>" } }
 ```
+
+**Signed policy files (S-4).** pmserver signs every file it writes or offers for download with
+its policy signing key `<data_dir>/policy-signing.key` (Ed25519, created on first use, owned by
+the server user, mode 0600; backed up in `keys.tar.age`). The signature covers format, version,
+`policy_version`, `edited_by`, `edited_at` and `sha256` (which covers the content).
+`pmserver policy-key -config pmserver.json` prints the public key; the console shows it under
+Status → Signing key. pmctl pins it in `acquire.json`: `"policy_public_keys": ["<base64 key>"]`
+(a list, for key rotation). The installer writes it for `--role all` on every run and prints it
+for `--role server`; on a separate acquisition host add it by hand. With a pin, an unsigned
+file, a file signed by another key or one whose envelope was edited is refused (`rejected/`,
+`policy_error`) and the last good policy stays in force; an unsigned **active** policy (from
+before the upgrade) is dropped and the signed copy of the same version, which pmserver queues
+once at start-up (`acquisition.policy_queued`, actor `system:server`), is taken. Without a pin
+(upgrades of a separate acquisition host) files are accepted, a `WARN` is logged and the status
+report says `policy_signature: "not verified: …"` (amber in the console); otherwise
+`policy_signature` is the verifying key id. Two machines: upgrade the acquisition host first (an
+older pmctl refuses the new `signature` field).
+
+**Two-person rule for download sources (S-4).** A save that **adds a source, or changes a
+source's address or verification data** (any field but `enabled` and `note`: vendor-url,
+mirrors, winget / catalog / MSRC URLs) is not applied: it becomes the **pending change** (HTTP
+202, audited `acquisition.policy_change_proposed`), shown to every super admin under
+**Waiting for approval**. Another super admin approves it (`POST
+/api/acquisition/policy/pending/approve {"sha256": "<reviewed change>"}`, audited
+`acquisition.policy_change_approved`); the version is then saved as edited by the proposer
+(`approved_by` in `acquisition.policy_updated`) and handed to the downloader. The proposer cannot
+approve, but can withdraw; another super admin can reject (`…/pending/reject {"reason"}`,
+audited `acquisition.policy_change_rejected`). Switching sources on or off, removing them and
+every other edit save directly. One pending change at a time (a new proposal replaces it); a
+direct save in between makes it stale (approve answers 409: reject and propose again). With a
+single super admin no source can be added.
 
 - **One server** (the usual layout: `pmctl` as `offpatch-acq`, `pmserver` as `offpatch`):
   with `acquisition_requests_dir` set, the server writes the file into that folder on every
@@ -572,11 +609,13 @@ acquisition user), else the `defaults` from the newest status report, else an em
 a banner. Nothing is stored or sent until Save. `acquire.json` app feeds with their own version
 URLs are listed as "Also from the installer's settings" and keep running.
 
-**Trust.** Like a request, the policy file is only as trusted as the folder it is written to
-(owner `offpatch`, group `offpatch-inbox`, 0640) or the person who carries it. Its SHA-256
-detects damage, not forgery. It cannot make the downloader accept anything unverified: every
-download is still checked (winget manifest SHA-256, catalog hashes, vendor SHA-256 or
-Authenticode signer) and arrives on the isolated side as a signed bundle in **quarantine**.
+**Trust.** With `policy_public_keys` set, only files signed by the server are applied: whoever
+can merely write to the requests folder, or carries the file, cannot change it. The signing key
+lives on the management server, so a compromised pmserver can still sign (in the single-server
+layout it also shares the requests folder: security review S-8). The policy cannot make the
+downloader accept anything unverified: every download is still checked (winget manifest
+SHA-256, catalog hashes, vendor Authenticode signer pin plus SHA-256) and arrives on the
+isolated side as a signed bundle in **quarantine**, where package approval applies.
 
 Tested:
 - `internal/acqpolicy/acqpolicy_test.go`: normalisation, every validation rule (https,

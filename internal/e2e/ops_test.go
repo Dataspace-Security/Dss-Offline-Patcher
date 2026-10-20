@@ -107,20 +107,47 @@ func TestBackupRestore(t *testing.T) {
 
 	l := backup.Layout{DataDir: filepath.Join(e.dir, "data"), ConfigFile: filepath.Join(e.dir, "pmserver.json")}
 	out := filepath.Join(e.dir, "backup1")
-	m, err := backup.Create(ctx, e.st, l, out, true)
+	idFile, recipient, err := backup.GenerateIdentity("test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := backup.Verify(out); err != nil {
+	os.WriteFile(filepath.Join(e.dir, "id.txt"), []byte(idFile), 0o600)
+	os.WriteFile(filepath.Join(e.dir, "recipients.txt"), []byte(recipient+"\n"), 0o644)
+	recips, err := backup.LoadRecipients(filepath.Join(e.dir, "recipients.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids, err := backup.LoadIdentities(filepath.Join(e.dir, "id.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sk, err := auditexport.LoadOrCreateKey(filepath.Join(l.DataDir, "audit-signing.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vo := backup.VerifyOptions{Pub: sk.Public().(ed25519.PublicKey), Identities: ids}
+	opts := backup.Options{Recipients: recips, SigningKey: sk, IncludePKI: true}
+	m, err := backup.Create(ctx, e.st, l, out, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backup.Verify(out, vo); err != nil {
 		t.Fatalf("fresh backup fails verification: %v", err)
 	}
-	if _, err := backup.Create(ctx, e.st, l, out, true); err == nil {
+	if _, err := backup.Create(ctx, e.st, l, out, opts); err == nil {
 		t.Fatal("overwrote an existing backup")
+	}
+	// Nothing in the backup directory is readable without the identity.
+	if b, _ := os.ReadFile(filepath.Join(out, "keys.tar.age")); strings.Contains(string(b), "PRIVATE KEY") {
+		t.Fatal("keys part is not encrypted")
 	}
 
 	// Restore into an empty data dir and check integrity.
 	target := backup.Layout{DataDir: filepath.Join(e.dir, "restored")}
-	if _, err := backup.Restore(ctx, out, target, false); err != nil {
+	if _, err := backup.Restore(ctx, out, target, false, backup.VerifyOptions{Pub: vo.Pub}); err == nil {
+		t.Fatal("restored an encrypted backup without the identity")
+	}
+	if _, err := backup.Restore(ctx, out, target, false, vo); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
 	st2, err := store.Open(filepath.Join(target.DataDir, "pm.db"))
@@ -142,18 +169,23 @@ func TestBackupRestore(t *testing.T) {
 	if seq, _, _ := st2.AuditHead(ctx); seq < m.AuditSeq {
 		t.Fatalf("audit head %d < backup %d", seq, m.AuditSeq)
 	}
-	if _, err := backup.Restore(ctx, out, target, false); err == nil {
+	if _, err := backup.Restore(ctx, out, target, false, vo); err == nil {
 		t.Fatal("restore over an existing database without -force")
+	}
+	if _, err := os.Stat(filepath.Join(target.DataDir, "audit-signing.key")); err != nil {
+		t.Errorf("keys part not restored: %v", err)
 	}
 
 	// Tampered backup is refused.
-	obj := filepath.Join(out, "data", "repository", p.SHA256[:2], p.SHA256)
+	obj := filepath.Join(out, "data.tar.age")
+	b, _ := os.ReadFile(obj)
+	b[len(b)-10] ^= 1
 	os.Chmod(obj, 0o640)
-	os.WriteFile(obj, []byte("evil"), 0o640)
-	if _, err := backup.Verify(out); err == nil || !strings.Contains(err.Error(), "modified") {
+	os.WriteFile(obj, b, 0o640)
+	if _, err := backup.Verify(out, vo); err == nil || !strings.Contains(err.Error(), "modified") {
 		t.Fatalf("tampered backup verified: %v", err)
 	}
-	if _, err := backup.Restore(ctx, out, backup.Layout{DataDir: filepath.Join(e.dir, "r2")}, false); err == nil {
+	if _, err := backup.Restore(ctx, out, backup.Layout{DataDir: filepath.Join(e.dir, "r2")}, false, vo); err == nil {
 		t.Fatal("tampered backup restored")
 	}
 }

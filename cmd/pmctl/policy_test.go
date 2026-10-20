@@ -130,6 +130,9 @@ func TestAutoPolicyApplied(t *testing.T) {
 	e.srv.Vendor["tool-4.1.0.msi"] = tool
 	readMSICode = func(string) (string, error) { return "{22222222-3333-4444-5555-666666666666}", nil }
 	t.Cleanup(func() { readMSICode = msiProductCode })
+	// The vendor MSI is checked by Authenticode (stubbed) as on a Windows acquisition host (S-4).
+	authenticodeAnywhere = true
+	t.Cleanup(func() { authenticodeAnywhere = false })
 
 	work := filepath.Join(e.dir, "work")
 	os.MkdirAll(work, 0o750)

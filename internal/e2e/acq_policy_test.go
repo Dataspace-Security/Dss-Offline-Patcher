@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -35,6 +36,12 @@ type policyGet struct {
 	LastRun *struct {
 		RunID string `json:"run_id"`
 	} `json:"last_run_request"`
+	Pending    *store.AcqPolicyPending `json:"pending"`
+	CanApprove bool                    `json:"can_approve"`
+	Signing    struct {
+		KeyID     string `json:"key_id"`
+		PublicKey string `json:"public_key"`
+	} `json:"signing"`
 }
 
 // Only the super admin reads or changes the auto-download policy.
@@ -45,6 +52,7 @@ func TestAcqPolicyPermissions(t *testing.T) {
 		for _, c := range []struct{ method, path string }{
 			{"GET", "/api/acquisition/policy"}, {"PUT", "/api/acquisition/policy"}, {"GET", "/api/acquisition/policy/history"},
 			{"GET", "/api/acquisition/policy/file"}, {"POST", "/api/acquisition/policy/queue"}, {"POST", "/api/acquisition/run"},
+			{"POST", "/api/acquisition/policy/pending/approve"}, {"POST", "/api/acquisition/policy/pending/reject"},
 		} {
 			if code := e.api(c.method, c.path, tok, acqpolicy.Empty(), nil); code != 403 {
 				t.Errorf("%s %s as %s: %d, want 403", c.method, c.path, tok, code)
@@ -112,21 +120,61 @@ func TestAcqPolicySaveDeliverApply(t *testing.T) {
 		Policy   acqpolicy.Policy `json:"policy"`
 		QueuedTo string           `json:"queued_to"`
 	}
-	if c := e.api("PUT", "/api/acquisition/policy?base_version=0", tokSuper, pol, &saved); c != 200 || saved.Version != 1 || saved.QueuedTo != dir {
-		t.Fatalf("save: %d %+v", c, saved)
+	// A new download source needs a second super admin (S-4): stored as pending, nothing queued.
+	var prop struct {
+		NeedsApproval bool                   `json:"needs_approval"`
+		Pending       store.AcqPolicyPending `json:"pending"`
 	}
-	if by := saved.Policy.Sources[3].AddedBy; !strings.HasPrefix(by, "user:") || by == "someone-else" {
+	if c := e.api("PUT", "/api/acquisition/policy?base_version=0", tokSuper, pol, &prop); c != 202 || !prop.NeedsApproval || len(prop.Pending.Changes) != 1 {
+		t.Fatalf("propose: %d %+v", c, prop)
+	}
+	if _, err := os.Stat(filepath.Join(dir, acqpolicy.FileName(1))); err == nil {
+		t.Fatal("a pending source change was handed to the downloader")
+	}
+	if by := prop.Pending.Policy.Sources[3].AddedBy; !strings.HasPrefix(by, "user:") || by == "someone-else" {
 		t.Errorf("added_by taken from the browser: %q", by)
+	}
+	if c := e.api("POST", "/api/acquisition/policy/pending/approve", tokSuper, map[string]string{"sha256": prop.Pending.SHA256}, nil); c != 403 {
+		t.Fatalf("proposer approved own change: %d", c)
+	}
+	if c := e.api("POST", "/api/acquisition/policy/pending/approve", tokAdmin, map[string]string{"sha256": prop.Pending.SHA256}, nil); c != 403 {
+		t.Fatalf("bank admin approved a source change: %d", c)
+	}
+	const tokSuper2 = "super2"
+	if _, err := e.st.CreateLocalUser(context.Background(), store.Manager{Actor: "system:test", Role: store.RoleSuperAdmin},
+		store.NewLocalUser{Email: "sue@bank.test", Role: store.RoleSuperAdmin, Password: envPW}, false); err != nil {
+		t.Fatal(err)
+	}
+	e.sess[tokSuper2] = e.signIn("sue@bank.test", envPW)
+	g = policyGet{}
+	if c := e.api("GET", "/api/acquisition/policy", tokSuper2, nil, &g); c != 200 || g.Pending == nil || !g.CanApprove || g.Signing.PublicKey == "" {
+		t.Fatalf("pending as the second super admin: %d %+v", c, g)
+	}
+	if c := e.api("POST", "/api/acquisition/policy/pending/approve", tokSuper2, map[string]string{"sha256": prop.Pending.SHA256}, &saved); c != 200 || saved.Version != 1 || saved.QueuedTo != dir {
+		t.Fatalf("approve: %d %+v", c, saved)
+	}
+	if saved.Policy.Sources[3].AddedBy != "user:"+envEmail(tokSuper) {
+		t.Errorf("added_by after approval: %q", saved.Policy.Sources[3].AddedBy)
 	}
 	if strings.Join(saved.Summary, ";") != "added app Google.Chrome;added source tool (vendor-url)" {
 		t.Errorf("summary: %v", saved.Summary)
+	}
+	// Switching the source off needs no second approver.
+	off := saved.Policy
+	off.Sources = append([]acqpolicy.Source{}, off.Sources...)
+	off.Sources[3].Enabled = false
+	var saved2 struct {
+		Version int `json:"version"`
+	}
+	if c := e.api("PUT", "/api/acquisition/policy?base_version=1", tokSuper, off, &saved2); c != 200 || saved2.Version != 2 {
+		t.Fatalf("toggle off: %d %+v", c, saved2)
 	}
 	// A second editor who loaded version 0 gets a conflict.
 	if c := e.api("PUT", "/api/acquisition/policy?base_version=0", tokSuper, pol, nil); c != 409 {
 		t.Fatalf("stale save: %d", c)
 	}
 
-	// Delivered exactly as pmctl parses it.
+	// Delivered exactly as pmctl parses it, signed with the key the console shows.
 	path := filepath.Join(dir, acqpolicy.FileName(1))
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -135,6 +183,13 @@ func TestAcqPolicySaveDeliverApply(t *testing.T) {
 	f, err := acqpolicy.ParseFile(bytes.NewReader(b))
 	if err != nil || f.PolicyVersion != 1 || f.SHA256 != saved.SHA256 || len(f.Policy.Apps) != 1 {
 		t.Fatalf("queued policy: %v %+v", err, f)
+	}
+	pins, err := acqpolicy.ParsePins([]string{g.Signing.PublicKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id, err := f.VerifySignature(pins); err != nil || id != g.Signing.KeyID {
+		t.Fatalf("queued policy signature: %q %v", id, err)
 	}
 	if runtime.GOOS != "windows" {
 		if st, _ := os.Stat(path); st.Mode().Perm() != 0o640 {
@@ -164,7 +219,7 @@ func TestAcqPolicySaveDeliverApply(t *testing.T) {
 		PolicyVersion: f.PolicyVersion, PolicySHA256: f.SHA256, PolicyEditedBy: f.EditedBy, PolicyAppliedAt: now.Format(time.RFC3339), RunRequest: run.RunID,
 		Sources: []acqstatus.SourceResult{{Kind: "source", ID: "tool", Type: "vendor-url", Result: "new", Packages: []string{"tool-1.0.0"}}}}, nil)
 	g = policyGet{}
-	if c := e.api("GET", "/api/acquisition/policy", tokSuper, nil, &g); c != 200 || g.IsDefault || g.Version != 1 {
+	if c := e.api("GET", "/api/acquisition/policy", tokSuper, nil, &g); c != 200 || g.IsDefault || g.Version != 2 || g.Pending != nil {
 		t.Fatalf("get after save: %d %+v", c, g)
 	}
 	if g.Downloader == nil || g.Downloader.PolicyVersion != 1 || g.Downloader.PolicyAppliedAt == "" || len(g.Downloader.Sources) != 1 ||
@@ -173,7 +228,7 @@ func TestAcqPolicySaveDeliverApply(t *testing.T) {
 	}
 
 	var hist []store.AcqPolicyVersion
-	if c := e.api("GET", "/api/acquisition/policy/history", tokSuper, nil, &hist); c != 200 || len(hist) != 1 || hist[0].Version != 1 {
+	if c := e.api("GET", "/api/acquisition/policy/history", tokSuper, nil, &hist); c != 200 || len(hist) != 2 || hist[0].Version != 2 {
 		t.Fatalf("history: %d %+v", c, hist)
 	}
 	var audit []store.AuditEvent
@@ -182,7 +237,8 @@ func TestAcqPolicySaveDeliverApply(t *testing.T) {
 	for _, ev := range audit {
 		seen[ev.Action] = true
 	}
-	for _, a := range []string{"acquisition.policy_updated", "acquisition.policy_queued", "acquisition.run_requested"} {
+	for _, a := range []string{"acquisition.policy_updated", "acquisition.policy_queued", "acquisition.run_requested",
+		"acquisition.policy_change_proposed", "acquisition.policy_change_approved"} {
 		if !seen[a] {
 			t.Errorf("%s not audited", a)
 		}

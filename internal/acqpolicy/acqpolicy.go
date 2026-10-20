@@ -120,7 +120,8 @@ type App struct {
 //   - microsoft-catalog, msrc: URL optionally overrides the service base.
 //     Switching either off stops the Windows (Microsoft) downloads.
 //   - vendor-url: one vendor installer at a fixed HTTPS URL; Name, URL,
-//     Kind (msi | msu), Version and ExpectedSHA256 or Signer are required.
+//     Kind (msi | msu), Version and ExpectedSHA256 and/or Signer are required
+//     (pmctl also checks Authenticode and the signer pin, S-4).
 //   - internal-mirror: URL is the HTTPS base of a bank-approved mirror
 //     that stands in for the upstream named by Replaces.
 type Source struct {
@@ -169,6 +170,8 @@ type File struct {
 	// SHA256 is the hex SHA-256 of Canonical(Policy).
 	SHA256 string `json:"sha256"`
 	Policy Policy `json:"policy"`
+	// Signature: by the server's policy signing key (signature.go, S-4).
+	Signature *Signature `json:"signature,omitempty"`
 }
 
 // FileName is the file name of a policy version in the requests folder.
@@ -455,14 +458,15 @@ func checkSource(s Source) []string {
 		if !validText(s.Vendor, 100) {
 			out = append(out, "vendor: at most 100 characters")
 		}
+		// The acquisition host also checks Authenticode and the signer pin of
+		// every vendor download (S-4): expected_sha256 is an additional check.
 		switch {
 		case s.ExpectedSHA256 == "" && s.Signer == "":
 			out = append(out, "expected_sha256 or signer is required: unverified downloads are never accepted")
-		case s.ExpectedSHA256 != "" && s.Signer != "":
-			out = append(out, "give expected_sha256 or signer, not both")
 		case s.ExpectedSHA256 != "" && !sha256Re.MatchString(s.ExpectedSHA256):
 			out = append(out, "expected_sha256: 64 hexadecimal characters")
-		case s.Signer != "" && (len(s.Signer) < 3 || !validText(s.Signer, 200)):
+		}
+		if s.Signer != "" && (len(s.Signer) < 3 || !validText(s.Signer, 200)) {
 			out = append(out, "signer: the Authenticode subject, 3-200 characters")
 		}
 		switch s.Kind {

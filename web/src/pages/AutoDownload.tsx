@@ -8,7 +8,8 @@ import { SourceForm } from "../autodownload/SourceForm";
 import { AppsTable, SourcesTable, WindowsTable } from "../autodownload/Tables";
 import {
   normalizePolicy, toPayload,
-  type AcqPolicy, type PolicyResponse, type PolicySaved, type PolicyVersion, type RunRequested, type SourceEntry, type SourceResult,
+  type AcqPolicy, type PendingChange, type PolicyProposed, type PolicyResponse, type PolicySaved, type PolicyVersion, type RunRequested,
+  type SourceEntry, type SourceResult,
 } from "../autodownload/types";
 
 const POLICY = "/api/acquisition/policy";
@@ -58,7 +59,14 @@ export default function AutoDownloadPage() {
     setError(null);
     setConflict(false);
     try {
-      const r = await api.put<PolicySaved>(`${POLICY}?base_version=${baseVersion}`, toPayload(p));
+      const r = await api.put<PolicySaved | PolicyProposed>(`${POLICY}?base_version=${baseVersion}`, toPayload(p));
+      if ("needs_approval" in r) {
+        // Adds or changes a download source: a second super admin approves it.
+        setDraft(normalizePolicy(r.pending.policy));
+        setNotice({ tone: "info", text: `Not applied yet: this change ${r.pending.source_changes.join("; ")}. Another super admin must approve it below before it reaches the downloader.` });
+        await loaded.reload();
+        return;
+      }
       setDraft(normalizePolicy(r.policy));
       setBaseVersion(r.version);
       setNotice(r.queued_error
@@ -99,6 +107,22 @@ export default function AutoDownloadPage() {
     await api.post(`${POLICY}/queue`, {});
     return { tone: "ok", text: "Handed to the downloader again." };
   });
+  const approve = (sha256: string) => act(async () => {
+    const r = await api.post<PolicySaved>(`${POLICY}/pending/approve`, { sha256 });
+    setDraft(normalizePolicy(r.policy));
+    setBaseVersion(r.version);
+    await history.reload();
+    return r.queued_error
+      ? { tone: "warn", text: `Approved as version ${r.version}, but it could not be handed to the downloader (${r.queued_error}).` }
+      : { tone: "ok", text: `Approved as version ${r.version}${r.queued_to ? " and handed to the downloader" : ": download the policy file and copy it to the downloader"}.` };
+  });
+  const reject = (mine: boolean) => act(async () => {
+    const reason = window.prompt(mine ? "Withdraw your proposed change? Reason (optional):" : "Reject this change? Reason (optional):");
+    if (reason === null) return null;
+    await api.post(`${POLICY}/pending/reject`, { reason });
+    setDraft(null);
+    return { tone: "info", text: mine ? "Your proposal was withdrawn." : "The proposed change was rejected." };
+  });
   const download = (version?: number) => act(async () => {
     const name = await downloadFileNamed(`${POLICY}/file${version ? `?version=${version}` : ""}`, "policy.json");
     return { tone: "info", text: `Downloaded ${name}. Copy it into the downloader's requests folder (the same place request files go).` };
@@ -128,6 +152,10 @@ export default function AutoDownloadPage() {
       {notice && <div className={`banner banner-${notice.tone}`}>{notice.text}</div>}
       {server?.banner && <div className="banner banner-info">{server.banner}</div>}
 
+      {server?.pending && (
+        <PendingCard pending={server.pending} canApprove={server.can_approve}
+          onApprove={() => void approve(server.pending!.sha256)} onReject={() => void reject(!server.can_approve)} />
+      )}
       {server && <StatusCard server={server} savedHistory={history.data ?? []} onRequeue={() => void requeue()} />}
 
       {server && (
@@ -205,6 +233,13 @@ function StatusCard({ server, savedHistory, onRequeue }: { server: PolicyRespons
           : <>Not saved yet. Starting point: {server.default_source === "acquire.json" ? "the installer's settings (acquire.json)" : server.default_source === "downloader" ? "the installer's settings, as reported by the downloader" : "empty"}.</>],
         ["Downloader", appliedRow],
         ...(d?.policy_error ? [["Refused", <span className="text-red">{d.policy_error}</span>] as [string, ReactNode]] : []),
+        ...(d?.policy_signature ? [["Signature", d.policy_signature.startsWith("ed25519:")
+          ? <><Pill state="verified" label="verified" /> <Mono>{d.policy_signature}</Mono></>
+          : <span className="text-amber">{d.policy_signature}. Pin the signing key below in the downloader's acquire.json.</span>] as [string, ReactNode]] : []),
+        ["Signing key", server.signing.error
+          ? <span className="text-red">{server.signing.error}</span>
+          : <><Mono>{server.signing.key_id}</Mono> <span className="muted">· acquire.json on the downloader: </span>
+            <Mono title="policy_public_keys">{`"policy_public_keys": ["${server.signing.public_key}"]`}</Mono></>],
         ["Last run", d ? <><Time value={d.finished_at} /> on {d.host || d.source} · {d.outcome} · <Link to={paths.imports}>details</Link></> : <span className="muted">—</span>],
         ["Schedule", <>{d?.schedule || "hourly (systemd timer offpatch-acquire.timer)"} <span className="muted">· set by the installer, shown here only</span></>],
         ["Hand-over", server.delivery.direct
@@ -214,6 +249,33 @@ function StatusCard({ server, savedHistory, onRequeue }: { server: PolicyRespons
           {d?.run_request === server.last_run_request.run_id ? " · done" : " · waiting for the downloader"}</>] as [string, ReactNode]] : []),
         ...(last && last.version === saved ? [["Last change", last.summary.join("; ")] as [string, ReactNode]] : []),
       ]} />
+    </section>
+  );
+}
+
+type PendingCardProps = { pending: PendingChange; canApprove: boolean; onApprove: () => void; onReject: () => void };
+
+/** A source change waiting for a second super admin (the proposer cannot approve it). */
+function PendingCard({ pending, canApprove, onApprove, onReject }: PendingCardProps) {
+  const who = pending.proposed_by.replace(/^user:/, "");
+  return (
+    <section className="card section">
+      <h2>Waiting for approval</h2>
+      <p className="hint">
+        Adding or changing a download source needs a second super admin. Nothing reaches the downloader until it is approved.
+      </p>
+      <KV rows={[
+        ["Proposed by", <>{who} <Time value={pending.proposed_at} /> <Mono title={pending.sha256}>{shortHash(pending.sha256)}</Mono></>],
+        ["Needs approval because it", pending.source_changes.join("; ")],
+        ["All changes", pending.summary.length ? pending.summary.join("; ") : "—"],
+        ["Based on", pending.base_version > 0 ? `version ${pending.base_version}` : "the installer's settings"],
+      ]} />
+      <div className="actions-inline">
+        {canApprove
+          ? <button className="btn btn-primary" onClick={onApprove}>Approve</button>
+          : <span className="muted">You proposed this change: another super admin must approve it.</span>}
+        <button className="btn" onClick={onReject}>{canApprove ? "Reject" : "Withdraw"}</button>
+      </div>
     </section>
   );
 }
