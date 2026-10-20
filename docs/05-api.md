@@ -450,7 +450,7 @@ deployment is `active`.
 | Method & path | Auth / role | Body → Response |
 |---|---|---|
 | `GET /auth/config` | none | Gains `password_login: bool` (v1.9: always `true`; `require_mfa` now makes the authenticator step required instead). |
-| `POST /api/auth/login` | none | `{email, password}` → `{user, email, role, auth: "password", must_change_password}` and the `offpatch_session` cookie (same session as SSO: `session_ttl`, `HttpOnly`, `SameSite=Strict`, `Secure` over TLS). Needs header `X-Offpatch-CSRF: 1`. **401** `wrong email or password` for an unknown email, a wrong password **and** a locked account (no enumeration; the same work is done in every case). 403 for a disabled account (only after the right password). v1.9: the 200 answer may ask for the authenticator step (see "v1.9 additions"). **429** with `Retry-After` past 10 attempts per client IP (IPv6: per /64; then one per 6 s; loopback is not exempt; no proxy headers are trusted). 5 wrong passwords in a row lock the account for 15 minutes (audited `auth.locked`). Every failure is audited `auth.login_failed` with the reason; the attempted name only when it is a well-formed email, never the password. |
+| `POST /api/auth/login` | none | `{email, password}` → `{user, email, role, auth: "password", must_change_password}` and the `offpatch_session` cookie (same session as SSO: `session_ttl`, `HttpOnly`, `SameSite=Strict`, `Secure` over TLS). Needs header `X-Offpatch-CSRF: 1`. **401** `wrong email or password` for an unknown email, a wrong password **and** a locked account (no enumeration; the same work is done in every case). 403 for a disabled account (only after the right password). v1.9: the 200 answer may ask for the authenticator step (see "v1.9 additions"). **429** with `Retry-After` past 10 attempts per client IP (IPv6: per /64; then one per 6 s; loopback is not exempt; no proxy headers are trusted). 5 wrong passwords in a row from one client address lock the account for that address for 15 minutes; 50 within 15 minutes from any addresses lock it everywhere (audited `auth.locked`, `details.scope`). **503** with `Retry-After` `the server is busy checking other sign-ins; …` when 4 password checks are already running and none frees up within 2 s. Failures are audited `auth.login_failed` with the reason and `details.client`, at most once a minute per account and address (`details.suppressed` = folded ones); the attempted name only when it is a well-formed email, never the password. Through `console_proxy` also **429** when all clients together exceed 30 sign-in steps (then 1/s), and **400** when the proxy sends no client address. |
 | `POST /api/auth/logout` | session | → `{end_session_url?}`. Ends the cookie session (needs `X-Offpatch-CSRF: 1`, also on `POST /auth/logout`, which still works). |
 | `POST /api/auth/password` | local user session | `{current, new}` → `{ok}`. New password: at least 12 characters, not the email (or the part before the @), not the current one (400). A wrong `current` counts towards the lockout. Clears `must_change_password` and ends the user's other sessions. 409 for SSO callers. |
 | `GET /api/me` | any | → `{user, email, display_name, role, auth: "password" \| "sso", source (= auth), mfa, must_change_password, password_changed_at ("" until the user changed it), builtin (the installer-created super admin)}`; v1.9 adds `mfa_enrolled`, `mfa_required` |
@@ -502,11 +502,13 @@ configured). Scripts sign in with `POST /api/auth/login` (+ `POST /api/auth/mfa`
 
 ### MFA (authenticator app)
 
-TOTP (RFC 6238), 6 digits, 30 s. **Required** for local users with role `viewer`, `user`, `admin`;
-**optional** for `super_admin` unless `require_mfa` is set (then required for every local user). SSO
-users: the IdP's MFA (`require_mfa` checks `amr` / `acr`); the endpoints below answer 409 for SSO
-users. Each code works once; wrong codes count towards the same lockout as wrong passwords (5 in a
-row → 15 min). 10 recovery codes are shown once at enrolment, stored hashed, each single-use.
+TOTP (RFC 6238), 6 digits, 30 s. **Required** for every local user, `super_admin` included (by
+default; only `"require_mfa": false` makes it optional for super admins). SSO users: the IdP's MFA
+(`require_mfa: true` checks `amr` / `acr`); the endpoints below answer 409 for SSO users. Each code
+works once. Wrong codes have their **own** counter (a correct password does not reset it): 5 in a
+row lock the code step for 15 min, doubling per further lockout up to 24 h (audited
+`auth.mfa_locked`, critical alert `auth.mfa_locked`); a correct code or an admin **Enable** /
+**Reset MFA** clears it. 10 recovery codes are shown once at enrolment, stored hashed, each single-use.
 Secrets are encrypted at rest (AES-256-GCM) with the key in `mfa_key_file` (default
 `<data_dir>/mfa.key`, 64 hex characters, mode 0600; created by the installer and at first start if
 missing; included in `pmserver backup` at the default path only). The secret is never returned after enrolment.
@@ -522,25 +524,27 @@ or password`, 403 disabled, 429 rate limit):
   `POST /api/auth/mfa/enroll/confirm`, `POST /api/auth/password` and `POST /api/auth/logout` answers
   **403** `mfa_enrollment_required`. With `must_change_password` the password change comes first
   (403 `password_change_required`, the enrolment endpoints included), then enrolment.
-- No MFA needed (super admin not enrolled) → as in v1.8 plus `mfa_required: false,
-  mfa_enrollment_required: false`.
+- No MFA needed (super admin not enrolled, only with `"require_mfa": false`) → as in v1.8 plus
+  `mfa_required: false, mfa_enrollment_required: false`. A password session without MFA stops
+  working (401 `multi-factor authentication required; sign in again`) once MFA is required.
 
 | Method & path | Auth / role | Body → Response |
 |---|---|---|
-| `POST /api/auth/mfa` | `offpatch_mfa` cookie from login | `{code: "123456"}` or `{recovery_code: "abcde-fghij"}` → 200 `{user, email, role, auth: "password", must_change_password, mfa: true}` + session cookie; the pre-auth cookie is cleared. **401** `wrong or expired code` (wrong code, code already used, used recovery code, or the account is locked); **401** `sign-in expired; enter your email and password again` (no / invalid / expired pre-auth cookie: restart at login); 403 disabled; 429 rate limit (same per-IP limit as login). |
+| `POST /api/auth/mfa` | `offpatch_mfa` cookie from login | `{code: "123456"}` or `{recovery_code: "abcde-fghij"}` → 200 `{user, email, role, auth: "password", must_change_password, mfa: true}` + session cookie; the pre-auth cookie is cleared. The pre-auth cookie is **single use** (its nonce is kept server-side) and allows at most **3** codes. **401** `wrong or expired code` (wrong code, code already used, used recovery code, or the account is locked); **401** `sign-in expired; enter your email and password again` (no / invalid / expired / already used pre-auth cookie: restart at login), or `sign-in expired after 3 wrong codes; …`; **429** `too many wrong codes: two-step sign-in is locked …` (the code step is locked; no `Retry-After`); 403 disabled; 429 rate limit (same per-IP limit as login). |
 | `POST /api/auth/mfa/enroll/start` | local user session (also the limited one) | `{}` → `{secret_base32, otpauth_uri}`; `otpauth_uri` = `otpauth://totp/DSS%20Patcher:<email>?secret=<secret_base32>&issuer=DSS%20Patcher&digits=6&period=30` (render as QR code, show the secret for manual entry). Calling again replaces the unconfirmed secret; the pending secret expires after 15 minutes. 409 if already enrolled ("ask an administrator to reset MFA"); 409 for SSO users. |
 | `POST /api/auth/mfa/enroll/confirm` | local user session (also the limited one) | `{code}` → `{ok: true, recovery_codes: [10 × "abcde-fghij"]}` (shown **once**). The current session becomes a full, MFA-verified session at once (no new sign-in). 400 `wrong or expired code`; 409 `no enrolment in progress: start it first` / `the enrolment expired: start it again`. |
-| `POST /api/auth/mfa/disable` | super_admin (own account only) | `{code}` → `{ok: true}`. 403 for other roles; 400 wrong code (counts towards the lockout); 409 not enrolled or `require_mfa` is set. |
+| `POST /api/auth/mfa/disable` | super_admin (own account only) | `{code}` → `{ok: true}`. 403 for other roles; 400 wrong code (counts towards the code lockout); 429 code step locked; 409 not enrolled or MFA is required (the default; allowed only with `"require_mfa": false`). |
 
 Audit actions: `user.mfa_enrollment_started`, `user.mfa_enrolled`, `auth.password_verified` (password
 right, MFA step next), `auth.mfa_failed` (`details.reason` / `stage`), `auth.mfa_recovery_used`,
-`auth.locked`, `user.mfa_reset`, `user.mfa_disabled`, `user.deleted`, `auth.login`
-(`details.mfa`, `details.mfa_enrollment_required`).
+`auth.locked` (`details.scope` `source` or `account`), `auth.mfa_locked`, `user.mfa_reset`,
+`user.mfa_disabled`, `user.deleted`, `auth.login` (`details.mfa`, `details.mfa_enrollment_required`),
+`user.password_change_forced` (the default password was still in use at startup).
 
 ### `/api/me` and `/api/users`
 
 - `GET /api/me` gains `mfa_enrolled: bool` (local users) and `mfa_required: bool` (local users: true
-  for bank roles, for super admins only with `require_mfa`; SSO: the `require_mfa` setting). `mfa` is
+  for bank roles and, unless `"require_mfa": false`, super admins; SSO: the `require_mfa` setting). `mfa` is
   still "this session was MFA-verified". `auth` / `source` are `"password"` or `"sso"`.
 - `builtin: true` with `password_changed_at: ""` means the built-in super admin still has the
   vendor's default password: the console shows a change-password banner.

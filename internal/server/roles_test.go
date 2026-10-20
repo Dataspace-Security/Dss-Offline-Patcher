@@ -242,8 +242,8 @@ func TestMeAndPolicy(t *testing.T) {
 		t.Fatalf("me: %d %s", w.Code, w.Body)
 	}
 	json.Unmarshal(do(h, req{method: "GET", path: "/api/me", token: roleTokens["super_admin"]}).Body.Bytes(), &me)
-	if me["mfa_required"] != false || me["mfa_enrolled"] != false {
-		t.Fatalf("super admin me: %v", me)
+	if me["mfa_required"] != true || me["mfa_enrolled"] != true || me["mfa"] != true {
+		t.Fatalf("super admin me (MFA required by default): %v", me)
 	}
 	var pol map[string]any
 	json.Unmarshal(do(h, req{method: "GET", path: "/api/policy", token: roleTokens["viewer"]}).Body.Bytes(), &pol)
@@ -435,8 +435,12 @@ func TestLoginLockoutAndRateLimit(t *testing.T) {
 			t.Fatalf("guess %d: %d", i, w.Code)
 		}
 	}
-	if w := try("203.0.113.2", testPW); w.Code != 401 || errBody(w) != "wrong email or password" {
-		t.Fatalf("locked account: %d %s", w.Code, w.Body)
+	// Locked for the guessing address only: the user still signs in elsewhere.
+	if w := try("203.0.113.1", testPW); w.Code != 401 || errBody(w) != "wrong email or password" {
+		t.Fatalf("locked for the address: %d %s", w.Code, w.Body)
+	}
+	if w := try("203.0.113.2", testPW); w.Code != 200 {
+		t.Fatalf("other address after a per-address lock: %d %s", w.Code, w.Body)
 	}
 	// Per-IP limit: loginBurst attempts, then 429 (before any password work).
 	mkLocal(t, s, "ivy@bank.example", "user", false)
@@ -451,6 +455,22 @@ func TestLoginLockoutAndRateLimit(t *testing.T) {
 	}
 	if w := do(h, req{method: "POST", path: "/api/auth/login", body: map[string]string{"email": "ivy@bank.example", "password": testPW}, csrf: true, ip: "203.0.113.10"}); w.Code != 200 {
 		t.Fatalf("other address: %d", w.Code)
+	}
+}
+
+// Saturated password checking is 503 with Retry-After; an MFA lock is 429.
+func TestAuthLimitStatusCodes(t *testing.T) {
+	s := newRolesServer(t, "", true)
+	for _, c := range []struct {
+		err   error
+		code  int
+		retry bool
+	}{{store.ErrBusy, 503, true}, {store.ErrMFALocked, 429, false}} {
+		w := httptest.NewRecorder()
+		s.fail(w, c.err)
+		if w.Code != c.code || (w.Header().Get("Retry-After") != "") != c.retry {
+			t.Errorf("%v: %d %v", c.err, w.Code, w.Header())
+		}
 	}
 }
 
@@ -479,6 +499,40 @@ func TestRequireMFAIncludesSuperAdmins(t *testing.T) {
 	enrolHTTP(t, s.Handler(), "vendor@dataspacesecurity.test", ck, "192.0.2.1")
 	if w := do(s.Handler(), req{method: "GET", path: "/api/summary", cookie: ck}); w.Code != 200 {
 		t.Fatalf("after enrolment: %d %s", w.Code, w.Body)
+	}
+}
+
+// MFA is required for super admins by default; only an explicit
+// "require_mfa": false makes it optional (and SSO is unaffected by the
+// default). A password session without MFA ends once MFA is required.
+func TestRequireMFADefaultAndOptOut(t *testing.T) {
+	for _, c := range []struct {
+		extra       string
+		local, oidc bool
+	}{{"", true, false}, {`"require_mfa": true,`, true, true}, {`"require_mfa": false,`, false, false}} {
+		cfg, err := LoadConfig(writeConfig(t, t.TempDir(), c.extra))
+		if err != nil || cfg.LocalMFARequired() != c.local || cfg.RequireMFA != c.oidc {
+			t.Errorf("%q: local %v sso %v %v", c.extra, cfg.LocalMFARequired(), cfg.RequireMFA, err)
+		}
+	}
+	if !(&Config{}).LocalMFARequired() {
+		t.Error("a config not from a file must require MFA")
+	}
+	s := newRolesServer(t, `"require_mfa": false,`, true)
+	mkLocal(t, s, "vendor@dataspacesecurity.test", "super_admin", false)
+	w := do(s.Handler(), req{method: "POST", path: "/api/auth/login", body: map[string]string{"email": "vendor@dataspacesecurity.test", "password": testPW}, csrf: true})
+	var res map[string]any
+	json.Unmarshal(w.Body.Bytes(), &res)
+	if w.Code != 200 || res["mfa_enrollment_required"] != false {
+		t.Fatalf("opt-out login: %d %s", w.Code, w.Body)
+	}
+	ck := cookieNamed(w, sessionCookie)
+	if w := do(s.Handler(), req{method: "GET", path: "/api/summary", cookie: ck}); w.Code != 200 {
+		t.Fatalf("opt-out session: %d %s", w.Code, w.Body)
+	}
+	s.store.Policy.RequireMFA = true // e.g. the opt-out removed and the server restarted
+	if w := do(s.Handler(), req{method: "GET", path: "/api/summary", cookie: ck}); w.Code != 401 || !strings.Contains(errBody(w), "multi-factor") {
+		t.Fatalf("MFA-less session after MFA became required: %d %s", w.Code, w.Body)
 	}
 }
 

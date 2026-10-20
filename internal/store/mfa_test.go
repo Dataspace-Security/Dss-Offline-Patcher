@@ -57,14 +57,14 @@ func enrol(t *testing.T, s *Store, email string) ([]byte, []string, string) {
 
 func TestMFARequiredByRole(t *testing.T) {
 	s := openTest(t)
-	for role, want := range map[string]bool{RoleViewer: true, RoleUser: true, RoleAdmin: true, RoleSuperAdmin: false} {
+	for role, want := range map[string]bool{RoleViewer: true, RoleUser: true, RoleAdmin: true, RoleSuperAdmin: true} {
 		if s.MFARequired(role) != want {
-			t.Errorf("%s: required %v", role, !want)
+			t.Errorf("%s: required %v (default)", role, !want)
 		}
 	}
-	s.Policy.RequireMFA = true
-	if !s.MFARequired(RoleSuperAdmin) {
-		t.Error("require_mfa must include super admins")
+	s.Policy.RequireMFA = false // "require_mfa": false
+	if s.MFARequired(RoleSuperAdmin) || !s.MFARequired(RoleViewer) {
+		t.Error("opt-out: optional for super admins only")
 	}
 	mkUser(t, s, bySuper, "nokey@bank.example", RoleUser)
 	if _, err := s.MFAEnrollStart(context.Background(), "nokey@bank.example"); !errors.Is(err, ErrMFAKey) {
@@ -141,32 +141,79 @@ func TestMFAEnrolLoginReplayRecovery(t *testing.T) {
 	}
 }
 
-// Wrong codes count towards the password lockout.
+// Wrong codes have their own lockout: a correct password in between does
+// not reset it (H-3); it doubles at each lockout and only a correct code
+// clears it.
 func TestMFALockout(t *testing.T) {
 	s, now := mfaStore(t)
 	ctx := context.Background()
 	mkUser(t, s, byAdmin, "ivy@bank.example", RoleViewer)
-	sec, _, _ := enrol(t, s, "ivy@bank.example")
+	sec, codes, _ := enrol(t, s, "ivy@bank.example")
 	*now = now.Add(time.Minute)
-	good := totp.Code(sec, *now)
-	bad := "000000"
-	if bad == good {
-		bad = "111111"
+	badCode := func() string {
+		if totp.Code(sec, *now) == "000000" {
+			return "111111"
+		}
+		return "000000"
 	}
-	for i := 0; i < MaxFailedLogins; i++ {
-		if _, err := s.LoginMFA(ctx, "ivy@bank.example", bad, "", time.Hour); !errors.Is(err, ErrBadMFACode) {
+	// 4 wrong codes, a correct password, 1 more wrong code: locked.
+	for i := 0; i < MaxMFAFailures-1; i++ {
+		if _, err := s.LoginMFA(ctx, "ivy@bank.example", badCode(), "", time.Hour); !errors.Is(err, ErrBadMFACode) {
 			t.Fatalf("attempt %d: %v", i, err)
 		}
 	}
-	if _, err := s.LoginMFA(ctx, "ivy@bank.example", good, "", time.Hour); !errors.Is(err, ErrBadMFACode) {
-		t.Fatalf("locked account took a right code: %v", err)
+	if l, err := s.LoginPassword(ctx, "ivy@bank.example", pw, time.Hour); err != nil || !l.MFAPending {
+		t.Fatalf("password step: %+v %v", l, err)
 	}
-	if _, err := s.LoginPassword(ctx, "ivy@bank.example", pw, time.Hour); !errors.Is(err, ErrBadCredentials) {
-		t.Fatalf("locked account took the password: %v", err)
+	if _, err := s.LoginMFA(ctx, "ivy@bank.example", badCode(), "", time.Hour); !errors.Is(err, ErrMFALocked) {
+		t.Fatalf("fifth wrong code: %v", err)
 	}
-	*now = now.Add(LockFor + time.Minute)
+	if _, err := s.LoginMFA(ctx, "ivy@bank.example", totp.Code(sec, *now), "", time.Hour); !errors.Is(err, ErrMFALocked) {
+		t.Fatalf("locked authenticator took a right code: %v", err)
+	}
+	if _, err := s.LoginMFA(ctx, "ivy@bank.example", "", codes[0], time.Hour); !errors.Is(err, ErrMFALocked) {
+		t.Fatalf("locked authenticator took a recovery code: %v", err)
+	}
+	evs := auditActions(t, s, "ivy@bank.example")
+	if e := hasAudit(evs, "auth.mfa_locked"); e == "" || !strings.Contains(e, `"lock_for":"15m0s"`) {
+		t.Fatalf("lockout audit: %v", evs)
+	}
+	al, _ := s.ListAlerts(ctx, true)
+	if len(al) != 1 || al[0].Kind != alertMFALocked || al[0].Severity != "critical" || al[0].ObjectID != "ivy@bank.example" {
+		t.Fatalf("lockout alert: %+v", al)
+	}
+	if us, _ := s.ListUsers(ctx); len(us) != 1 || !us[0].Locked {
+		t.Fatalf("users list shows the MFA lock: %+v", us)
+	}
+	// Second lockout: twice as long.
+	*now = now.Add(MFALockFor + time.Minute)
+	for i := 0; i < MaxMFAFailures; i++ {
+		s.LoginMFA(ctx, "ivy@bank.example", badCode(), "", time.Hour)
+	}
+	*now = now.Add(MFALockFor + time.Minute)
+	if _, err := s.LoginMFA(ctx, "ivy@bank.example", totp.Code(sec, *now), "", time.Hour); !errors.Is(err, ErrMFALocked) {
+		t.Fatalf("second lockout shorter than 30m: %v", err)
+	}
+	*now = now.Add(MFALockFor)
 	if _, err := s.LoginMFA(ctx, "ivy@bank.example", totp.Code(sec, *now), "", time.Hour); err != nil {
-		t.Fatalf("after the lockout: %v", err)
+		t.Fatalf("after the second lockout: %v", err)
+	}
+	// The correct code reset the counter and the doubling.
+	var failed, lockouts int
+	s.db.QueryRow(`SELECT failed_attempts, lockouts FROM mfa WHERE email='ivy@bank.example'`).Scan(&failed, &lockouts)
+	if failed != 0 || lockouts != 0 {
+		t.Fatalf("after success: failed %d lockouts %d", failed, lockouts)
+	}
+}
+
+func TestMFALockDuration(t *testing.T) {
+	for _, c := range []struct {
+		n    int
+		want time.Duration
+	}{{1, 15 * time.Minute}, {2, 30 * time.Minute}, {3, time.Hour}, {7, 16 * time.Hour}, {8, 24 * time.Hour}, {50, 24 * time.Hour}} {
+		if got := mfaLockDuration(c.n); got != c.want {
+			t.Errorf("lockout %d: %s, want %s", c.n, got, c.want)
+		}
 	}
 }
 
@@ -193,7 +240,9 @@ func TestResetAndDisableMFA(t *testing.T) {
 	if l, _ := s.LoginPassword(ctx, "uma@bank.example", pw, time.Hour); !l.MFAEnrollment {
 		t.Fatalf("after reset the user must enrol again: %+v", l)
 	}
-	// Super admins: optional, an admin cannot reset theirs; they may switch it off.
+	// Super admins ("require_mfa": false): optional, an admin cannot reset
+	// theirs; they may switch it off.
+	s.Policy.RequireMFA = false
 	mkUser(t, s, bySuper, "vendor@dataspacesecurity.test", RoleSuperAdmin)
 	s.db.Exec(`UPDATE local_users SET must_change_password=0`)
 	l, err := s.LoginPassword(ctx, "vendor@dataspacesecurity.test", pw, time.Hour)

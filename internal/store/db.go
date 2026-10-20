@@ -43,6 +43,8 @@ type Store struct {
 
 	chain        chainCache
 	enrollDenied deniedAudits
+	loginAudits  deniedAudits  // failed sign-ins per (account, source)
+	pwSlots      passwordSlots // concurrent password checks (authlimits.go)
 	mfaKey       mfaCipher
 	gen          atomic.Uint64 // Generation
 }
@@ -123,7 +125,12 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	return &Store{db: db, Now: func() time.Time { return time.Now().UTC() }}, nil
+	s := &Store{db: db, Now: func() time.Time { return time.Now().UTC() }, Policy: Policy{RequireMFA: true}}
+	if err := s.forceDefaultPasswordChange(context.Background()); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	return s, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -194,8 +201,9 @@ type Policy struct {
 	// DeploymentApprovals: distinct approvers (bank user or admin, not the
 	// creator) a deployment or rollback needs before it starts. 0 = 2.
 	DeploymentApprovals int
-	// RequireMFA (config require_mfa): authenticator MFA is required for
-	// every local user, super admins included (bank roles always need it).
+	// RequireMFA (config require_mfa, default true): authenticator MFA is
+	// required for every local user, super admins included (bank roles
+	// always need it). Only an explicit "require_mfa": false clears it.
 	RequireMFA bool
 }
 

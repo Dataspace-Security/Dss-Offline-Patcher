@@ -241,6 +241,11 @@ func (s *Server) principalFor(r *http.Request) (*principal, string) {
 	if s.cfg.RequireMFA && !ss.MFA && !ss.MFAEnrollOnly {
 		return nil, "multi-factor authentication required"
 	}
+	// A password session opened without MFA while it was optional (older
+	// version, or "require_mfa": false then) ends once MFA is required.
+	if ss.Source == "password" && !ss.MFA && !ss.MFAEnrollOnly && s.store.MFARequired(ss.Role) {
+		return nil, "multi-factor authentication required; sign in again"
+	}
 	src := "sso"
 	if ss.Source == "password" {
 		src = "password"

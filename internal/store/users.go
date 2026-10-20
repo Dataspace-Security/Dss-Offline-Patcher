@@ -179,7 +179,8 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT u.username,u.role,u.source,u.email,u.mfa,u.first_login,u.last_login,u.disabled,u.disabled_reason,
 		(SELECT COUNT(*) FROM sessions s WHERE s.username=u.username AND s.revoked=0 AND s.expires_at > ?),
 		l.email IS NOT NULL, COALESCE(l.display_name,''), COALESCE(l.role,''), COALESCE(l.must_change_password,0), COALESCE(l.locked_until,''),
-		COALESCE(l.created_by,''), COALESCE(l.created_at,''), COALESCE(l.password_changed_at,''), COALESCE(f.enrolled_at,'')
+		COALESCE(l.created_by,''), COALESCE(l.created_at,''), COALESCE(l.password_changed_at,''), COALESCE(f.enrolled_at,''),
+		COALESCE(f.locked_until,''), (SELECT COALESCE(MAX(x.locked_until),'') FROM login_failures x WHERE x.email=u.username)
 		FROM users u LEFT JOIN local_users l ON l.email=u.username LEFT JOIN mfa f ON f.email=u.username ORDER BY u.username`, now)
 	if err != nil {
 		return nil, err
@@ -190,9 +191,9 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 		var u User
 		var m, d, must int
 		var local bool
-		var lrole, mfaAt string
+		var lrole, mfaAt, mfaLock, srcLock string
 		if err := rows.Scan(&u.Username, &u.Role, &u.Source, &u.Email, &m, &u.FirstLogin, &u.LastLogin, &d, &u.DisabledReason, &u.ActiveSessions,
-			&local, &u.DisplayName, &lrole, &must, &u.LockedUntil, &u.CreatedBy, &u.CreatedAt, &u.PasswordChangedAt, &mfaAt); err != nil {
+			&local, &u.DisplayName, &lrole, &must, &u.LockedUntil, &u.CreatedBy, &u.CreatedAt, &u.PasswordChangedAt, &mfaAt, &mfaLock, &srcLock); err != nil {
 			return nil, err
 		}
 		u.MFAEnrolled = mfaAt != ""
@@ -200,10 +201,10 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 		u.Auth = "sso"
 		if local {
 			u.Auth, u.Source, u.Role, u.Email = "password", "local", lrole, u.Username
-			u.Locked = u.LockedUntil != "" && parseTime(u.LockedUntil).After(s.Now())
-			if !u.Locked {
-				u.LockedUntil = ""
-			}
+			// Any sign-in lock (account, authenticator, or one address);
+			// enabling the user clears them all.
+			u.LockedUntil = s.anyAuthLock(u.LockedUntil, mfaLock, srcLock)
+			u.Locked = u.LockedUntil != ""
 		}
 		u.Role = canonicalOr(u.Role)
 		out = append(out, u)

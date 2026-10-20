@@ -18,12 +18,13 @@ import (
 )
 
 // Authenticator-app MFA (TOTP, RFC 6238) for local users. Required for the
-// bank roles (viewer, user, admin), optional for super admins unless the
-// server requires MFA for everyone (require_mfa). Secrets are encrypted at
-// rest with AES-256-GCM (key file, see SetMFAKey) and never returned after
+// bank roles (viewer, user, admin) and, by default, for super admins too
+// (optional for them only with "require_mfa": false). Secrets are encrypted
+// at rest with AES-256-GCM (key file, see SetMFAKey) and never returned after
 // enrolment; each code works once (the last used step is kept); recovery
-// codes are stored as SHA-256 hashes and work once. Wrong codes count
-// towards the password lockout. See docs/05-api.md "MFA".
+// codes are stored as SHA-256 hashes and work once. Wrong codes have their
+// own lockout (authlimits.go), which a correct password does not reset. See
+// docs/05-api.md "MFA".
 
 const mfaSchema = `CREATE TABLE IF NOT EXISTS mfa(
   email TEXT PRIMARY KEY, secret_enc TEXT NOT NULL DEFAULT '', enrolled_at TEXT NOT NULL DEFAULT '',
@@ -103,8 +104,8 @@ func (s *Store) openSecret(email, enc string) ([]byte, error) {
 	return out, nil
 }
 
-// MFARequired: bank roles always; super admins when the server requires
-// MFA for everyone.
+// MFARequired: bank roles always; super admins unless the server opted out
+// (Policy.RequireMFA false, config "require_mfa": false).
 func (s *Store) MFARequired(role string) bool {
 	switch CanonicalRole(role) {
 	case RoleViewer, RoleUser, RoleAdmin:
@@ -239,17 +240,22 @@ func (s *Store) MFAEnrollConfirm(ctx context.Context, email, code, sessionToken 
 
 // LoginMFA is the second sign-in step after LoginPassword returned
 // MFAPending: a 6-digit code (each step once) or a recovery code (each
-// once). Wrong codes count towards the lockout; a locked account is
-// refused like a wrong code. Success opens an MFA-verified session.
+// once). Wrong codes count towards the authenticator lockout (not reset by
+// a correct password): ErrMFALocked once it is locked. A locked account is
+// refused like a wrong code. Success opens an MFA-verified session and
+// clears the authenticator's failure count.
 func (s *Store) LoginMFA(ctx context.Context, email, code, recovery string, ttl time.Duration) (PasswordLogin, error) {
-	var role, lockedUntil, enc, rec string
+	var role, lockedUntil, mfaLockedUntil, enc, rec string
 	var must int
 	var last int64
-	err := s.db.QueryRowContext(ctx, `SELECT l.role, l.must_change_password, l.locked_until, f.secret_enc, f.last_step, f.recovery
-		FROM local_users l JOIN mfa f ON f.email=l.email WHERE l.email=? AND f.enrolled_at != ''`, email).Scan(&role, &must, &lockedUntil, &enc, &last, &rec)
+	err := s.db.QueryRowContext(ctx, `SELECT l.role, l.must_change_password, l.locked_until, f.locked_until, f.secret_enc, f.last_step, f.recovery
+		FROM local_users l JOIN mfa f ON f.email=l.email WHERE l.email=? AND f.enrolled_at != ''`, email).Scan(&role, &must, &lockedUntil, &mfaLockedUntil, &enc, &last, &rec)
 	fail := func(reason string, locked bool) (PasswordLogin, error) {
 		s.Audit(ctx, Ev{Actor: "user:" + email, Action: "auth.mfa_failed", ObjectType: "user", ObjectID: email, Failure: true,
 			Details: map[string]any{"reason": reason, "locked": locked}})
+		if locked {
+			return PasswordLogin{}, ErrMFALocked
+		}
 		return PasswordLogin{}, ErrBadMFACode
 	}
 	if errors.Is(err, sql.ErrNoRows) {
@@ -260,6 +266,9 @@ func (s *Store) LoginMFA(ctx context.Context, email, code, recovery string, ttl 
 	}
 	if lockedUntil != "" && s.Now().Before(parseTime(lockedUntil)) {
 		return fail("account locked", false)
+	}
+	if mfaLockedUntil != "" && s.Now().Before(parseTime(mfaLockedUntil)) {
+		return fail("authenticator locked", true)
 	}
 	secret, err := s.openSecret(email, enc)
 	if err != nil {
@@ -279,7 +288,7 @@ func (s *Store) LoginMFA(ctx context.Context, email, code, recovery string, ttl 
 			}
 		}
 		if idx < 0 {
-			locked, err := s.recordAuthFailure(ctx, email, "recovery code")
+			locked, err := s.recordMFAFailure(ctx, email, "recovery code")
 			if err != nil {
 				return PasswordLogin{}, err
 			}
@@ -294,7 +303,7 @@ func (s *Store) LoginMFA(ctx context.Context, email, code, recovery string, ttl 
 			if _, any := totp.Verify(secret, code, s.Now(), -1); any {
 				reason = "code already used"
 			}
-			locked, err := s.recordAuthFailure(ctx, email, "mfa code")
+			locked, err := s.recordMFAFailure(ctx, email, "mfa code")
 			if err != nil {
 				return PasswordLogin{}, err
 			}
@@ -303,10 +312,19 @@ func (s *Store) LoginMFA(ctx context.Context, email, code, recovery string, ttl 
 	}
 	// The code is spent before the session exists (a concurrent replay of
 	// the same step finds last_step moved on).
-	var spent bool
+	var spent, lockedMeanwhile bool
 	err = s.tx(ctx, func(tx *sql.Tx) error {
 		var res sql.Result
 		var err error
+		// A lock set by a parallel wrong code since the read above wins.
+		var until string
+		if err := tx.QueryRow(`SELECT locked_until FROM mfa WHERE email=?`, email).Scan(&until); err != nil {
+			return err
+		}
+		if until != "" && s.Now().Before(parseTime(until)) {
+			lockedMeanwhile = true
+			return nil
+		}
 		if usedRecovery {
 			res, err = tx.Exec(`UPDATE mfa SET recovery=? WHERE email=? AND recovery=?`, mustJSON(hashes), email, rec)
 		} else {
@@ -320,7 +338,7 @@ func (s *Store) LoginMFA(ctx context.Context, email, code, recovery string, ttl 
 		if !spent {
 			return nil
 		}
-		if _, err := tx.Exec(`UPDATE local_users SET failed_attempts=0, locked_until='' WHERE email=?`, email); err != nil {
+		if _, err := tx.Exec(`UPDATE mfa SET failed_attempts=0, locked_until='', lockouts=0 WHERE email=?`, email); err != nil {
 			return err
 		}
 		if usedRecovery {
@@ -331,6 +349,9 @@ func (s *Store) LoginMFA(ctx context.Context, email, code, recovery string, ttl 
 	})
 	if err != nil {
 		return PasswordLogin{}, err
+	}
+	if lockedMeanwhile {
+		return fail("authenticator locked", true)
 	}
 	if !spent {
 		return fail("code already used", false)
@@ -382,7 +403,7 @@ func (s *Store) DisableOwnMFA(ctx context.Context, email, role, code string) err
 		return Errf(ErrForbidden, "MFA is required for your role; an administrator can reset it")
 	}
 	if s.MFARequired(role) {
-		return Errf(ErrConflict, "this server requires MFA for every account (require_mfa)")
+		return Errf(ErrConflict, "this server requires MFA for every account (the default; only \"require_mfa\": false makes it optional for super admins)")
 	}
 	var enc string
 	var last int64
@@ -397,9 +418,16 @@ func (s *Store) DisableOwnMFA(ctx context.Context, email, role, code string) err
 	if err != nil {
 		return err
 	}
+	if locked, err := s.mfaLocked(ctx, email); err != nil {
+		return err
+	} else if locked {
+		return ErrMFALocked
+	}
 	if _, ok := totp.Verify(secret, code, s.Now(), last); !ok {
-		if _, err := s.recordAuthFailure(ctx, email, "mfa code (disable)"); err != nil {
+		if locked, err := s.recordMFAFailure(ctx, email, "mfa code (disable)"); err != nil {
 			return err
+		} else if locked {
+			return ErrMFALocked
 		}
 		s.Audit(ctx, Ev{Actor: "user:" + email, Action: "auth.mfa_failed", ObjectType: "user", ObjectID: email, Failure: true,
 			Details: map[string]any{"stage": "disable"}})

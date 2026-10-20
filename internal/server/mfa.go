@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"offpatch/internal/store"
@@ -66,14 +67,98 @@ type mfaPreAuth struct {
 	Nonce string `json:"n"`
 }
 
+const (
+	// mfaPreAuthTries: codes one password step allows (then sign in again).
+	mfaPreAuthTries = 3
+	// maxPreAuths bounds the pending second steps kept in memory.
+	maxPreAuths = 10000
+)
+
+// preAuthStore keeps the nonce of every pending second step server-side:
+// a pre-auth cookie works for mfaPreAuthTries codes, once on success, and
+// never after its nonce was spent (no replay within mfaPreAuthFor).
+type preAuthStore struct {
+	mu sync.Mutex
+	m  map[string]*preAuthEntry
+}
+
+type preAuthEntry struct {
+	email string
+	exp   time.Time
+	tries int
+}
+
+// add registers a nonce; false when too many second steps are pending.
+func (p *preAuthStore) add(nonce, email string, exp time.Time) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.m == nil {
+		p.m = map[string]*preAuthEntry{}
+	}
+	if len(p.m) >= maxPreAuths {
+		now := time.Now()
+		for k, e := range p.m {
+			if now.After(e.exp) {
+				delete(p.m, k)
+			}
+		}
+		if len(p.m) >= maxPreAuths {
+			return false
+		}
+	}
+	p.m[nonce] = &preAuthEntry{email: email, exp: exp}
+	return true
+}
+
+// try spends one attempt of nonce for email: "" when allowed, else why not
+// (the entry is dropped once its attempts are used up).
+func (p *preAuthStore) try(nonce, email string, now time.Time) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.m[nonce]
+	if !ok || e.email != email || now.After(e.exp) {
+		delete(p.m, nonce)
+		return "sign-in expired; enter your email and password again"
+	}
+	e.tries++
+	if e.tries >= mfaPreAuthTries {
+		delete(p.m, nonce) // this is the last attempt
+	}
+	return ""
+}
+
+// done drops nonce (signed in, or the authenticator step is locked).
+func (p *preAuthStore) done(nonce string) {
+	p.mu.Lock()
+	delete(p.m, nonce)
+	p.mu.Unlock()
+}
+
+// left: attempts still allowed for nonce (0 = spent).
+func (p *preAuthStore) left(nonce string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.m[nonce]; ok {
+		return mfaPreAuthTries - e.tries
+	}
+	return 0
+}
+
 // setMFAPreAuth: the password was right; the signed cookie lets the
-// browser finish with a code within mfaPreAuthFor.
-func (s *Server) setMFAPreAuth(w http.ResponseWriter, r *http.Request, email string) {
-	n := make([]byte, 12)
+// browser finish with a code within mfaPreAuthFor (its nonce is kept
+// server-side). False when too many second steps are pending.
+func (s *Server) setMFAPreAuth(w http.ResponseWriter, r *http.Request, email string) bool {
+	n := make([]byte, 16)
 	rand.Read(n)
-	b, _ := json.Marshal(mfaPreAuth{Email: email, Exp: time.Now().Add(mfaPreAuthFor).Unix(), Nonce: hex.EncodeToString(n)})
+	pa := mfaPreAuth{Email: email, Exp: time.Now().Add(mfaPreAuthFor).Unix(), Nonce: hex.EncodeToString(n)}
+	if !s.preAuth.add(pa.Nonce, email, time.Unix(pa.Exp, 0)) {
+		s.log.Warn("MFA sign-in refused: too many pending second steps", "pending", maxPreAuths)
+		return false
+	}
+	b, _ := json.Marshal(pa)
 	http.SetCookie(w, &http.Cookie{Name: mfaCookie, Value: s.sign(b), Path: "/api/auth/mfa", HttpOnly: true, Secure: secureRequest(r),
 		SameSite: http.SameSiteStrictMode, MaxAge: int(mfaPreAuthFor.Seconds())})
+	return true
 }
 
 func clearMFAPreAuth(w http.ResponseWriter, r *http.Request) {
@@ -111,12 +196,28 @@ func (s *Server) mfaLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "sign-in expired; enter your email and password again")
 		return
 	}
+	if why := s.preAuth.try(pa.Nonce, pa.Email, time.Now()); why != "" {
+		clearMFAPreAuth(w, r)
+		writeErr(w, http.StatusUnauthorized, why)
+		return
+	}
 	res, err := s.store.LoginMFA(r.Context(), pa.Email, body.Code, body.RecoveryCode, s.cfg.SessionTTL.Duration)
 	switch {
 	case errors.Is(err, store.ErrBadMFACode):
+		if s.preAuth.left(pa.Nonce) == 0 {
+			clearMFAPreAuth(w, r)
+			writeErr(w, http.StatusUnauthorized, fmt.Sprintf("sign-in expired after %d wrong codes; enter your email and password again", mfaPreAuthTries))
+			return
+		}
 		writeErr(w, http.StatusUnauthorized, "wrong or expired code")
 		return
+	case errors.Is(err, store.ErrMFALocked):
+		s.preAuth.done(pa.Nonce)
+		clearMFAPreAuth(w, r)
+		writeErr(w, http.StatusTooManyRequests, err.Error())
+		return
 	case errors.Is(err, store.ErrDisabled):
+		s.preAuth.done(pa.Nonce)
 		clearMFAPreAuth(w, r)
 		writeErr(w, http.StatusForbidden, "your access has been disabled; ask an administrator")
 		return
@@ -124,6 +225,7 @@ func (s *Server) mfaLogin(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	s.preAuth.done(pa.Nonce)
 	clearMFAPreAuth(w, r)
 	s.setSessionCookie(w, r, res.Token)
 	writeJSON(w, 200, map[string]any{"user": res.Email, "email": res.Email, "role": res.Role, "auth": "password",

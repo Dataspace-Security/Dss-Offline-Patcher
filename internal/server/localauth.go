@@ -71,7 +71,9 @@ func (s *Server) passwordLogin(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &body) {
 		return
 	}
-	res, err := s.store.LoginPassword(r.Context(), body.Email, body.Password, s.cfg.SessionTTL.Duration)
+	// Wrong passwords lock the account per client address (store
+	// authlimits.go): the same key as the rate limit.
+	res, err := s.store.LoginPasswordFrom(r.Context(), body.Email, body.Password, loginKey(clientIP(r)), s.cfg.SessionTTL.Duration)
 	switch {
 	case errors.Is(err, store.ErrBadCredentials):
 		writeErr(w, http.StatusUnauthorized, badCredentials)
@@ -84,8 +86,13 @@ func (s *Server) passwordLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if res.MFAPending {
-		// Second step: POST /api/auth/mfa with a code within 5 minutes.
-		s.setMFAPreAuth(w, r, res.Email)
+		// Second step: POST /api/auth/mfa with a code within 5 minutes
+		// (at most mfaPreAuthTries codes per password).
+		if !s.setMFAPreAuth(w, r, res.Email) {
+			w.Header().Set("Retry-After", "60")
+			writeErr(w, http.StatusServiceUnavailable, "too many sign-ins in progress; try again in a minute")
+			return
+		}
 		writeJSON(w, 200, map[string]any{"mfa_required": true, "email": res.Email})
 		return
 	}

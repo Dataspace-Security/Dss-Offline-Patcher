@@ -229,7 +229,7 @@ func (s *Store) SetUserDisabled(ctx context.Context, by Manager, username string
 			if _, err := tx.Exec(`UPDATE sessions SET revoked=1 WHERE username=?`, username); err != nil {
 				return err
 			}
-		} else if _, err := tx.Exec(`UPDATE local_users SET failed_attempts=0, locked_until='' WHERE email=?`, username); err != nil {
+		} else if err := clearAuthLocks(tx, username); err != nil {
 			return err
 		}
 		action := "user.enabled"
@@ -346,60 +346,67 @@ func auditName(email string) string {
 	return "(invalid)"
 }
 
-// LoginPassword verifies an email + password and opens a session. Every
-// failure is ErrBadCredentials (audited with the real reason), except a
-// disabled account with the right password (ErrDisabled). MaxFailedLogins
-// wrong passwords lock the account for LockFor.
+// LoginPassword is LoginPasswordFrom for a local caller (CLI, tests).
 func (s *Store) LoginPassword(ctx context.Context, email, password string, ttl time.Duration) (PasswordLogin, error) {
+	return s.LoginPasswordFrom(ctx, email, password, "", ttl)
+}
+
+// LoginPasswordFrom verifies an email + password from client source (the
+// rate-limit key of the client address) and opens a session. Every failure
+// is ErrBadCredentials (audited with the real reason, folded per source),
+// except a disabled account with the right password (ErrDisabled) and
+// ErrBusy. Locks: see authlimits.go (per source, then per account).
+func (s *Store) LoginPasswordFrom(ctx context.Context, email, password, source string, ttl time.Duration) (PasswordLogin, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
-	var hash, role, lockedUntil string
+	source = loginSource(source)
+	var hash, role string
 	var must int
-	err := s.db.QueryRowContext(ctx, `SELECT password_hash, role, must_change_password, locked_until FROM local_users WHERE email=?`, email).Scan(&hash, &role, &must, &lockedUntil)
+	err := s.db.QueryRowContext(ctx, `SELECT password_hash, role, must_change_password FROM local_users WHERE email=?`, email).Scan(&hash, &role, &must)
 	fail := func(reason string, details map[string]any) (PasswordLogin, error) {
-		name := auditName(email)
-		d := map[string]any{"reason": reason, "source": "password"}
-		for k, v := range details {
-			d[k] = v
-		}
-		s.Audit(ctx, Ev{Actor: "user:" + name, Action: "auth.login_failed", ObjectType: "user", ObjectID: name, Failure: true, Details: d})
+		s.auditLoginFailure(ctx, auditName(email), source, reason, details)
 		return PasswordLogin{}, ErrBadCredentials
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return PasswordLogin{}, err
+	}
+	release, berr := s.acquirePasswordCheck(ctx)
+	if berr != nil {
+		return PasswordLogin{}, berr
 	}
 	if errors.Is(err, sql.ErrNoRows) || len(password) > maxPasswordBytes {
 		burnPasswordCheck(password)
+		release()
 		return fail("unknown user or invalid input", nil)
 	}
+	ok := VerifyPassword(hash, password) // always: same work for locked accounts
+	release()
+	if afterPasswordCheck != nil {
+		afterPasswordCheck()
+	}
+	// The lock is read after the slow check, in the transaction that records
+	// the outcome: parallel guesses cannot all pass a lock set meanwhile.
+	var lockReason, lockedUntil string
+	var lockedNow bool
+	err = s.tx(ctx, func(tx *sql.Tx) error {
+		var err error
+		if lockReason, lockedUntil, err = s.passwordLocked(tx, email, source); err != nil || lockReason != "" {
+			return err
+		}
+		if !ok {
+			lockedNow, err = s.recordPasswordFailure(tx, email, source, "password")
+			return err
+		}
+		_, err = tx.Exec(`DELETE FROM login_failures WHERE email=? AND source=?`, email, source)
+		return err
+	})
 	if err != nil {
 		return PasswordLogin{}, err
 	}
-	ok := VerifyPassword(hash, password) // always: same work for locked accounts
-	if lockedUntil != "" && s.Now().Before(parseTime(lockedUntil)) {
-		return fail("account locked", map[string]any{"locked_until": lockedUntil})
+	if lockReason != "" {
+		return fail(lockReason, map[string]any{"locked_until": lockedUntil})
 	}
 	if !ok {
-		var locked bool
-		var lockUntil string
-		err := s.tx(ctx, func(tx *sql.Tx) error {
-			var n int
-			if err := tx.QueryRow(`UPDATE local_users SET failed_attempts=failed_attempts+1 WHERE email=? RETURNING failed_attempts`, email).Scan(&n); err != nil {
-				return err
-			}
-			if n < MaxFailedLogins {
-				return nil
-			}
-			locked, lockUntil = true, s.Now().Add(LockFor).UTC().Format(time.RFC3339Nano)
-			if _, err := tx.Exec(`UPDATE local_users SET failed_attempts=0, locked_until=? WHERE email=?`, lockUntil, email); err != nil {
-				return err
-			}
-			return s.audit(tx, Ev{Actor: "system:auth", Action: "auth.locked", ObjectType: "user", ObjectID: email, Failure: true,
-				Details: map[string]any{"failed_attempts": n, "locked_until": lockUntil}})
-		})
-		if err != nil {
-			return PasswordLogin{}, err
-		}
-		return fail("wrong password", map[string]any{"locked": locked})
-	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE local_users SET failed_attempts=0, locked_until='' WHERE email=?`, email); err != nil {
-		return PasswordLogin{}, err
+		return fail("wrong password", map[string]any{"locked": lockedNow})
 	}
 	res := PasswordLogin{Email: email, Role: canonicalOr(role), MustChangePassword: must == 1}
 	enrolled, err := s.MFAEnrolled(ctx, email)
@@ -428,66 +435,53 @@ func (s *Store) LoginPassword(ctx context.Context, email, password string, ttl t
 	return res, nil
 }
 
-// recordAuthFailure counts a wrong password or MFA code towards the
-// lockout (MaxFailedLogins in a row lock the account for LockFor).
-func (s *Store) recordAuthFailure(ctx context.Context, email, what string) (bool, error) {
-	var locked bool
-	err := s.tx(ctx, func(tx *sql.Tx) error {
-		var n int
-		if err := tx.QueryRow(`UPDATE local_users SET failed_attempts=failed_attempts+1 WHERE email=? RETURNING failed_attempts`, email).Scan(&n); err != nil {
-			return err
-		}
-		if n < MaxFailedLogins {
-			return nil
-		}
-		locked = true
-		until := s.Now().Add(LockFor).UTC().Format(time.RFC3339Nano)
-		if _, err := tx.Exec(`UPDATE local_users SET failed_attempts=0, locked_until=? WHERE email=?`, until, email); err != nil {
-			return err
-		}
-		return s.audit(tx, Ev{Actor: "system:auth", Action: "auth.locked", ObjectType: "user", ObjectID: email, Failure: true,
-			Details: map[string]any{"failed_attempts": n, "locked_until": until, "last_failure": what}})
-	})
-	return locked, err
-}
+// pwChangeSource: wrong current passwords in a password change count under
+// this source (authlimits.go); its lock also ends the user's sessions.
+const pwChangeSource = "password-change"
 
 // ChangeOwnPassword: a signed-in local user replaces their password (also
 // the forced change after a temporary one). Their other sessions end; the
 // session keepToken stays. Wrong current passwords count towards lockout.
 func (s *Store) ChangeOwnPassword(ctx context.Context, email, current, next, keepToken string) error {
-	var hash, lockedUntil string
-	err := s.db.QueryRowContext(ctx, `SELECT password_hash, locked_until FROM local_users WHERE email=?`, email).Scan(&hash, &lockedUntil)
+	var hash string
+	err := s.db.QueryRowContext(ctx, `SELECT password_hash FROM local_users WHERE email=?`, email).Scan(&hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Errf(ErrConflict, "only local (password) users can change their password here")
 	}
 	if err != nil {
 		return err
 	}
-	if len(current) > maxPasswordBytes || !VerifyPassword(hash, current) || (lockedUntil != "" && s.Now().Before(parseTime(lockedUntil))) {
-		err := s.tx(ctx, func(tx *sql.Tx) error {
-			var n int
-			if err := tx.QueryRow(`UPDATE local_users SET failed_attempts=failed_attempts+1 WHERE email=? RETURNING failed_attempts`, email).Scan(&n); err != nil {
+	ok := false
+	if len(current) <= maxPasswordBytes {
+		if ok, err = s.verifyPasswordLimited(ctx, hash, current); err != nil {
+			return err
+		}
+	}
+	// The lock is read after the slow check, in the recording transaction.
+	var lockReason string
+	err = s.tx(ctx, func(tx *sql.Tx) error {
+		var err error
+		if lockReason, _, err = s.passwordLocked(tx, email, pwChangeSource); err != nil || (ok && lockReason == "") {
+			return err
+		}
+		if lockReason == "" {
+			locked, err := s.recordPasswordFailure(tx, email, pwChangeSource, "password change")
+			if err != nil {
 				return err
 			}
-			if n >= MaxFailedLogins {
-				until := s.Now().Add(LockFor).UTC().Format(time.RFC3339Nano)
-				if _, err := tx.Exec(`UPDATE local_users SET failed_attempts=0, locked_until=? WHERE email=?`, until, email); err != nil {
-					return err
-				}
+			if locked {
 				if _, err := tx.Exec(`UPDATE sessions SET revoked=1 WHERE username=?`, email); err != nil {
 					return err
 				}
-				if err := s.audit(tx, Ev{Actor: "system:auth", Action: "auth.locked", ObjectType: "user", ObjectID: email, Failure: true,
-					Details: map[string]any{"failed_attempts": n, "locked_until": until, "during": "password change"}}); err != nil {
-					return err
-				}
 			}
-			return s.audit(tx, Ev{Actor: "user:" + email, Action: "user.password_change_failed", ObjectType: "user", ObjectID: email, Failure: true,
-				Details: map[string]any{"reason": "current password wrong (or account locked)"}})
-		})
-		if err != nil {
-			return err
 		}
+		return s.audit(tx, Ev{Actor: "user:" + email, Action: "user.password_change_failed", ObjectType: "user", ObjectID: email, Failure: true,
+			Details: map[string]any{"reason": "current password wrong (or account locked)"}})
+	})
+	if err != nil {
+		return err
+	}
+	if !ok || lockReason != "" {
 		return Errf(ErrInvalid, "the current password is wrong")
 	}
 	if err := ValidatePassword(email, next); err != nil {

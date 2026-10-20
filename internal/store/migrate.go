@@ -53,6 +53,12 @@ var columnMigrations = []struct{ table, column, ddl string }{
 	{"sessions", "mfa_enroll_only", "INTEGER NOT NULL DEFAULT 0"},
 	// EXE packages (kind exe): the manifest's exe block as JSON ("" = none).
 	{"packages", "exe", "TEXT NOT NULL DEFAULT ''"},
+	// Sign-in protection (authlimits.go): the account-wide wrong-password
+	// window, and the authenticator step's own failure counter and lock.
+	{"local_users", "failed_window_start", "TEXT NOT NULL DEFAULT ''"},
+	{"mfa", "failed_attempts", "INTEGER NOT NULL DEFAULT 0"},
+	{"mfa", "locked_until", "TEXT NOT NULL DEFAULT ''"},
+	{"mfa", "lockouts", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 func hasColumn(db *sql.DB, table, column string) (bool, error) {
@@ -94,6 +100,8 @@ var tableMigrations = []string{
 	mfaSchema,
 	// Auto-download policy (acquisition), one row per saved version.
 	acqPolicySchema,
+	// Wrong passwords per (account, client address) (authlimits.go).
+	loginFailuresSchema,
 }
 
 // The role names operator and approver were removed: stored users and
