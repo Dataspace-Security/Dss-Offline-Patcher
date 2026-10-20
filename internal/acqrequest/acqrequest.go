@@ -226,10 +226,13 @@ func (r *Request) Validate() error {
 		if !ValidArch(k.Arch) {
 			add("%s.arch %q invalid", p, k.Arch)
 		}
-		if seenKB[k.KB+"/"+k.Arch] {
-			add("%s %s/%s duplicated", p, k.KB, k.Arch)
+		// One KB can serve several builds (24H2 and 25H2): one entry per
+		// KB, architecture and build.
+		kbKey := fmt.Sprintf("%s/%s/%d", k.KB, k.Arch, k.Build)
+		if seenKB[kbKey] {
+			add("%s %s/%s build %d duplicated", p, k.KB, k.Arch, k.Build)
 		}
-		seenKB[k.KB+"/"+k.Arch] = true
+		seenKB[kbKey] = true
 		if k.Build < 0 || k.Build > 99999 || k.Endpoints < 0 {
 			add("%s.build/endpoints out of range", p)
 		}

@@ -98,7 +98,7 @@ func (s *Server) exportAcqRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	kbs := make([]string, 0, len(req.KBs))
 	for _, k := range req.KBs {
-		kbs = append(kbs, k.KB+"/"+k.Arch)
+		kbs = append(kbs, fmt.Sprintf("%s/%s/%d", k.KB, k.Arch, k.Build))
 	}
 	rec := store.AcqRequestRecord{RequestID: req.RequestID, CreatedAt: req.CreatedAt, CreatedBy: req.CreatedBy, IntelGeneratedAt: req.IntelGeneratedAt}
 	for _, a := range req.Apps {

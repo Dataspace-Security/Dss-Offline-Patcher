@@ -80,3 +80,17 @@ func TestCleanText(t *testing.T) {
 		t.Errorf("truncation: %d", len(got))
 	}
 }
+
+// Windows 11 24H2 and 25H2 share KB numbers: one entry per build is valid,
+// the same build twice is not.
+func TestSharedKBTwoBuilds(t *testing.T) {
+	r := valid()
+	r.KBs = []KB{{KB: "KB5127648", Build: 26100, Arch: "x64", Endpoints: 1}, {KB: "KB5127648", Build: 26200, Arch: "x64", Endpoints: 2}}
+	if err := r.Validate(); err != nil {
+		t.Fatalf("two builds of one KB refused: %v", err)
+	}
+	r.KBs = append(r.KBs, KB{KB: "KB5127648", Build: 26200, Arch: "x64"})
+	if err := r.Validate(); err == nil || !strings.Contains(err.Error(), "duplicated") {
+		t.Fatalf("same build twice accepted: %v", err)
+	}
+}

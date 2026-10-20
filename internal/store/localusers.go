@@ -572,6 +572,9 @@ func (s *Store) RecoverSuperAdmin(ctx context.Context, email, password string) e
 		if _, err := tx.Exec(`UPDATE users SET disabled=0, disabled_reason='' WHERE username=?`, email); err != nil {
 			return err
 		}
+		if err := clearAuthLocks(tx, email); err != nil { // per-address and account-wide sign-in locks too
+			return err
+		}
 		if err := s.setSteward(tx, Manager{Actor: "system:cli", Role: RoleSuperAdmin}, email); err != nil {
 			return err
 		}
