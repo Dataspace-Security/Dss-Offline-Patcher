@@ -42,17 +42,20 @@
 #                                     role all: --root-pubkey uses an offline root key; none is created
 #   --audit-dir PATH                  audit export dir (first install). Use separate / WORM storage
 #   --allow-from CIDR                 ufw: allow the server port only from CIDR (repeatable; default:
-#                                     the local subnet of this machine's address)
+#                                     the local subnet of a private address). Required on a fresh install
+#                                     with a public IP when ufw is active (a VPS "subnet" is the provider's)
 #   --no-egress-lock                  role all: do not install the nftables egress lock (remembered;
 #                                     --egress-lock turns it back on)
-#   --backup-dir PATH                 daily backups (default /var/lib/offpatch-backup)
+#   --backup-dir PATH                 daily backups go to PATH/offpatch (its own folder; PATH may be shared
+#                                     storage). Default /var/lib/offpatch-backup
 #   --backup-keep N                   scheduled backups to keep (default 14)
 #   --skip-backup                     upgrade without the automatic pre-upgrade backup
-#   --insecure-lab                    plain HTTP (first install, isolated lab only)
+#   --insecure-lab                    plain HTTP (first install, isolated lab only; refused on a public IP)
 #   --admin-email EMAIL               role server/all: sign-in email of the built-in super admin (vendor),
-#                                     created when none exists (default superadmin@dataspacesecurity.com)
-#                                     with the vendor's default password (see the vendor handbook); change
-#                                     it after the first sign-in (lost: pmserver reset-admin)
+#                                     created on a FRESH install only (no database yet; upgrades never
+#                                     create users; default superadmin@dataspacesecurity.com) with the
+#                                     vendor's default password (see the vendor handbook). The first sign-in
+#                                     requires a new password and MFA enrolment (lost: pmserver reset-admin)
 #   --with-agent                      role all: also enroll this machine as a managed endpoint
 #   --go-version 1.27.2               Go toolchain to install when building from source
 #
@@ -210,6 +213,37 @@ MDNS=${MDNS_IN:-$(state_get MDNS)}; MDNS=${MDNS:-1}
 
 # Values end up in JSON, systemd units and ufw rules: accept plain paths / numbers / CIDRs only.
 safe_path() { [[ "$1" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "$2 must be an absolute path of letters, digits, . _ - / (got: $1)"; }
+
+# Root never follows a symbolic link inside a directory a service account can write: a compromised
+# service account could point it at /etc/shadow or /etc/sudoers.d (H-4). no_symlink dies when PATH,
+# or any component of it below BASE (BASE itself is root-owned and not checked), is a link.
+no_symlink() { # path base
+  local p=$1 base=${2%/} cur=$1
+  case "$p" in "$base"/*) ;; *) die "internal: $p is not below $base" ;; esac
+  while [ "$cur" != "$base" ]; do
+    [ ! -L "$cur" ] || die "refusing to continue: $cur is a symbolic link (-> $(readlink "$cur")), where this installer expects a plain
+     file or directory. Something may have tampered with it: inspect it, remove the link, and re-run"
+    cur=$(dirname "$cur")
+  done
+}
+# Run a command as a service account (from /, so it can read its working directory). Used for
+# changes inside the account's own directories: the account can never gain more than it has.
+as_user() { ( cd / && runuser -u "$1" -- "${@:2}" ); }
+# Globally routable IPv4 (not RFC 1918, CGNAT 100.64/10, loopback, link-local, 0/8, multicast/reserved).
+is_global_ip() {
+  local a b
+  [[ "${1:-}" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+  a=${BASH_REMATCH[1]} b=${BASH_REMATCH[2]}
+  case "$a" in
+    0|10|127) return 1 ;;
+    100) [ "$b" -ge 64 ] && [ "$b" -le 127 ] && return 1 ;;
+    169) [ "$b" = 254 ] && return 1 ;;
+    172) [ "$b" -ge 16 ] && [ "$b" -le 31 ] && return 1 ;;
+    192) [ "$b" = 168 ] && return 1 ;;
+  esac
+  [ "$a" -lt 224 ] || return 1
+  return 0
+}
 [[ "$PORT" =~ ^[0-9]+$ ]] && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || die "--port must be 1-65535"
 [ -z "$AUDIT_DIR_IN" ] || safe_path "$AUDIT_DIR_IN" --audit-dir
 [ -z "$BACKUP_DIR_IN" ] || safe_path "$BACKUP_DIR_IN" --backup-dir
@@ -284,7 +318,10 @@ port80_busy() {
 }
 
 check_cf_credentials() { # file
-  local f=$1 mode
+  local f=$1 mode d
+  d=$(dirname "$f")
+  [ ! -L "$f" ] || die "$f is a symbolic link: store the Cloudflare token in a plain root-owned file (0600)"
+  [ ! -L "$d" ] || die "$d (folder of the Cloudflare credentials) is a symbolic link: use a plain root-owned folder"
   if [ ! -f "$f" ]; then
     die "Cloudflare credentials $f not found. Create a Cloudflare API token with Zone > DNS > Edit
      for the domain's zone, then store it in that file (one line, root only):
@@ -293,10 +330,13 @@ check_cf_credentials() { # file
        sudo nano $f      # dns_cloudflare_api_token = <token>
      and re-run."
   fi
-  [ "$(stat -c %U "$f")" = root ] || die "$f must be owned by root (it holds the Cloudflare API token): sudo chown root:root $f"
+  [ "$(stat -c %u "$f")" = 0 ] || die "$f must be owned by root (it holds the Cloudflare API token): sudo chown root:root $f"
+  # The folder too: whoever can write it can swap the file.
+  case "$d" in "$ETC"/*) chown root:root "$d"; chmod 0700 "$d" ;; esac
+  [ "$(stat -c %u "$d")" = 0 ] || die "$d (folder of the Cloudflare credentials) must be owned by root: sudo chown root:root $d"
+  [ $(( 0$(stat -c %a "$d") & 022 )) = 0 ] || die "$d (folder of the Cloudflare credentials) must not be group/world writable: sudo chmod go-w $d"
   mode=$(stat -c %a "$f")
   if [ "$mode" != 600 ] && [ "$mode" != 400 ]; then chmod 0600 "$f"; warn "$f was mode $mode; now 0600"; fi
-  case "$(dirname "$f")" in "$ETC"/*) chown root:root "$(dirname "$f")"; chmod 0700 "$(dirname "$f")" ;; esac
   grep -Eq '^[[:space:]]*dns_cloudflare_api_token[[:space:]]*=[[:space:]]*[^[:space:]]+' "$f" \
     || die "$f has no line \"dns_cloudflare_api_token = <token>\""
   ok "Cloudflare credentials $f (root, mode $(stat -c %a "$f"))"
@@ -346,26 +386,71 @@ install_certbot() { # method
   ok "installed $pkgs"
 }
 
+# $PUBLIC_DIR (pki/public) is root:$SVC_USER 0750 with root:$SVC_USER 0640 files: pmserver reads
+# (and hot-reloads) them through its group but cannot change them. Its parent pki/ belongs to the
+# service account, which could swap public/ for a link: root works only after `cd -P` into it and
+# checking that the directory it is in is the real one and root-owned, so later swaps of the path
+# do not matter (N-1). Used by the installer (bash) and, as the same steps, by the certbot hook (sh).
+secure_public_dir() { # create or repair $PUBLIC_DIR; dies on a link or a foreign directory
+  local d=$PUBLIC_DIR
+  [ -d "$ETC/pki" ] && [ ! -L "$ETC/pki" ] || die "$ETC/pki is missing or a symbolic link"
+  [ ! -L "$d" ] || die "refusing to continue: $d is a symbolic link (-> $(readlink "$d")). Inspect it, remove it, and re-run"
+  [ -e "$d" ] || mkdir -m 0750 "$d" || die "could not create $d"
+  ( cd -P "$d" && [ "$(pwd -P)" = "$d" ] || exit 1
+    # earlier versions: $SVC_USER owned it. Take it over first, so nothing can change in it meanwhile.
+    chown -h root:"$SVC_USER" . && chmod 0750 . || exit 1
+    for f in * .[!.]*; do
+      [ -e "$f" ] || [ -L "$f" ] || continue
+      if [ -L "$f" ] || { [ -f "$f" ] && [ "$(stat -c %h "$f")" != 1 ]; }; then
+        rm -f -- "$f"; printf '  ! removed %s/%s (a link; pmserver gets a fresh copy)\n' "$d" "$f"
+      elif [ -f "$f" ]; then
+        chown -h root:"$SVC_USER" "$f" && chmod 0640 "$f" || exit 1
+      fi
+    done ) || die "could not secure $d (is it a plain directory?)"
+}
+
+# Copy a key and certificate into $PUBLIC_DIR: temporary files in the same directory, then rename.
+install_public_pair() { # key-file cert-file (absolute)
+  secure_public_dir
+  ( cd -P "$PUBLIC_DIR" && [ "$(pwd -P)" = "$PUBLIC_DIR" ] && [ "$(stat -c %u .)" = 0 ] || exit 1
+    umask 077
+    k=$(mktemp ./.key.pem.XXXXXX) && c=$(mktemp ./.cert.pem.XXXXXX) || exit 1
+    trap 'rm -f -- "$k" "$c"' EXIT
+    cat -- "$1" > "$k" && cat -- "$2" > "$c" \
+      && chown root:"$SVC_USER" "$k" "$c" && chmod 0640 "$k" "$c" \
+      && mv -f -- "$k" key.pem && mv -f -- "$c" cert.pem ) || die "could not install the certificate in $PUBLIC_DIR"
+}
+
 write_le_hook() { # domain
   install -d -m 0755 "$(dirname "$LE_HOOK")"
-  cat > "$LE_HOOK" <<HOOK
+  cat > "$LE_HOOK.new" <<HOOK
 #!/bin/sh
 # DSS Patcher (offpatch): console certificate for $1. Written by install-ubuntu.sh; re-runs rewrite it.
 # certbot runs this after a renewal: copy the certificate to where pmserver reads it. pmserver
 # re-reads it within a minute (reload: at once); agents keep the internal CA and are not affected.
+# DEST is root:$SVC_USER 0750 inside a folder the service account owns: never follow a link there.
 set -eu
 LINEAGE=/etc/letsencrypt/live/$1
 [ "\${RENEWED_LINEAGE:-\$LINEAGE}" = "\$LINEAGE" ] || exit 0
 DEST=$PUBLIC_DIR
-install -d -m 0700 -o $SVC_USER -g $SVC_USER "\$DEST"
-install -m 0600 -o $SVC_USER -g $SVC_USER "\$LINEAGE/privkey.pem" "\$DEST/key.pem.new"
-install -m 0600 -o $SVC_USER -g $SVC_USER "\$LINEAGE/fullchain.pem" "\$DEST/cert.pem.new"
-mv -f "\$DEST/key.pem.new" "\$DEST/key.pem"
-mv -f "\$DEST/cert.pem.new" "\$DEST/cert.pem"
+fail() { logger -p daemon.err -t offpatch-certbot "\$*" 2>/dev/null || true; echo "offpatch deploy hook: \$*" >&2; exit 1; }
+[ ! -L "\$DEST" ] || fail "\$DEST is a symbolic link; not copying the certificate (inspect it, then re-run the installer)"
+[ -d "\$DEST" ] || mkdir -m 0750 "\$DEST" || fail "cannot create \$DEST"
+cd -P "\$DEST" || fail "cannot enter \$DEST"
+[ "\$(pwd -P)" = "\$DEST" ] || fail "\$DEST is not where it should be (link?)"
+chown -h root:$SVC_USER . && chmod 0750 .
+umask 077
+k=\$(mktemp ./.key.pem.XXXXXX); c=\$(mktemp ./.cert.pem.XXXXXX)
+trap 'rm -f -- "\$k" "\$c"' EXIT
+cat "\$LINEAGE/privkey.pem" > "\$k"
+cat "\$LINEAGE/fullchain.pem" > "\$c"
+chown root:$SVC_USER "\$k" "\$c"; chmod 0640 "\$k" "\$c"
+mv -f "\$k" key.pem
+mv -f "\$c" cert.pem
 systemctl reload offpatch-server >/dev/null 2>&1 || true
 HOOK
-  chmod 0755 "$LE_HOOK"
-  ok "certbot deploy hook $LE_HOOK -> $PUBLIC_DIR/{cert,key}.pem ($SVC_USER, 0600)"
+  chmod 0755 "$LE_HOOK.new"; mv -f "$LE_HOOK.new" "$LE_HOOK"
+  ok "certbot deploy hook $LE_HOOK -> $PUBLIC_DIR/{cert,key}.pem (root:$SVC_USER, 0640)"
 }
 
 # Bank-provided certificate: validate before anything changes. Sets PUBLIC_NAMES (comma list).
@@ -411,12 +496,8 @@ check_provided_cert() {
 }
 
 install_provided_cert() {
-  install -d -m 0700 -o "$SVC_USER" -g "$SVC_USER" "$PUBLIC_DIR"
-  install -m 0600 -o "$SVC_USER" -g "$SVC_USER" "$PUBLIC_KEY_IN" "$PUBLIC_DIR/key.pem.new"
-  install -m 0600 -o "$SVC_USER" -g "$SVC_USER" "$PUBLIC_CERT_IN" "$PUBLIC_DIR/cert.pem.new"
-  mv -f "$PUBLIC_DIR/key.pem.new" "$PUBLIC_DIR/key.pem"
-  mv -f "$PUBLIC_DIR/cert.pem.new" "$PUBLIC_DIR/cert.pem"
-  ok "installed the provided certificate in $PUBLIC_DIR ($SVC_USER, 0600)"
+  install_public_pair "$PUBLIC_KEY_IN" "$PUBLIC_CERT_IN"
+  ok "installed the provided certificate in $PUBLIC_DIR (root:$SVC_USER, 0640)"
   if [ -f "$LE_HOOK" ]; then
     rm -f "$LE_HOOK"
     warn "removed the certbot deploy hook (it would overwrite the provided certificate); the Let's Encrypt certificate itself is kept: sudo certbot delete --cert-name <name> if unused"
@@ -445,6 +526,7 @@ obtain_le_cert() {
     fi
   fi
   [ -f "/etc/letsencrypt/live/$PUBLIC_DOMAIN/fullchain.pem" ] || { warn "no certificate in /etc/letsencrypt/live/$PUBLIC_DOMAIN"; return 1; }
+  secure_public_dir
   RENEWED_LINEAGE="/etc/letsencrypt/live/$PUBLIC_DOMAIN" "$LE_HOOK" || { warn "copying the certificate to $PUBLIC_DIR failed"; return 1; }
   ok "Let's Encrypt certificate for $PUBLIC_DOMAIN ($(openssl x509 -in "$PUBLIC_DIR/cert.pem" -noout -enddate 2>/dev/null | sed 's/notAfter=/expires /'))"
   if [ $HAVE_SYSTEMD = 1 ]; then
@@ -543,7 +625,26 @@ check_public_https() { # port
   fi
 }
 
-BACKUP_DIR=${BACKUP_DIR_IN:-$(state_get BACKUP_DIR)}; BACKUP_DIR=${BACKUP_DIR:-$DEFAULT_BACKUP_DIR}
+# Backups (M-9): --backup-dir PATH is a place that other tools may share (/backup), so offpatch
+# always uses its own sub-directory PATH/offpatch there; the default stays /var/lib/offpatch-backup.
+# install.state keeps the final directory (BACKUP_LAYOUT=2). Earlier versions used PATH itself:
+# their backups are moved into PATH/offpatch on this run (BACKUP_MIGRATE_FROM).
+backup_dir_for() { if [ "$1" = "$DEFAULT_BACKUP_DIR" ]; then echo "$1"; else echo "${1%/}/offpatch"; fi; }
+BACKUP_MIGRATE_FROM=""
+if [ -n "$BACKUP_DIR_IN" ]; then
+  BACKUP_DIR=$(backup_dir_for "$BACKUP_DIR_IN")
+  if [ "$(state_get BACKUP_LAYOUT)" != 2 ] && [ "$(state_get BACKUP_DIR)" = "$BACKUP_DIR_IN" ] && [ "$BACKUP_DIR" != "$BACKUP_DIR_IN" ]; then
+    BACKUP_MIGRATE_FROM=$BACKUP_DIR_IN
+  fi
+elif [ -n "$(state_get BACKUP_DIR)" ] && [ "$(state_get BACKUP_LAYOUT)" = 2 ]; then
+  BACKUP_DIR=$(state_get BACKUP_DIR)
+elif [ -n "$(state_get BACKUP_DIR)" ]; then
+  BACKUP_DIR=$(backup_dir_for "$(state_get BACKUP_DIR)")
+  [ "$BACKUP_DIR" = "$(state_get BACKUP_DIR)" ] || BACKUP_MIGRATE_FROM=$(state_get BACKUP_DIR)
+else
+  BACKUP_DIR=$DEFAULT_BACKUP_DIR
+fi
+safe_path "$BACKUP_DIR" "backup directory"
 BACKUP_KEEP=${BACKUP_KEEP_IN:-$(state_get BACKUP_KEEP)}; BACKUP_KEEP=${BACKUP_KEEP:-$DEFAULT_BACKUP_KEEP}
 
 # ---------------------------------------------------------------- console name on the LAN (mDNS)
@@ -682,6 +783,8 @@ configure_avahi_ifaces() { # iface; sets AVAHI_CHANGED
 mdns_firewall() {
   command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active" || return 0
   local c old prev=$MDNS_UFW_NOW
+  # a public address's "local subnet" is the provider's network: never open mDNS to it (M-10)
+  if is_global_ip "${IP:-}"; then warn "ufw: UDP 5353 (mDNS) not opened: $IP is a public address"; return 0; fi
   MDNS_UFW_NOW=""
   for c in $(local_subnets "$IP"); do
     ufw allow proto udp from "$c" to any port 5353 comment 'mDNS: DSS Patcher console name' >/dev/null \
@@ -792,8 +895,9 @@ if [ $STATUS = 1 ]; then
     echo "request watcher:   $(systemctl is-active offpatch-acquire-requests.path 2>/dev/null || true) (offpatch-acquire-requests.path)"
   fi
   echo "backup timer:      $( [ $HAVE_SYSTEMD = 1 ] && systemctl is-active offpatch-backup.timer 2>/dev/null || echo 'cron/manual')"
-  [ -f "$BACKUP_DIR/last-success" ] && echo "last good backup:  $(head -n 1 "$BACKUP_DIR/last-success")"
-  [ -f "$BACKUP_DIR/last-failure" ] && echo "last FAILED backup: $(cat "$BACKUP_DIR/last-failure")"
+  st_bdir=$BACKUP_DIR; [ -d "$st_bdir" ] || st_bdir=${BACKUP_MIGRATE_FROM:-$BACKUP_DIR}
+  [ -f "$st_bdir/last-success" ] && [ ! -L "$st_bdir/last-success" ] && echo "last good backup:  $(head -n 1 "$st_bdir/last-success")"
+  [ -f "$st_bdir/last-failure" ] && [ ! -L "$st_bdir/last-failure" ] && echo "last FAILED backup: $(head -n 1 "$st_bdir/last-failure")"
   if command -v nft >/dev/null && nft list table inet "$EGRESS_TABLE" >/dev/null 2>&1; then
     echo "egress lock:       active (nftables table $EGRESS_TABLE; only $ACQ_USER reaches the internet)"
   elif [ -f "$EGRESS_NFT" ]; then
@@ -951,7 +1055,8 @@ if [ $PUBLIC_WANTED = 1 ] && [ $OTHER_ARGS = 0 ] && [ -f "$ETC/pmserver.json" ];
   setup_public_tls "$default_agent" || { rm -f "$ETC/pmserver.json.before-public-tls"; die "no certificate obtained; nothing was changed"; }
   if [ $HAVE_SYSTEMD = 1 ]; then systemctl restart offpatch-server; else
     pkill -f "$PREFIX/bin/pmserver" 2>/dev/null || true
-    runuser -u "$SVC_USER" -- nohup "$PREFIX/bin/pmserver" -config "$ETC/pmserver.json" >> "$SRV_DATA/pmserver.log" 2>&1 &
+    # the log is opened by $SVC_USER (it lives in its directory), never by root
+    as_user "$SVC_USER" sh -c 'exec nohup "$1" -config "$2" >> "$3" 2>&1' sh "$PREFIX/bin/pmserver" "$ETC/pmserver.json" "$SRV_DATA/pmserver.log" &
   fi
   for _ in $(seq 1 30); do curl -fs -o /dev/null --cacert "$ETC/pki/ca.pem" "https://127.0.0.1:$port/" && break; sleep 1; done
   if ! curl -fs -o /dev/null --cacert "$ETC/pki/ca.pem" "https://127.0.0.1:$port/"; then
@@ -1055,6 +1160,85 @@ elif [ -n "$DOMAIN_IN" ]; then
   die "--domain is for --role all or server (the console's name); agents connect by IP: --server https://<server IP>:<port>"
 fi
 [ -z "$SERVER_IP_IN" ] || warn "--server-ip is ignored: agents connect by IP (--server https://<server IP>:<port>); /etc/hosts is not changed"
+# The name ends up in the mDNS unit and certificates, also when it comes from an existing pmserver.json (N-7).
+if [ -n "$SERVER_NAME" ] && ! valid_domain "$SERVER_NAME" && ! [[ "$SERVER_NAME" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+  die "server_name \"$SERVER_NAME\" in $ETC/pmserver.json is not a DNS name such as patcher.bank.example: re-run with --domain NAME"
+fi
+
+# The address agents use (and the console name resolves to): an IPv4 given in --hosts that this machine owns, else
+# the source address of the default route, else the first address that is not loopback or
+# a container/virtual bridge (docker0 172.17.x, libvirt 192.168.122.x, lxd/podman 10.x on bridges).
+local_ips() {
+  ip -4 -o addr show scope global 2>/dev/null | awk '$2 !~ /^(docker|br-|virbr|veth|lxdbr|cni|flannel|cali|podman)/ {sub(/\/.*/, "", $4); print $4}'
+}
+pick_ip() {
+  local mine h src
+  mine=$(local_ips)
+  for h in $(printf '%s' "$EXTRA_HOSTS" | tr ',' ' '); do
+    if printf '%s\n' "$mine" | grep -qxF "$h"; then echo "$h"; return; fi
+  done
+  src=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit }}')
+  if [ -n "$src" ] && printf '%s\n' "$mine" | grep -qxF "$src"; then echo "$src"; return; fi
+  [ -n "$mine" ] && { printf '%s\n' "$mine" | head -n 1; return; }
+  hostname -I 2>/dev/null | awk '{print $1}'
+}
+# Directly connected IPv4 subnet(s) of an address (kernel routes with that source), e.g. 10.0.5.0/24.
+local_subnets() {
+  ip -4 route show proto kernel scope link 2>/dev/null | awk -v ip="$1" '{for (i = 1; i < NF; i++) if ($i == "src" && $(i + 1) == ip) print $1}' | awk '!seen[$0]++'
+}
+IP=$(pick_ip)
+OTHER_IPS=$(local_ips | grep -vxF "${IP:-}" | paste -sd' ' - || true)
+ufw_active() { command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; }
+
+# Backup directory (M-9): checked before anything changes.
+BACKUP_MARK=.offpatch-backups
+check_backup_dir() {
+  local d=$BACKUP_DIR
+  [ ! -L "$d" ] || die "backup directory $d is a symbolic link: give the real path with --backup-dir"
+  if [ -d "$d" ]; then
+    if [ "$(stat -c %U "$d")" != "$SVC_USER" ] && [ ! -f "$d/$BACKUP_MARK" ] && [ -n "$(ls -A "$d" 2>/dev/null)" ]; then
+      die "backup directory $d exists, is not empty and does not belong to DSS Patcher (owner $(stat -c %U "$d")).
+     Nothing was changed. Use another --backup-dir (offpatch then uses PATH/offpatch), or empty it"
+    fi
+  elif [ -e "$d" ]; then
+    die "backup directory $d exists and is not a directory"
+  fi
+}
+[ $IS_SERVER = 0 ] || check_backup_dir
+
+# A fresh install has no database yet: only then is the built-in super admin created (H-5).
+FRESH_DB=0; [ -e "$SRV_DATA/pm.db" ] || FRESH_DB=1
+UFW_KEEP=0   # 1 = upgrade on a public IP: keep the ufw rules an earlier run made for the port
+if [ $IS_SERVER = 1 ]; then
+  # Plain HTTP over the internet: passwords, cookies and agents' secrets in the clear (M-14).
+  if [ $INSECURE = 1 ] && is_global_ip "${IP:-}"; then
+    if [ $INSECURE_SET = 1 ] || [ $SERVER_CONFIGURED = 0 ]; then
+      die "--insecure-lab is refused: this server's address $IP is reachable from the internet. Plain HTTP is for an isolated lab only; install without --insecure-lab"
+    fi
+    banner "$ETC/pmserver.json runs plain HTTP (insecure_http) on the public address $IP:" \
+           "passwords and agent secrets cross the network unencrypted. Reinstall with TLS."
+  fi
+  # ufw on a public IP: the "local subnet" is the provider's network, shared with other tenants (M-10).
+  if ufw_active && [ ${#ALLOW_FROM[@]} -eq 0 ] && is_global_ip "${IP:-}"; then
+    if [ $SERVER_CONFIGURED = 1 ]; then
+      UFW_KEEP=1   # upgrade: existing rules stay as they are; nothing new is opened
+    else
+      die "this server's address $IP is public and ufw is active: say who may reach port $PORT, e.g.
+       --allow-from 203.0.113.0/24   (the admins' office / VPN network; repeatable)
+     The installer does not open it to the provider's \"local subnet\", which other customers share."
+    fi
+  fi
+  # A fresh install must not take a port another program already listens on (on upgrades pmserver
+  # owns it). The reverse-proxy listener likewise, unless pmserver itself already listens there.
+  port_owner() { ss -Hltnp "sport = :$1" 2>/dev/null | sed -n 's/.*users:(("\([^"]*\)".*/\1/p' | head -n 1; }
+  port_taken() { command -v ss >/dev/null && ss -Hltn "sport = :$1" 2>/dev/null | grep -q . && [ "$(port_owner "$1")" != pmserver ]; }
+  if [ $SERVER_CONFIGURED = 0 ] && port_taken "$PORT"; then
+    die "TCP port $PORT is already in use on this host (by $(port_owner "$PORT")): choose another one with --port"
+  fi
+  if [ -n "$CONSOLE_PROXY_PORT" ] && port_taken "$CONSOLE_PROXY_PORT"; then
+    die "--console-proxy-port $CONSOLE_PROXY_PORT: TCP port $CONSOLE_PROXY_PORT is already in use on this host (by $(port_owner "$CONSOLE_PROXY_PORT")); choose another one"
+  fi
+fi
 
 if [ $PUBLIC_WANTED = 1 ]; then
   [ $IS_SERVER = 1 ] || die "--public-domain / --public-cert are for --role all or server (the console)"
@@ -1087,12 +1271,16 @@ fi
 # starts: the unit's ReadWritePaths only covers paths that exist at start.
 lab_requests_dir() {
   [ "$ROLE" = all ] || return 0
+  # $ACQ_DATA sits in root-owned /var/lib; everything below it belongs to $ACQ_USER: no links
+  # followed, and mode changes run as $ACQ_USER itself (H-4).
   [ -d "$ACQ_DATA" ] || install -d -o "$ACQ_USER" -g "$XFER_GROUP" "$ACQ_DATA"
-  chgrp "$XFER_GROUP" "$ACQ_DATA"; chmod 0710 "$ACQ_DATA"
-  install -d -o "$ACQ_USER" -g "$XFER_GROUP" "$ACQ_REQ_DIR"
-  chgrp -R "$XFER_GROUP" "$ACQ_REQ_DIR"
-  chmod 2770 "$ACQ_REQ_DIR"
-  find "$ACQ_REQ_DIR" -mindepth 1 -type d -exec chmod g+s {} +
+  chgrp -h "$XFER_GROUP" "$ACQ_DATA"; chmod 0710 "$ACQ_DATA"
+  no_symlink "$ACQ_REQ_DIR" "$ACQ_DATA"
+  [ -d "$ACQ_REQ_DIR" ] || mkdir -m 0770 "$ACQ_REQ_DIR"
+  chown -h "$ACQ_USER":"$XFER_GROUP" "$ACQ_REQ_DIR"
+  chgrp -R -P "$XFER_GROUP" "$ACQ_REQ_DIR"
+  as_user "$ACQ_USER" chmod 2770 "$ACQ_REQ_DIR"
+  as_user "$ACQ_USER" find -P "$ACQ_REQ_DIR" -mindepth 1 -type d -user "$ACQ_USER" -exec chmod g+s {} +
 }
 lab_requests_dir
 
@@ -1197,6 +1385,36 @@ else
   remove_egress_lock
 fi
 
+# ---------------------------------------------------------------- backup directory
+# Created and owned by $SVC_USER. An existing non-empty directory is used only when it is ours
+# (owned by $SVC_USER, or holding our marker): never re-owned, never pruned otherwise (M-9).
+ensure_backup_dir() {
+  local d=$BACKUP_DIR parent old n
+  parent=$(dirname "$d")
+  check_backup_dir
+  if [ ! -d "$d" ]; then
+    if [ ! -L "$parent" ] && [ -d "$parent" ] && [ "$(stat -c %U "$parent")" = "$SVC_USER" ]; then
+      as_user "$SVC_USER" mkdir -m 0700 "$d"   # parent of an earlier --backup-dir, owned by the service
+    else
+      mkdir -p "$parent"; mkdir -m 0700 "$d"   # an existing parent keeps its owner and mode
+    fi
+  fi
+  chown -h "$SVC_USER":"$SVC_USER" "$d"
+  as_user "$SVC_USER" chmod 0700 "$d"
+  [ -e "$d/$BACKUP_MARK" ] || as_user "$SVC_USER" sh -c 'echo "DSS Patcher backups (install-ubuntu.sh); do not store other files here" > "$1"' sh "$d/$BACKUP_MARK"
+  # Backups of earlier versions in the --backup-dir itself: move them into the new folder.
+  old=$BACKUP_MIGRATE_FROM
+  if [ -n "$old" ] && [ -d "$old" ] && [ ! -L "$old" ] && [ "$(stat -c %U "$old")" = "$SVC_USER" ]; then
+    n=$(as_user "$SVC_USER" find -P "$old" -mindepth 1 -maxdepth 1 -user "$SVC_USER" \
+          \( \( -type d \( -name '[0-9]*T*Z' -o -name 'pre-upgrade-*' \) \) -o \( -type f \( -name last-success -o -name last-failure \) \) \) \
+          -exec mv -t "$d" -- {} + -print 2>/dev/null | wc -l)
+    ok "moved $n earlier backup item(s) from $old to $d"
+    banner "Earlier versions made $old owned by $SVC_USER (mode 0700); DSS Patcher now uses only $d." \
+           "If other programs keep backups in $old, give it back its previous owner and mode," \
+           "e.g.: sudo chown root:root $old && sudo chmod 0755 $old  ($d stays $SVC_USER-owned)"
+  fi
+}
+
 # ---------------------------------------------------------------- before upgrading
 if [ -d "$PREFIX/bin" ]; then
   rm -rf "$PREFIX/bin.prev" && cp -a "$PREFIX/bin" "$PREFIX/bin.prev"
@@ -1207,17 +1425,18 @@ if [ $IS_SERVER = 1 ] && [ $SERVER_CONFIGURED = 1 ] && [ -f "$SRV_DATA/pm.db" ] 
   if [ $SKIP_BACKUP = 1 ]; then
     warn "--skip-backup: upgrading without a pre-upgrade backup"
   else
-    install -d -m 0700 -o "$SVC_USER" -g "$SVC_USER" "$BACKUP_DIR"
+    ensure_backup_dir
     pre="$BACKUP_DIR/pre-upgrade-$(date -u +%Y%m%dT%H%M%SZ)"
     if ( cd / && runuser -u "$SVC_USER" -- "$PREFIX/bin/pmserver" backup -config "$ETC/pmserver.json" -dir "$pre" >/dev/null \
          && runuser -u "$SVC_USER" -- "$PREFIX/bin/pmserver" verify-backup -dir "$pre" >/dev/null ); then
       ok "verified backup of the running version → $pre"
     else
-      rm -rf "$pre"
+      as_user "$SVC_USER" rm -rf -- "$pre"
       die "pre-upgrade backup failed (see above); nothing was changed. Fix it, or re-run with --skip-backup"
     fi
-    # keep the 3 newest pre-upgrade backups; scheduled ones have their own retention
-    find "$BACKUP_DIR" -maxdepth 1 -type d -name 'pre-upgrade-*' | sort -r | tail -n +4 | while IFS= read -r old; do rm -rf "$old"; done
+    # keep the 3 newest pre-upgrade backups (as $SVC_USER); scheduled ones have their own retention
+    as_user "$SVC_USER" find -P "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -name 'pre-upgrade-*' | sort -r | tail -n +4 \
+      | while IFS= read -r old; do as_user "$SVC_USER" rm -rf -- "$old"; done
   fi
 fi
 
@@ -1234,7 +1453,26 @@ if [ $MODE = source ] || ! need curl || ! need tar; then
   ok "curl, tar, CA certificates"
 fi
 
-STAGE=$(mktemp -d); trap 'rm -rf "$STAGE"' EXIT
+# UPGRADE_STAGE=binaries: the new binaries are in $PREFIX/bin but offpatch-server has not been
+# restarted on them. The running server is still the previous version (and no new binary has
+# touched the database: upgrades create no users). A failure in that window puts the previous
+# binaries back, so the machine never stays half-upgraded (H-5).
+UPGRADE_STAGE=""
+on_exit() {
+  local rc=$?
+  rm -rf "${STAGE:-}" "${GO_TMP:-}"
+  [ $rc -ne 0 ] && [ "$UPGRADE_STAGE" = binaries ] && [ -d "$PREFIX/bin.prev" ] || return 0
+  printf '%s  ! the upgrade stopped before the server was restarted: restoring the previous binaries%s\n' "$c_yellow" "$c_off" >&2
+  local b
+  for b in pmserver pmctl pmagent offpatch-backup; do
+    [ -f "$PREFIX/bin.prev/$b" ] && install -m 0755 "$PREFIX/bin.prev/$b" "$PREFIX/bin/$b"
+  done
+  [ ! -f "$ETC/pmserver.json.pre-upgrade" ] || mv -f "$ETC/pmserver.json.pre-upgrade" "$ETC/pmserver.json"
+  printf '%s  ! previous binaries and %s restored; the running server was not interrupted. Fix the error above and re-run%s\n' \
+    "$c_yellow" "$ETC/pmserver.json" "$c_off" >&2
+}
+trap on_exit EXIT
+STAGE=$(mktemp -d); chmod 0755 "$STAGE"; mkdir -m 0755 "$STAGE/agent-dist"   # world-readable: $SVC_USER copies agent-dist from here
 if [ $MODE = prebuilt ]; then
   step "Checking prebuilt binaries"
   VERSION=$(cat "$SRC/VERSION" 2>/dev/null || echo dev)
@@ -1258,12 +1496,15 @@ else
     # The JSON is pretty-printed: flatten it, then split per file object.
     sha=$(curl -fsSL "https://go.dev/dl/?mode=json&include=all" | tr -d '\n ' | tr '{' '\n' | grep "\"filename\":\"$tgz\"" | grep -o '"sha256":"[0-9a-f]*"' | cut -d'"' -f4 | head -1 || true)
     [ -n "$sha" ] || die "could not find the published checksum for $tgz"
-    tmp=$(mktemp -d)
-    curl -fsSL -o "$tmp/$tgz" "https://go.dev/dl/$tgz"
-    echo "$sha  $tmp/$tgz" | sha256sum -c --quiet - || die "Go download failed its SHA-256 check"
-    rm -rf /usr/local/go && tar -C /usr/local -xzf "$tmp/$tgz" && rm -rf "$tmp"
-    GO=/usr/local/go/bin/go
-    ok "installed Go $GO_VERSION (SHA-256 verified)"
+    # A build-only toolchain in a temporary directory (removed at exit): /usr/local/go, which other
+    # projects on a shared host may use, is never touched (M-12).
+    GO_TMP=$(mktemp -d)
+    curl -fsSL -o "$GO_TMP/$tgz" "https://go.dev/dl/$tgz"
+    echo "$sha  $GO_TMP/$tgz" | sha256sum -c --quiet - || die "Go download failed its SHA-256 check"
+    tar -C "$GO_TMP" -xzf "$GO_TMP/$tgz" && rm -f "$GO_TMP/$tgz"
+    GO=$GO_TMP/go/bin/go
+    export GOTOOLCHAIN=local
+    ok "Go $GO_VERSION for this build in $GO_TMP (SHA-256 verified; removed afterwards)"
   fi
   step "Building offpatch"
   VERSION=$(cd "$SRC" && git describe --tags --always 2>/dev/null || echo dev)
@@ -1281,6 +1522,10 @@ ver_gt() { [[ "${1#v}" =~ ^[0-9]+(\.[0-9]+)*$ && "${2#v}" =~ ^[0-9]+(\.[0-9]+)*$
            && [ "$(printf '%s\n%s\n' "${1#v}" "${2#v}" | sort -V | tail -n 1)" = "${1#v}" ]; }
 AGENT_UPGRADED=0
 mkdir -p "$PREFIX/bin"
+if [ $IS_SERVER = 1 ] && [ $SERVER_CONFIGURED = 1 ]; then
+  cp -p "$ETC/pmserver.json" "$ETC/pmserver.json.pre-upgrade"   # put back with the binaries on failure
+  UPGRADE_STAGE=binaries
+fi
 for b in pmserver pmctl pmagent; do
   if [ $b = pmagent ] && [ -x "$PREFIX/bin/pmagent" ]; then
     old_ver=$("$PREFIX/bin/pmagent" version 2>/dev/null || true)
@@ -1308,29 +1553,6 @@ else
 fi
 
 SCHEME=https; [ $INSECURE = 1 ] && SCHEME=http
-# The address agents use (and the console name resolves to): an IPv4 given in --hosts that this machine owns, else
-# the source address of the default route, else the first address that is not loopback or
-# a container/virtual bridge (docker0 172.17.x, libvirt 192.168.122.x, lxd/podman 10.x on bridges).
-local_ips() {
-  ip -4 -o addr show scope global 2>/dev/null | awk '$2 !~ /^(docker|br-|virbr|veth|lxdbr|cni|flannel|cali|podman)/ {sub(/\/.*/, "", $4); print $4}'
-}
-pick_ip() {
-  local mine h src
-  mine=$(local_ips)
-  for h in $(printf '%s' "$EXTRA_HOSTS" | tr ',' ' '); do
-    if printf '%s\n' "$mine" | grep -qxF "$h"; then echo "$h"; return; fi
-  done
-  src=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit }}')
-  if [ -n "$src" ] && printf '%s\n' "$mine" | grep -qxF "$src"; then echo "$src"; return; fi
-  [ -n "$mine" ] && { printf '%s\n' "$mine" | head -n 1; return; }
-  hostname -I 2>/dev/null | awk '{print $1}'
-}
-# Directly connected IPv4 subnet(s) of an address (kernel routes with that source), e.g. 10.0.5.0/24.
-local_subnets() {
-  ip -4 route show proto kernel scope link 2>/dev/null | awk -v ip="$1" '{for (i = 1; i < NF; i++) if ($i == "src" && $(i + 1) == ip) print $1}' | awk '!seen[$0]++'
-}
-IP=$(pick_ip)
-OTHER_IPS=$(local_ips | grep -vxF "${IP:-}" | paste -sd' ' - || true)
 HOSTS=$(printf '%s\n' "$SERVER_NAME" "$(hostname)" localhost 127.0.0.1 "$IP" "$EXTRA_HOSTS" | tr ',' '\n' | awk 'NF && !seen[$0]++' | paste -sd, -)
 case "$LISTEN_HOST" in ""|0.0.0.0|"::"|"[::]") LOCAL_HOST=127.0.0.1 ;; *) LOCAL_HOST=$LISTEN_HOST ;; esac
 URL_LOCAL="$SCHEME://$LOCAL_HOST:$PORT"
@@ -1448,15 +1670,15 @@ start_server() {
     systemctl restart offpatch-server
   else
     pkill -f "$PREFIX/bin/pmserver" 2>/dev/null || true
-    [ -f "$SRV_DATA/pmserver.log" ] || install -m 0640 -o "$SVC_USER" -g "$SVC_USER" /dev/null "$SRV_DATA/pmserver.log"
-    runuser -u "$SVC_USER" -- nohup "$PREFIX/bin/pmserver" -config "$ETC/pmserver.json" >> "$SRV_DATA/pmserver.log" 2>&1 &
+    # the log is created and opened by $SVC_USER (it lives in its directory), never by root
+    as_user "$SVC_USER" sh -c 'umask 027; exec nohup "$1" -config "$2" >> "$3" 2>&1' sh "$PREFIX/bin/pmserver" "$ETC/pmserver.json" "$SRV_DATA/pmserver.log" &
   fi
 }
 
 same_fs() { [ "$(stat -c %d "$1")" = "$(stat -c %d "$2")" ]; }
 
 install_backup() {
-  install -d -m 0700 -o "$SVC_USER" -g "$SVC_USER" "$BACKUP_DIR"
+  ensure_backup_dir
   cat > "$PREFIX/bin/offpatch-backup" <<'EOF'
 #!/bin/sh
 # Scheduled offpatch server backup (written by install-ubuntu.sh; runs as the server user).
@@ -1476,7 +1698,7 @@ if ! @PREFIX@/bin/pmserver backup -config @CONFIG@ -dir "$dest" || ! @PREFIX@/bi
   exit 1
 fi
 printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$dest" > "$DIR/last-success"
-find "$DIR" -maxdepth 1 -type d -name '[0-9]*T*Z' | sort -r | tail -n +$((@KEEP@ + 1)) | while IFS= read -r old; do
+find -P "$DIR" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*T*Z' | sort -r | tail -n +$((@KEEP@ + 1)) | while IFS= read -r old; do
   rm -rf -- "$old" && echo "offpatch-backup: pruned $old"
 done
 EOF
@@ -1523,6 +1745,15 @@ Description=Record a failed offpatch backup
 
 [Service]
 Type=oneshot
+# as the backup's own account: it writes into the backup directory, which that account owns
+User=$SVC_USER
+Group=$SVC_USER
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=$BACKUP_DIR
+UMask=0077
 ExecStart=/usr/bin/logger -p daemon.err -t offpatch-backup "offpatch-backup.service FAILED: no new verified backup. Check: journalctl -u offpatch-backup"
 ExecStart=/bin/sh -c 'date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ > $BACKUP_DIR/last-failure'
 EOF
@@ -1548,12 +1779,22 @@ EOF
 
 CURL_CA=()
 PUBLIC_OK=0 AGENT_URL_NOW=""
-ADMIN_CREATED_EMAIL="" ADMIN_CREATED_PW="" ADMIN_DEFAULT_PW=0
+ADMIN_CREATED_EMAIL="" ADMIN_DEFAULT_PW=0
 if [ $IS_SERVER = 1 ]; then
   step "Management server"
-  install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$SRV_DATA" "$SRV_DATA/inbox" "$SRV_DATA/agent-dist"
+  # $SRV_DATA and $ETC/pki belong to $SVC_USER, which is internet-facing: root changes nothing
+  # there through a link, and creates or edits files there as $SVC_USER (H-4).
+  for d in "$SRV_DATA/inbox" "$SRV_DATA/agent-dist" "$SRV_DATA/mfa.key" "$SRV_DATA/pmserver.log"; do no_symlink "$d" "$SRV_DATA"; done
+  [ ! -L "$ETC/pki" ] || die "$ETC/pki is a symbolic link: refusing to continue (inspect it)"
+  install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$SRV_DATA"
+  chown -R -P "$SVC_USER":"$SVC_USER" "$SRV_DATA"   # -P: links are re-owned themselves, never followed
+  for d in inbox agent-dist; do as_user "$SVC_USER" mkdir -p "$SRV_DATA/$d"; as_user "$SVC_USER" chmod 0750 "$SRV_DATA/$d"; done
+  if [ $INSECURE = 0 ]; then
+    [ -d "$ETC/pki" ] || install -d -m 0700 -o "$SVC_USER" -g "$SVC_USER" "$ETC/pki"
+    chown -h "$SVC_USER":"$SVC_USER" "$ETC/pki"
+  fi
   if [ $INSECURE = 0 ] && [ ! -f "$ETC/pki/ca.pem" ]; then
-    "$PREFIX/bin/pmserver" init-pki -dir "$ETC/pki" -hosts "$HOSTS" >/dev/null
+    as_user "$SVC_USER" "$PREFIX/bin/pmserver" init-pki -dir "$ETC/pki" -hosts "$HOSTS" >/dev/null
     ok "created internal CA and server certificate for: $HOSTS"
   elif [ $INSECURE = 0 ] && [ -f "$ETC/pki/server.pem" ] && command -v openssl >/dev/null; then
     # The certificate must name server_name (browsers) and this machine's IP (agents).
@@ -1564,7 +1805,7 @@ if [ $IS_SERVER = 1 ]; then
     for h in "$SERVER_NAME" ${IP:+"$IP"}; do printf '%s\n' "$sans" | grep -qixF "$h" || need="$need $h"; done
     if [ -n "$need" ]; then
       keep=$(printf '%s\n' "$SERVER_NAME" $sans "$IP" "$(printf '%s' "$EXTRA_HOSTS" | tr ',' '\n')" | awk 'NF && !seen[tolower($0)]++' | paste -sd, -)
-      if "$PREFIX/bin/pmserver" reissue-server-cert -dir "$ETC/pki" -hosts "$keep" >/dev/null; then
+      if as_user "$SVC_USER" "$PREFIX/bin/pmserver" reissue-server-cert -dir "$ETC/pki" -hosts "$keep" >/dev/null; then
         ok "server certificate reissued for: $keep (added:$need; agents keep working: they pin the CA)"
       else
         warn "could not reissue the server certificate with$need; agents and browsers may refuse that name: pmserver reissue-server-cert -dir $ETC/pki -hosts $keep"
@@ -1573,16 +1814,30 @@ if [ $IS_SERVER = 1 ]; then
       ok "keeping the existing server certificate (it names $SERVER_NAME; to change names: sudo -u $SVC_USER $PREFIX/bin/pmserver reissue-server-cert -dir $ETC/pki -hosts ...)"
     fi
   fi
-  [ -d "$ETC/pki" ] && { chown -R "$SVC_USER":"$SVC_USER" "$ETC/pki"; chmod 0700 "$ETC/pki"; chmod 0644 "$ETC/pki/ca.pem"; }
+  if [ -d "$ETC/pki" ]; then
+    # Everything to $SVC_USER except public/ (root-owned: the certbot hook writes there as root, N-1).
+    find -P "$ETC/pki" -path "$PUBLIC_DIR" -prune -o -exec chown -h "$SVC_USER":"$SVC_USER" {} +
+    chmod 0700 "$ETC/pki"
+    [ ! -f "$ETC/pki/ca.pem" ] || as_user "$SVC_USER" chmod 0644 "$ETC/pki/ca.pem"
+    if [ -e "$PUBLIC_DIR" ] || [ -L "$PUBLIC_DIR" ]; then secure_public_dir; fi
+  fi
+  # A certbot hook written by an earlier version made public/ $SVC_USER-owned on every renewal:
+  # rewrite it (same certificate name) so renewals keep it root-owned.
+  if [ -f "$LE_HOOK" ] && [ $PUBLIC_WANTED = 0 ]; then
+    le_name=$(sed -n 's|^LINEAGE=/etc/letsencrypt/live/||p' "$LE_HOOK" | head -n 1)
+    if [ -n "$le_name" ] && valid_domain "$le_name"; then write_le_hook "$le_name"
+    else warn "$LE_HOOK: could not read the certificate name; re-run with --public-domain NAME to rewrite it"; fi
+  fi
 
   # MFA key: encrypts local users' authenticator (TOTP) secrets (AES-256-GCM). pmserver creates
   # it on first start when missing; created here so it exists before the first sign-in. Kept
   # in the data dir so backups include it (a restore without it loses every MFA enrolment).
-  if [ ! -f "$SRV_DATA/mfa.key" ]; then
-    ( umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$SRV_DATA/mfa.key"; echo >> "$SRV_DATA/mfa.key" )
+  if [ ! -e "$SRV_DATA/mfa.key" ]; then
+    as_user "$SVC_USER" sh -c 'umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d " \n" > "$1"; echo >> "$1"' sh "$SRV_DATA/mfa.key"
     ok "created the MFA key $SRV_DATA/mfa.key"
   fi
-  chown "$SVC_USER":"$SVC_USER" "$SRV_DATA/mfa.key"; chmod 0600 "$SRV_DATA/mfa.key"
+  [ -f "$SRV_DATA/mfa.key" ] && [ ! -L "$SRV_DATA/mfa.key" ] || die "$SRV_DATA/mfa.key is not a plain file: refusing to continue (inspect it)"
+  chown -h "$SVC_USER":"$SVC_USER" "$SRV_DATA/mfa.key"; as_user "$SVC_USER" chmod 0600 "$SRV_DATA/mfa.key"
   # Static admin tokens were removed (only email + password sessions and SSO sign in). Upgrades
   # from earlier versions: drop admin_tokens / allow_static_tokens from the config (the new
   # pmserver refuses to start with them) and delete the old break-glass token files.
@@ -1604,7 +1859,11 @@ PY
 
   if [ -z "$AUDIT_DIR" ]; then
     warn "audit_export_dir is not set in $ETC/pmserver.json: audit evidence lives only in the database"
-  elif [ ! -d "$AUDIT_DIR" ]; then install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$AUDIT_DIR"
+  elif [ ! -d "$AUDIT_DIR" ]; then
+    case "$AUDIT_DIR" in
+      "$SRV_DATA"/*) no_symlink "$AUDIT_DIR" "$SRV_DATA"; as_user "$SVC_USER" mkdir -p -m 0750 "$AUDIT_DIR" ;;
+      *) install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$AUDIT_DIR" ;;
+    esac
   elif ! runuser -u "$SVC_USER" -- test -w "$AUDIT_DIR"; then warn "$AUDIT_DIR is not writable by $SVC_USER: audit export will fail"; fi
   if [ -n "$AUDIT_DIR" ] && same_fs "$AUDIT_DIR" "$SRV_DATA"; then
     banner "audit_export_dir ($AUDIT_DIR) is on the SAME filesystem as the data ($SRV_DATA)." \
@@ -1720,38 +1979,45 @@ PY
 
   # Offer agent binaries for download in the console (Agent setup page and the
   # one-command Windows install).
+  # Built here as root into $STAGE, then copied by $SVC_USER (root never writes into its folder).
   if [ $MODE = prebuilt ]; then
-    cp -f "$SRC/bin/agent-dist/"* "$SRV_DATA/agent-dist/" || die "bin/agent-dist missing from the release folder"
-    ok "agent binaries ($AGENT_VER) staged for the console's Agent setup page"
+    compgen -G "$SRC/bin/agent-dist/*" >/dev/null || die "bin/agent-dist missing from the release folder"
+    cp -f "$SRC/bin/agent-dist/"* "$STAGE/agent-dist/"
   else
     ( cd "$SRC" && for t in windows/amd64:pmagent.exe linux/amd64:pmagent-linux-amd64 linux/arm64:pmagent-linux-arm64 darwin/arm64:pmagent-macos-arm64; do
         os=${t%%/*}; rest=${t#*/}; arch=${rest%%:*}; name=${rest#*:}
-        GOOS=$os GOARCH=$arch $GO build -ldflags "-s -w -X offpatch/internal/agent.Version=$AGENT_VER" -o "$SRV_DATA/agent-dist/$name" ./cmd/pmagent || exit 1
-      done ) && ok "agent binaries ($AGENT_VER) for Windows, Linux and macOS staged for the console's Agent setup page"
+        GOOS=$os GOARCH=$arch $GO build -ldflags "-s -w -X offpatch/internal/agent.Version=$AGENT_VER" -o "$STAGE/agent-dist/$name" ./cmd/pmagent || exit 1
+      done ) || die "could not build the agent binaries"
   fi
-  chown -R "$SVC_USER":"$SVC_USER" "$SRV_DATA"
+  chmod 0644 "$STAGE/agent-dist/"*
+  as_user "$SVC_USER" cp -f --remove-destination "$STAGE/agent-dist/"* "$SRV_DATA/agent-dist/" \
+    || die "could not copy the agent binaries to $SRV_DATA/agent-dist"
+  ok "agent binaries ($AGENT_VER) staged for the console's Agent setup page"
+  chown -R -P "$SVC_USER":"$SVC_USER" "$SRV_DATA"
   # Inbox: whoever delivers bundles (the transfer receiver, or the single server's acquisition user) must be
   # in group offpatch-inbox. setgid keeps dropped files readable by the server via that group.
-  chgrp "$XFER_GROUP" "$SRV_DATA" "$SRV_DATA/inbox"
-  chmod 0710 "$SRV_DATA"; chmod 2770 "$SRV_DATA/inbox"
-  # Built-in super admin (the vendor): created on first install, and on an upgrade when no
-  # local super admin exists yet, with the vendor's default password (only its PBKDF2 hash is in
-  # pmserver; see the vendor handbook). The console asks for a new password at the first
-  # sign-in. Lost it? pmserver reset-admin (see the summary).
-  if out=$(cd / && runuser -u "$SVC_USER" -- "$PREFIX/bin/pmserver" create-admin -config "$ETC/pmserver.json" -email "$ADMIN_EMAIL" -if-none 2>&1); then
-    if printf '%s\n' "$out" | grep -q '^default_password: yes'; then
-      ADMIN_CREATED_EMAIL=$(printf '%s\n' "$out" | awk '/^email:/{print $2}')
-      ADMIN_DEFAULT_PW=1
-      ok "created the built-in super admin $ADMIN_CREATED_EMAIL with the default password"
-    elif printf '%s\n' "$out" | grep -q '^password:'; then
-      ADMIN_CREATED_EMAIL=$(printf '%s\n' "$out" | awk '/^email:/{print $2}')
-      ADMIN_CREATED_PW=$(printf '%s\n' "$out" | awk '/^password:/{print $2}')
-      ok "created the built-in super admin $ADMIN_CREATED_EMAIL (password in the summary below)"
+  chgrp -h "$XFER_GROUP" "$SRV_DATA" "$SRV_DATA/inbox"
+  chmod 0710 "$SRV_DATA"; as_user "$SVC_USER" chmod 2770 "$SRV_DATA/inbox"
+  # Built-in super admin (the vendor): created on a FRESH install only (no database before this
+  # run), with the vendor's default password (only its PBKDF2 hash is in pmserver; see the vendor
+  # handbook). Upgrades never create users: a bank that removed or disabled the account keeps it
+  # that way (H-5). The console requires a new password and MFA enrolment at the first sign-in.
+  # Lost it? pmserver reset-admin (see the summary).
+  if [ $FRESH_DB = 1 ]; then
+    if out=$(as_user "$SVC_USER" "$PREFIX/bin/pmserver" create-admin -config "$ETC/pmserver.json" -email "$ADMIN_EMAIL" -if-fresh 2>&1); then
+      if printf '%s\n' "$out" | grep -q '^default_password: yes'; then
+        ADMIN_CREATED_EMAIL=$(printf '%s\n' "$out" | awk '/^email:/{print $2}')
+        ADMIN_DEFAULT_PW=1
+        ok "created the built-in super admin $ADMIN_CREATED_EMAIL with the default password"
+      else
+        ok "$(printf '%s\n' "$out" | head -n 1)"
+      fi
     else
-      ok "keeping the existing super admin"
+      die "could not create the built-in super admin ($ADMIN_EMAIL): $out"
     fi
   else
-    die "could not create the built-in super admin ($ADMIN_EMAIL): $out"
+    ok "existing database: users are kept as they are (an upgrade creates no accounts)"
+    [ "$ADMIN_EMAIL_SET" = 0 ] || warn "--admin-email is used on a fresh install only; this database already exists, nothing was created"
   fi
   if [ $PUBLIC_WANTED = 1 ]; then
     step "Public certificate for the console"
@@ -1759,12 +2025,17 @@ PY
     else warn "continuing without the public certificate; once fixed, re-run with the same --public-* options"; fi
   fi
   start_server
+  UPGRADE_STAGE=started   # the new pmserver may have migrated the database: no automatic rollback from here
+  rm -f "$ETC/pmserver.json.pre-upgrade"
   [ $INSECURE = 0 ] && CURL_CA=(--cacert "$ETC/pki/ca.pem")
   for _ in $(seq 1 30); do
     curl -fs -o /dev/null ${CURL_CA[@]+"${CURL_CA[@]}"} "$URL_LOCAL/" && break
     sleep 1
   done
-  curl -fs -o /dev/null ${CURL_CA[@]+"${CURL_CA[@]}"} "$URL_LOCAL/" || die "server did not start; check: journalctl -u offpatch-server (or $SRV_DATA/pmserver.log)"
+  curl -fs -o /dev/null ${CURL_CA[@]+"${CURL_CA[@]}"} "$URL_LOCAL/" || die "server did not start; check: journalctl -u offpatch-server (or $SRV_DATA/pmserver.log)$(
+    [ $SERVER_CONFIGURED = 0 ] || [ ! -d "$PREFIX/bin.prev" ] || printf '%s' "
+     Upgrade: previous binaries are in $PREFIX/bin.prev and the pre-upgrade backup in $BACKUP_DIR/pre-upgrade-*
+     (roll back: runbook 05, restore that backup with the previous pmserver, then start offpatch-server)")"
   if [ -n "$CONSOLE_PROXY_PORT" ]; then
     if curl -fs -o /dev/null -H 'X-Forwarded-Proto: https' "http://127.0.0.1:$CONSOLE_PROXY_PORT/"; then
       ok "console reverse-proxy listener answers on http://127.0.0.1:$CONSOLE_PROXY_PORT"
@@ -1776,16 +2047,23 @@ PY
   ok "server running at $URL_PUBLIC"
   [ $PUBLIC_OK = 0 ] || check_public_https "$PORT"
   install_backup
-  # Console/agent port: only from --allow-from CIDRs, else from the local subnet(s) of $IP.
+  # Console/agent port: only from --allow-from CIDRs, else from the local subnet(s) of a private
+  # $IP. A public $IP never gets the subnet default (M-10: checked before anything changed).
   # The installer never enables ufw (that could cut off SSH); it prints the commands instead.
   FW_SOURCES=()
   if [ ${#ALLOW_FROM[@]} -gt 0 ]; then
     FW_SOURCES=("${ALLOW_FROM[@]}")
-  elif [ -n "${IP:-}" ]; then
+  elif [ -n "${IP:-}" ] && ! is_global_ip "$IP"; then
     read -r -a FW_SOURCES <<< "$(local_subnets "$IP" | paste -sd' ' -)"
   fi
-  if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
-    if [ ${#FW_SOURCES[@]} -gt 0 ]; then
+  if ufw_active; then
+    if [ $UFW_KEEP = 1 ]; then
+      if ufw status 2>/dev/null | grep -Eq "^$PORT/tcp( \(v6\))? +ALLOW"; then
+        ok "ufw: keeping the existing rules for port $PORT (public address $IP; change them with --allow-from <CIDR>)"
+      else
+        warn "ufw: no rule opens port $PORT and $IP is public: nothing opened. Re-run with --allow-from <CIDR> for the admin/PC networks"
+      fi
+    elif [ ${#FW_SOURCES[@]} -gt 0 ]; then
       for c in "${FW_SOURCES[@]}"; do ufw allow proto tcp from "$c" to any port "$PORT" >/dev/null && ok "ufw: port $PORT open from $c"; done
       if ufw status | grep -Eq "^$PORT/tcp( \(v6\))? +ALLOW +Anywhere"; then
         if [ ${#ALLOW_FROM[@]} -gt 0 ]; then
@@ -1802,8 +2080,11 @@ PY
     warn "ufw is not active (the installer does not enable it). To enable it without losing SSH:"
     printf '      sudo ufw allow OpenSSH\n'
     for c in ${FW_SOURCES[@]+"${FW_SOURCES[@]}"}; do printf '      sudo ufw allow proto tcp from %s to any port %s\n' "$c" "$PORT"; done
-    [ ${#FW_SOURCES[@]} -gt 0 ] || printf '      sudo ufw allow proto tcp from <PC network CIDR> to any port %s\n' "$PORT"
+    [ ${#FW_SOURCES[@]} -gt 0 ] || printf '      sudo ufw allow proto tcp from <PC and admin network CIDR> to any port %s\n' "$PORT"
     printf '      sudo ufw enable\n'
+    if [ ${#ALLOW_FROM[@]} -eq 0 ] && is_global_ip "${IP:-}"; then
+      warn "$IP is a public address: port $PORT is reachable from the internet unless a firewall limits it"
+    fi
     warn "or restrict port $PORT to the PC and admin networks in your network firewall"
   fi
 fi
@@ -1884,11 +2165,12 @@ if [ $IS_ACQ = 1 ]; then
     fi
   fi
   install -d -m 0750 -o "$ACQ_USER" -g "$ACQ_USER" "$ACQ_DATA"
-  chown -R "$ACQ_USER":"$ACQ_USER" "$ACQ_DATA"
+  chown -R -P "$ACQ_USER":"$ACQ_USER" "$ACQ_DATA"   # -P: links re-owned themselves, never followed
   if [ "$ROLE" = all ]; then
     DROP="$SRV_DATA/inbox"
   else
-    DROP="$ACQ_DATA/outbox"; install -d -m 0750 -o "$ACQ_USER" -g "$ACQ_USER" "$DROP"
+    DROP="$ACQ_DATA/outbox"; no_symlink "$DROP" "$ACQ_DATA"
+    as_user "$ACQ_USER" mkdir -p -m 0750 "$DROP"
   fi
   if [ ! -f "$ETC/acquire.json" ]; then
     cat > "$ETC/acquire.json" <<EOF
@@ -1953,7 +2235,8 @@ PY
   if [ "$ROLE" = all ]; then
     lab_requests_dir
   else
-    install -d -m 0770 -o "$ACQ_USER" -g "$ACQ_USER" "$ACQ_REQ_DIR"
+    no_symlink "$ACQ_REQ_DIR" "$ACQ_DATA"
+    as_user "$ACQ_USER" mkdir -p -m 0770 "$ACQ_REQ_DIR"
   fi
   if [ $HAVE_SYSTEMD = 1 ]; then
     groups_line=""; [ "$ROLE" = all ] && groups_line="SupplementaryGroups=$XFER_GROUP"
@@ -2110,6 +2393,7 @@ VERSION=$VERSION
 AGENT_VERSION=$AGENT_VER
 BACKUP_DIR=$BACKUP_DIR
 BACKUP_KEEP=$BACKUP_KEEP
+BACKUP_LAYOUT=2
 ALLOW_FROM=${ALLOW_FROM[*]+"${ALLOW_FROM[*]}"}
 EGRESS_LOCK=$EGRESS_LOCK
 MDNS=$MDNS
@@ -2166,12 +2450,11 @@ if [ $IS_SERVER = 1 ]; then
     warn "will refuse https://$IP:$PORT. Fix: sudo -u $SVC_USER $PREFIX/bin/pmserver reissue-server-cert -dir $ETC/pki -hosts $HOSTS"
   fi
   if [ $ADMIN_DEFAULT_PW = 1 ]; then
-    echo "  Super admin:    $ADMIN_CREATED_EMAIL — default password (see the vendor handbook)"
-  elif [ -n "$ADMIN_CREATED_PW" ]; then
-    banner "Built-in super admin (vendor): password shown ONCE, stored only as a hash:" "" \
-           "  email:    $ADMIN_CREATED_EMAIL" "  password: $ADMIN_CREATED_PW"
+    echo "  Super admin:    $ADMIN_CREATED_EMAIL — default password (see the vendor handbook)."
+    echo "                  At the first sign-in the console requires a NEW password and MFA enrolment"
+    echo "                  (authenticator app) before anything else can be done."
   else
-    echo "  Super admin:    existing account kept (default $ADMIN_EMAIL)"
+    echo "  Super admin:    existing accounts kept (an upgrade creates or re-enables no accounts)"
   fi
   echo "  Lost password:  sudo runuser -u $SVC_USER -- $PREFIX/bin/pmserver reset-admin -config $ETC/pmserver.json -email <email>"
   echo "  Backups:        daily → $BACKUP_DIR (keeps $BACKUP_KEEP); copy them off the machine (they hold the CA key)"
@@ -2187,7 +2470,7 @@ if [ $IS_SERVER = 1 ]; then
   cat <<EOF
 
   Next steps (in the console, $URL_PUBLIC):
-    1. Sign in and change the password.
+    1. Sign in: set a new password and enrol MFA when asked (first sign-in of the built-in account).
     2. Settings → Users: create the bank's Admin.
     3. Endpoints → Create enrollment token → run the PowerShell line on each PC
        (Windows PowerShell as Administrator; the PC needs TCP $PORT to ${IP:-this server}).

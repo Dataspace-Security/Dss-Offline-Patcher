@@ -580,7 +580,7 @@ Packages of kind `agent` (`offpatch-agent-*`) are managed by the vendor:
 | Command | Change |
 |---|---|
 | `pmserver enroll-token -config pmserver.json -groups g1,g2 -site s -hours 1` | New. Prints `token: enr_…` and `expires_at` (one use; audited as created by `system:cli`). Run on the server as the service user. |
-| `pmserver create-admin -config … [-email …] [-name …] [-if-none] [-password-random]` | Default `-email` `superadmin@dataspacesecurity.com`; without `-password-random` it sets the vendor's default password. |
+| `pmserver create-admin -config … [-email …] [-name …] [-if-none] [-if-fresh] [-password-random]` | Default `-email` `superadmin@dataspacesecurity.com`; without `-password-random` it sets the vendor's default password. An existing account with that email (also disabled) is reported and left unchanged (exit 0). `-if-fresh` (installer) creates only in a database with no users. |
 | `pmserver reset-admin -config … [-email …]` | New random password printed once, account re-enabled, lockout cleared, and the super admin's MFA cleared. Run as root (as the service user). |
 | `pmserver verify-report -zip compliance-….zip -pub audit-signing.pub` | New. Verifies a compliance evidence package offline (manifest signature and every file's SHA-256). |
 | `pmserver new-token` | Removed. |

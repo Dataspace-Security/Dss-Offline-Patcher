@@ -253,9 +253,13 @@ func run(cfgPath string, log *slog.Logger) error {
 // by default DefaultSuperAdminEmail with the vendor's default password
 // (only its PBKDF2 hash is embedded; the console asks for a new one at the
 // first sign-in), or with -password-random a generated password printed
-// once. reset-admin gives an existing local super admin a new generated
-// password (recovery, as root on the server; printed once). Run as the
-// service user so the database keeps its owner.
+// once. It never fails because the account already exists (enabled or
+// disabled): it reports that and changes nothing, so installer re-runs stay
+// idempotent. -if-fresh creates the account only in a database that has no
+// users at all (a fresh install; upgrades never create users). reset-admin
+// gives an existing local super admin a new generated password (recovery, as
+// root on the server; printed once). Run as the service user so the database
+// keeps its owner.
 func adminCmd(cmd string, args []string) error { return runAdminCmd(cmd, args, os.Stdout) }
 
 func runAdminCmd(cmd string, args []string, out io.Writer) error {
@@ -263,7 +267,8 @@ func runAdminCmd(cmd string, args []string, out io.Writer) error {
 	cfgPath := fs.String("config", "pmserver.json", "server config")
 	email := fs.String("email", store.DefaultSuperAdminEmail, "sign-in email of the super admin")
 	name := fs.String("name", "Vendor support", "create-admin: display name")
-	ifNone := fs.Bool("if-none", false, "create-admin: do nothing when an enabled local super admin already exists (installer upgrades)")
+	ifNone := fs.Bool("if-none", false, "create-admin: do nothing when an enabled local super admin already exists")
+	ifFresh := fs.Bool("if-fresh", false, "create-admin: create only when the database has no users at all (fresh install; the installer uses this)")
 	random := fs.Bool("password-random", false, "create-admin: a generated password (shown once) instead of the vendor's default password")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -293,6 +298,18 @@ func runAdminCmd(cmd string, args []string, out io.Writer) error {
 		fmt.Fprintf(out, "super admin password reset, MFA cleared (password shown ONCE; other sessions of this account ended)\nemail:    %s\npassword: %s\n", e, pw)
 		return nil
 	}
+	users, err := st.ListUsers(ctx)
+	if err != nil {
+		return fmt.Errorf("list users: %w", err)
+	}
+	if *ifFresh && len(users) > 0 {
+		fmt.Fprintf(out, "the database already has %d user(s): not a fresh install; no account created (lost the password? pmserver reset-admin -email ...)\n", len(users))
+		return nil
+	}
+	if msg, exists := existingAccount(users, *email); exists {
+		fmt.Fprintln(out, msg)
+		return nil
+	}
 	if *ifNone {
 		has, err := st.HasLocalSuperAdmin(ctx)
 		if err != nil {
@@ -318,6 +335,26 @@ func runAdminCmd(cmd string, args []string, out io.Writer) error {
 	}
 	fmt.Fprintf(out, "created the built-in super admin (password shown ONCE; only its hash is stored)\nemail:    %s\npassword: %s\n", u.Email, pw)
 	return nil
+}
+
+// existingAccount reports an account that already uses email (any state,
+// any role), so create-admin can stop without a conflict error.
+func existingAccount(users []store.User, email string) (string, bool) {
+	e, err := store.NormalizeEmail(email)
+	if err != nil {
+		return "", false // createLocalUser reports the invalid email
+	}
+	for _, u := range users {
+		if !strings.EqualFold(u.Username, e) {
+			continue
+		}
+		state := "enabled"
+		if u.Disabled {
+			state = "disabled (re-enable it in Settings -> Users, or pmserver reset-admin -email " + e + ")"
+		}
+		return fmt.Sprintf("a user %s already exists (role %s, %s); nothing to do", e, u.Role, state), true
+	}
+	return "", false
 }
 
 // enrollTokenCmd: pmserver enroll-token prints a one-use enrollment token
