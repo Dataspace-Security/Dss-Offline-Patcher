@@ -21,7 +21,7 @@ and the evidence to keep. Day-to-day console work and troubleshooting are in the
 
 | Binary | Subcommands |
 |---|---|
-| `pmserver` | `-config <file>` (run), `create-admin -config [-email] [-name] [-if-none] [-password-random]`, `reset-admin -config [-email]`, `enroll-token -config -groups -site [-hours]`, `init-pki -dir -hosts`, `reissue-server-cert -dir -hosts`, `backup -config -dir [-no-pki]`, `verify-backup -dir`, `restore -config -dir [-force]`, `verify-audit -export -pub [-db]`, `verify-report -zip -pub` (compliance evidence package, offline) |
+| `pmserver` | `-config <file>` (run), `create-admin -config [-email] [-name] [-if-none] [-if-fresh] [-password-random]`, `reset-admin -config [-email]`, `enroll-token -config -groups -site [-hours]`, `init-pki -dir -hosts`, `reissue-server-cert -dir -hosts`, `backup -config -dir [-no-pki]`, `verify-backup -dir`, `restore -config -dir [-force]`, `verify-audit -export -pub [-db]`, `verify-report -zip -pub` (compliance evidence package, offline) |
 | `pmctl` | `keygen -out`, `build -key [-pub] -spec -out [-source] [-seq] [-state] [-ttl]`, `inspect -bundle [-pub]`, `send -bundle [-via dropdir\|command] [-to] [-command] [-key] [-pub] [-log]`, `trust -root [-root-pub] -seq -key file.pub=src [-retire file.pub] [-revoke key_id:reason] -out`, `catalog-search -q`, `msrc -month [-product] [-arch]`, `fetch …`, `fetch-url … [-kind msu\|msi\|deb\|rpm\|pkg\|agent] [-package-name] [-os]` |
 | `pmagent` | `enroll -server -token -pubkey [-root-pubkey] [-ca] [-state-dir] [-platform windows\|linux\|macos\|sim]`, `run [-state-dir] [-once]`, `service install\|uninstall [-state-dir]` (Windows SCM, systemd, launchd), `version` |
 

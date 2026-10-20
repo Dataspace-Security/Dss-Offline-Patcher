@@ -32,7 +32,9 @@ single-server deployment. Then:
    default `dsspatcher.local`, which the server announces by mDNS so admin PCs on the same
    network segment find it with no setup; from other subnets use internal DNS or the hosts-file
    line the installer prints, see §5.5) as
-   `superadmin@dataspacesecurity.com` with the default password (vendor handbook) and change the password.
+   `superadmin@dataspacesecurity.com` with the default password (vendor handbook). The first
+   sign-in requires a new password and MFA enrolment (authenticator app). This account is created
+   on a **fresh install only** (no database yet); upgrades never create or re-enable accounts.
 3. **Settings → Users**: create the bank's Admin.
 4. **Endpoints → Create enrollment token** → run the PowerShell line on each PC as Administrator
    (§5.1). Each PC needs TCP 8443 to the server's IP. Agents connect by that IP
@@ -41,6 +43,30 @@ single-server deployment. Then:
 
 A two-machine layout (`--role server` in the isolated zone, `--role acquisition` in the connected
 zone, one-way transfer between them) is stricter and is described in the README and runbooks 01/02.
+
+**Install checks and upgrades.** Re-running the same command upgrades in place with the saved
+settings (role, domain, ports, `--console-proxy-port`, public certificate, firewall sources); no new
+options are needed. What the installer checks or refuses:
+
+- **Fresh install:** stops when the server port (or `--console-proxy-port`) is already in use on the
+  host. On a **public IP** with ufw active it needs `--allow-from <CIDR>` (the provider's "local
+  subnet" is shared with other customers); on a private IP the local subnet stays the default. On an
+  upgrade, existing ufw rules for the port are kept. `--insecure-lab` is refused on a public IP.
+- **Upgrade:** a verified backup comes first. If anything fails after the new binaries are copied
+  but before the server restarts, the previous binaries and `pmserver.json` are put back; the
+  running server is not interrupted.
+- **Files of the service accounts:** the installer refuses to follow a symbolic link inside
+  `/var/lib/offpatch-server`, `/var/lib/offpatch-acq`, the backup directory or `/etc/offpatch/pki`
+  and stops with the path; changes there run as the owning service account. The public console
+  certificate (`/etc/offpatch/pki/public`) is `root:offpatch` 0750 with 0640 files: pmserver reads
+  and reloads it but cannot change it; the certbot hook writes it as root without following links.
+- **Backups:** `--backup-dir PATH` uses its own folder `PATH/offpatch` (PATH may be shared
+  storage); earlier installs' backups in PATH are moved there on the next upgrade (afterwards give
+  PATH back its previous owner, as the installer prints). An existing non-empty folder that does
+  not belong to DSS Patcher is refused. The default `/var/lib/offpatch-backup` is unchanged.
+- **Source builds** use a temporary Go toolchain; `/usr/local/go` is never changed.
+- The Cloudflare token file must be a root-owned 0600 file (not a link) in a root-owned folder
+  that is not group/world writable.
 
 ## 1. Concepts
 
