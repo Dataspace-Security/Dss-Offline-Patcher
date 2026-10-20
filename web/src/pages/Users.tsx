@@ -68,6 +68,9 @@ export default function Users() {
             {rows.map((u) => {
               const local = isLocalUser(u);
               const mine = isMe(u);
+              // Another admin's password, MFA and role: the super admin only
+              // (an admin who could sign in as a colleague could approve twice).
+              const creds = local && (isSuper || u.role !== "admin");
               return (
                 <tr key={userId(u)} className={u.disabled ? "row-disabled" : ""}>
                   <td>
@@ -82,9 +85,10 @@ export default function Users() {
                   <td className="right nowrap">
                     {mine ? <span className="muted small">use Change password at the top</span> : (
                       <>
-                        {local && !u.disabled && <button className="btn btn-sm" onClick={() => setDialog({ kind: "role", user: u })}>Change role…</button>}{" "}
-                        {local && !u.disabled && <button className="btn btn-sm" onClick={() => setDialog({ kind: "reset", user: u })}>Reset password…</button>}{" "}
-                        {local && mfaEnrolled(u) && <button className="btn btn-sm" onClick={() => setDialog({ kind: "reset_mfa", user: u })}>Reset MFA…</button>}{" "}
+                        {creds && !u.disabled && <button className="btn btn-sm" onClick={() => setDialog({ kind: "role", user: u })}>Change role…</button>}{" "}
+                        {creds && !u.disabled && <button className="btn btn-sm" onClick={() => setDialog({ kind: "reset", user: u })}>Reset password…</button>}{" "}
+                        {creds && mfaEnrolled(u) && <button className="btn btn-sm" onClick={() => setDialog({ kind: "reset_mfa", user: u })}>Reset MFA…</button>}{" "}
+                        {local && !creds && <span className="muted small" title="Only the Super admin resets an Admin's password or MFA or changes an Admin's role">role, password, MFA: Super admin</span>}{" "}
                         {u.disabled
                           ? <button className="btn btn-sm" onClick={() => setDialog({ kind: "enable", user: u })}>Enable…</button>
                           : <button className="btn btn-sm btn-danger-ghost" onClick={() => setDialog({ kind: "disable", user: u })}>Disable…</button>}{" "}

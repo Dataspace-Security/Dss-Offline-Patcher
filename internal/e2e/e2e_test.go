@@ -138,11 +138,19 @@ func newEnvOpts(t *testing.T, tlsMode bool, extra string) *env {
 	e.cfg = cfg
 	e.srvHandler = h
 	e.sess, e.mfa = map[string]string{}, map[string][]byte{}
+	// The bank's staff accounts were set up long ago (one person creating
+	// several accounts and approving with them recently is refused, see
+	// TestApprovalCredentialStewards).
+	realNow := e.st.Now
+	e.st.Now = func() time.Time { return realNow().Add(-60 * 24 * time.Hour) }
 	for _, u := range envUsers {
 		if _, err := e.st.CreateLocalUser(context.Background(), store.Manager{Actor: "system:test", Role: store.RoleSuperAdmin},
 			store.NewLocalUser{Email: u.email, Role: u.role, Password: envPW}, false); err != nil {
 			t.Fatal(err)
 		}
+	}
+	e.st.Now = realNow
+	for _, u := range envUsers {
 		e.sess[u.tok] = e.signIn(u.email, envPW)
 	}
 	e.hc = http.DefaultClient

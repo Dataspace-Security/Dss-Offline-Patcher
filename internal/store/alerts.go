@@ -70,6 +70,12 @@ func (s *Store) raiseAlertWith(tx *sql.Tx, severity, kind, objectType, objectID,
 	if n > 0 {
 		return nil
 	}
+	return s.addAlert(tx, severity, kind, objectType, objectID, message, details)
+}
+
+// addAlert records an alert for an event (not a condition): every
+// occurrence counts, so no deduplication against open alerts.
+func (s *Store) addAlert(tx *sql.Tx, severity, kind, objectType, objectID, message string, details map[string]any) error {
 	det := "{}"
 	if details != nil {
 		det = mustJSON(details)

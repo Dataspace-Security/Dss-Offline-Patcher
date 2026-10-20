@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Two-person rule for deployments and rollbacks (docs/03-state-model.md):
@@ -12,6 +14,9 @@ import (
 // ApproveDeployment records approvals from bank users or admins other than
 // the creator, one per person, and the one that reaches the required count
 // activates it. RejectDeployment ends it (state rejected, final).
+// An approval must also come from someone the creator does not control
+// (checkSteward): not from an account whose credentials the creator set,
+// and not from a second account freshly set up by the same person.
 
 func fillApprovals(ctx context.Context, q querier, d *Deployment) error {
 	rows, err := q.QueryContext(ctx, `SELECT approver, reason, at FROM deployment_approvals WHERE deployment_id=? ORDER BY at, approver`, d.DeploymentID)
@@ -60,6 +65,7 @@ func (s *Store) ApproveDeployment(ctx context.Context, actor, role, id, reason s
 		return Deployment{}, err
 	}
 	var out Deployment
+	var refused map[string]any // audited after the transaction rolled back
 	err := s.txChanged(ctx, func(tx *sql.Tx) error {
 		d, err := pendingFor(ctx, tx, actor, role, id, "approved")
 		if err != nil {
@@ -70,6 +76,18 @@ func (s *Store) ApproveDeployment(ctx context.Context, actor, role, id, reason s
 				return Errf(ErrConflict, "you already approved this deployment; another person must approve it")
 			}
 		}
+		st, why, err := s.checkSteward(ctx, tx, d, actor)
+		if err != nil {
+			return err
+		}
+		if why != nil {
+			refused = why.details
+			return why.err
+		}
+		scope, err := scopeCandidates(ctx, tx, d)
+		if err != nil {
+			return err
+		}
 		now := s.now()
 		if _, err := tx.Exec(`INSERT INTO deployment_approvals(deployment_id,approver,reason,at) VALUES(?,?,?,?)`, id, actor, reason, now); err != nil {
 			return err
@@ -78,9 +96,25 @@ func (s *Store) ApproveDeployment(ctx context.Context, actor, role, id, reason s
 		if need < 1 {
 			need = 1
 		}
-		if err := s.audit(tx, Ev{Actor: actor, Action: "deployment.approved", ObjectType: "deployment", ObjectID: id, PackageID: d.PackageID,
-			Details: map[string]any{"reason": reason, "approvals": have, "approvals_required": need, "operation": d.Operation, "role": CanonicalRole(role)}}); err != nil {
+		details := map[string]any{"reason": reason, "approvals": have, "approvals_required": need, "operation": d.Operation, "role": CanonicalRole(role),
+			"endpoints_in_scope": len(scope)}
+		fresh := s.freshCredentials(st)
+		if st.local {
+			details["credentials_set_by"], details["credentials_set_at"], details["fresh_credentials"] = st.by, st.at, fresh
+		}
+		if err := s.audit(tx, Ev{Actor: actor, Action: "deployment.approved", ObjectType: "deployment", ObjectID: id, PackageID: d.PackageID, Details: details}); err != nil {
 			return err
+		}
+		if fresh {
+			// Allowed (a new colleague may approve), but worth a second look:
+			// it is how one person would pass the two-person rule.
+			name := strings.TrimPrefix(actor, "user:")
+			if err := s.addAlert(tx, "critical", "approval_fresh_account", "deployment", id,
+				fmt.Sprintf("%s approved deployment %q of %s; the account's credentials were set by %s on %s (less than %d days ago). Check that %s is a real, separate person.",
+					name, d.Name, d.PackageID, strings.TrimPrefix(st.by, "user:"), dateOf(st.at), int(FreshCredentials.Hours()/24), name),
+				map[string]any{"approver": actor, "credentials_set_by": st.by, "credentials_set_at": st.at, "created_by": d.CreatedBy}); err != nil {
+				return err
+			}
 		}
 		if have < need {
 			if _, err := tx.Exec(`UPDATE deployments SET state_reason=?, updated_at=? WHERE deployment_id=?`, awaitingReason(have, need), now, id); err != nil {
@@ -92,7 +126,90 @@ func (s *Store) ApproveDeployment(ctx context.Context, actor, role, id, reason s
 		out, err = getDeploymentCounted(ctx, tx, id)
 		return err
 	})
+	if refused != nil {
+		s.Audit(ctx, Ev{Actor: actor, Action: "deployment.approval_refused", ObjectType: "deployment", ObjectID: id, Failure: true, Details: refused})
+	}
 	return out, err
+}
+
+// FreshCredentials: an account whose credentials someone set (created it,
+// reset its password or MFA, changed its role) this recently is freshly
+// provisioned. Two approvals from fresh accounts of the same steward are
+// refused, and any approval from a fresh account raises an alert.
+const FreshCredentials = 7 * 24 * time.Hour
+
+// steward is who last set a local account's credentials, and when
+// (local_users.cred_set_by / cred_set_at). local false: not a local user
+// (SSO: the identity provider manages credentials).
+type steward struct {
+	by, at string
+	local  bool
+}
+
+func credSteward(ctx context.Context, q querier, actor string) (steward, error) {
+	email, ok := strings.CutPrefix(actor, "user:")
+	if !ok {
+		return steward{}, nil
+	}
+	var st steward
+	err := q.QueryRowContext(ctx, `SELECT cred_set_by, cred_set_at FROM local_users WHERE email=?`, email).Scan(&st.by, &st.at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return steward{}, nil
+	}
+	st.local = err == nil
+	return st, err
+}
+
+func (s *Store) freshCredentials(st steward) bool {
+	return st.local && st.at != "" && s.Now().Sub(parseTime(st.at)) < FreshCredentials
+}
+
+func dateOf(ts string) string {
+	if len(ts) >= 10 {
+		return ts[:10]
+	}
+	return ts
+}
+
+type approvalRefusal struct {
+	err     error
+	details map[string]any
+}
+
+// checkSteward applies the credential-steward rules to actor's approval
+// of d: whoever set up the approver's account must not be the creator of
+// the deployment (that person could sign in as the approver), and two
+// accounts freshly set up by the same person do not count as two people.
+func (s *Store) checkSteward(ctx context.Context, tx *sql.Tx, d Deployment, actor string) (steward, *approvalRefusal, error) {
+	st, err := credSteward(ctx, tx, actor)
+	if err != nil || !st.local || st.by == "" {
+		return st, nil, err
+	}
+	if st.by == d.CreatedBy {
+		return st, &approvalRefusal{
+			err: Errf(ErrConflict, "your account's credentials were last set (created or reset) by %s, who created this deployment, so your approval would not be a second person's; another approver is needed",
+				strings.TrimPrefix(st.by, "user:")),
+			details: map[string]any{"rule": "steward_is_creator", "credentials_set_by": st.by, "credentials_set_at": st.at, "created_by": d.CreatedBy},
+		}, nil
+	}
+	if !s.freshCredentials(st) {
+		return st, nil, nil
+	}
+	for _, a := range d.Approvals {
+		o, err := credSteward(ctx, tx, a.By)
+		if err != nil {
+			return st, nil, err
+		}
+		if o.by == st.by && s.freshCredentials(o) {
+			return st, &approvalRefusal{
+				err: Errf(ErrConflict, "%s already approved, and %s set up both your accounts within the last %d days; approvals from accounts one person provisioned do not count as two people, so another approver is needed",
+					strings.TrimPrefix(a.By, "user:"), strings.TrimPrefix(st.by, "user:"), int(FreshCredentials.Hours()/24)),
+				details: map[string]any{"rule": "same_fresh_steward", "credentials_set_by": st.by, "credentials_set_at": st.at,
+					"other_approver": a.By, "other_credentials_set_at": o.at},
+			}, nil
+		}
+	}
+	return st, nil, nil
 }
 
 // activateDeployment starts an approved deployment: state active, targets
@@ -117,8 +234,14 @@ func (s *Store) activateDeployment(ctx context.Context, tx *sql.Tx, d Deployment
 	if err := s.resolveAlert(tx, "deployment_awaiting_approval", d.DeploymentID, reason); err != nil {
 		return err
 	}
+	// The approved endpoint set is fixed now (deploy_scope.go): later
+	// group changes or enrolments cannot widen what was approved.
+	scope, err := s.fixScope(ctx, tx, d)
+	if err != nil {
+		return err
+	}
 	if err := s.audit(tx, Ev{Actor: "system:scheduler", Action: "deployment.activated", ObjectType: "deployment", ObjectID: d.DeploymentID, PackageID: d.PackageID,
-		Details: map[string]any{"approved_by": names, "created_by": d.CreatedBy, "operation": d.Operation}}); err != nil {
+		Details: map[string]any{"approved_by": names, "created_by": d.CreatedBy, "operation": d.Operation, "approved_endpoints": scope}}); err != nil {
 		return err
 	}
 	if err := s.ensureTargetsForDeployment(ctx, tx, d.DeploymentID); err != nil {

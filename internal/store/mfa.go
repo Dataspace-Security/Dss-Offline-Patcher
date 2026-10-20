@@ -343,8 +343,9 @@ func (s *Store) LoginMFA(ctx context.Context, email, code, recovery string, ttl 
 }
 
 // ResetMFA removes a user's authenticator and recovery codes and ends
-// their sessions: they enrol again at the next sign-in. Admins reset bank
-// roles, only a super admin resets a super admin.
+// their sessions: they enrol again at the next sign-in. Admins reset
+// viewers and users; only a super admin resets an admin or a super admin.
+// The resetter becomes the account's credential steward.
 func (s *Store) ResetMFA(ctx context.Context, by Manager, email, reason string) error {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if by.is(email) {
@@ -355,7 +356,7 @@ func (s *Store) ResetMFA(ctx context.Context, by Manager, email, reason string) 
 		if err != nil {
 			return err
 		}
-		if err := checkManage(by, t.role, ""); err != nil {
+		if err := checkCredentials(by, t.role, ""); err != nil {
 			return err
 		}
 		if !t.local {
@@ -363,6 +364,9 @@ func (s *Store) ResetMFA(ctx context.Context, by Manager, email, reason string) 
 		}
 		res, err := tx.Exec(`DELETE FROM mfa WHERE email=?`, email)
 		if err != nil {
+			return err
+		}
+		if err := s.setSteward(tx, by, email); err != nil {
 			return err
 		}
 		had, _ := res.RowsAffected()

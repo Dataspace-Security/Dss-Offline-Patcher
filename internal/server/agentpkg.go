@@ -53,6 +53,16 @@ func bankAdminOnly(role string) bool { return role == store.RoleAdmin }
 // agentDeploymentAllowed: approving or rejecting a deployment of an agent
 // version needs a bank admin.
 func (s *Server) agentDeploymentAllowed(w http.ResponseWriter, r *http.Request, deploymentID string) bool {
+	return s.agentDeploymentCheck(w, r, deploymentID, bankAdminOnly, agentAdminApprovals, store.RoleAdmin)
+}
+
+// agentDeploymentManaged: running an agent-version deployment (pause,
+// resume, advance, cancel, retry failed) is the vendor's, like creating it.
+func (s *Server) agentDeploymentManaged(w http.ResponseWriter, r *http.Request, deploymentID string) bool {
+	return s.agentDeploymentCheck(w, r, deploymentID, superAdminOnly, agentVendorOnly, store.RoleSuperAdmin)
+}
+
+func (s *Server) agentDeploymentCheck(w http.ResponseWriter, r *http.Request, deploymentID string, allow func(role string) bool, msg, required string) bool {
 	d, err := s.store.GetDeployment(r.Context(), deploymentID)
 	if errors.Is(err, store.ErrNotFound) {
 		return true
@@ -61,5 +71,5 @@ func (s *Server) agentDeploymentAllowed(w http.ResponseWriter, r *http.Request, 
 		s.fail(w, err)
 		return false
 	}
-	return s.agentAllowed(w, r, d.PackageID, bankAdminOnly, agentAdminApprovals, store.RoleAdmin)
+	return s.agentAllowed(w, r, d.PackageID, allow, msg, required)
 }

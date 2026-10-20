@@ -27,9 +27,20 @@ These four are the only roles (the old names `operator` and `approver` were remo
    rolls them back, and only bank **Admins** (not Users, not the Super admin,
    not the creator) approve or reject such a deployment.
    The creator sees "You created this — 2 other people must approve".
+   An approval must come from someone the creator does not control: it is
+   refused from an account whose password, MFA or role was last set (or
+   which was created) by the deployment's creator, and from a second account
+   set up by the same person as an earlier approver when both were set up in
+   the last 7 days. Accounts one admin created months ago approve normally.
+   An approval from an account set up in the last 7 days raises a critical
+   alert. Approval fixes the endpoints: machines added to the deployment's
+   groups afterwards are left out (shown on the deployment) and need a new
+   deployment.
 2. **Admins manage bank roles only.** An Admin can create users and give them
    Viewer, User or Admin. Only the Super admin can see, create, change or
-   disable a Super admin account, or give someone that role. Nobody can disable
+   disable a Super admin account, or give someone that role. Only the Super
+   admin resets another Admin's password or MFA or changes an Admin's role
+   (an Admin who could sign in as a colleague could approve twice). Nobody can disable
    or demote themselves. Delete works only for e-mail + password users (SSO
    users: disable), never on yourself and never on the last Super admin; the
    audit history of a deleted user is kept.
@@ -103,7 +114,7 @@ These four are the only roles (the old names `operator` and `approver` were remo
 | Approve / reject a waiting deployment or rollback | — | ✓ not the creator, not already approved | ✓ not the creator, not already approved | — |
 | New deployment / rollback of an **agent version** (`kind` agent, `offpatch-agent-*`) | — | — | — | ✓ (server: 403 "agent versions are managed by the vendor (super admin)" for bank roles) |
 | Approve / reject a waiting **agent-version** deployment or rollback | — | — (403 "agent version deployments are approved by bank admins") | ✓ not the creator, not already approved; `deployment_approvals` bank admins needed | — |
-| Pause, resume, start next stage, retry failed, cancel (incl. a waiting one) | — | ✓ | ✓ | ✓ |
+| Pause, resume, start next stage, retry failed, cancel (incl. a waiting one) | — | ✓ (not agent versions) | ✓ (not agent versions) | ✓ |
 | Raise an exception for a failed target | — | "Ask an Admin…" (copyable text, no change) | ✓ | ✓ |
 | Deployments → Exceptions: create / revoke an exception | — (read only) | — (read only) | ✓ | ✓ |
 | Create / delete a maintenance window | — | ✓ | ✓ | ✓ |
@@ -129,10 +140,10 @@ These four are the only roles (the old names `operator` and `approver` were remo
 |---|:-:|:-:|:-:|:-:|
 | See the user list | — | — | ✓ (Super admins hidden) | ✓ |
 | Add a user | — | — | ✓ Viewer / User / Admin | ✓ any role |
-| Change role, reset password (e-mail + password users) | — | — | ✓ bank roles, not self | ✓ any, not self |
+| Change role, reset password (e-mail + password users) | — | — | ✓ Viewers and Users, not self (not other Admins) | ✓ any, not self |
 | Disable / enable a user (incl. SSO users) | — | — | ✓ bank roles, not self | ✓ any, not self |
 | Delete an e-mail + password user (confirm, reason optional; Disable is the gentler option; SSO users: disable) | — | — | ✓ bank roles, not self | ✓ any, not self |
-| See MFA status (On / Not set up); Reset MFA (e-mail + password users) | — | — | ✓ bank roles, not self | ✓ any, not self |
+| See MFA status (On / Not set up); Reset MFA (e-mail + password users) | — | — | ✓ see all bank roles; reset Viewers and Users, not self (not other Admins) | ✓ any, not self |
 
 ### Settings → Auto-download
 
@@ -168,13 +179,13 @@ These four are the only roles (the old names `operator` and `approver` were remo
 | `GET /api/library`, `GET /api/library/{kind}/{id}` | Super admin only |
 | `POST /api/packages/{id}/approve`, `/reject` | User |
 | `POST /api/packages/{id}/revoke` | Admin |
-| `POST /api/deployments`, `/{id}/pause\|resume\|cancel\|advance`, `/{id}/retry_failed` | User |
-| `POST /api/deployments/{id}/approve`, `/reject` | User or Admin only (`CanApproveDeployments`), never the creator; for an agent-version deployment Admin only |
+| `POST /api/deployments`, `/{id}/pause\|resume\|cancel\|advance`, `/{id}/retry_failed` | User (agent-version deployments: Super admin only, 403) |
+| `POST /api/deployments/{id}/approve`, `/reject` | User or Admin only (`CanApproveDeployments`), never the creator; for an agent-version deployment Admin only; approve: 409 from an account whose credentials the creator set, or a second account freshly set up by the same person |
 | `POST /api/packages/{id}/approve\|reject\|revoke`, `POST /api/deployments` (install or rollback) for an agent version | Super admin only |
 | `PATCH /api/endpoints/{id}`, `POST /api/endpoints/{id}/retire`, `POST /api/enrollment-tokens` | User |
 | `POST /api/maintenance-windows`, `/{id}/delete` | User |
 | `POST /api/exceptions`, `/{id}/revoke` | Admin |
-| `GET/POST /api/users`, `POST /api/users/{name}/disable\|enable\|reset_password\|set_role\|delete\|reset_mfa` | Admin (Super admin accounts and role: Super admin only; never yourself) |
+| `GET/POST /api/users`, `POST /api/users/{name}/disable\|enable\|reset_password\|set_role\|delete\|reset_mfa` | Admin (Super admin accounts and role: Super admin only; `reset_password`, `reset_mfa`, `set_role` on an Admin: Super admin only; never yourself) |
 | `POST /api/auth/login`, `POST /api/auth/mfa` | none (sign-in) |
 | `POST /api/auth/mfa/enroll/start`, `/enroll/confirm` | any signed-in e-mail + password user (also the limited first sign-in session) |
 | `POST /api/auth/mfa/disable` | Super admin (own authenticator only) |

@@ -90,6 +90,26 @@ func checkManage(by Manager, targetRole, newRole string) error {
 	return nil
 }
 
+// checkCredentials is checkManage for setting another account's
+// credentials or role (reset password, reset MFA, change role): an admin
+// does this for viewers and users only, not for another admin (who could
+// then sign in as them and approve twice); only a super admin may.
+func checkCredentials(by Manager, targetRole, newRole string) error {
+	if err := checkManage(by, targetRole, newRole); err != nil {
+		return err
+	}
+	if by.Role != RoleSuperAdmin && targetRole == RoleAdmin {
+		return Errf(ErrForbidden, "only a super admin can reset an admin's password or MFA or change an admin's role")
+	}
+	return nil
+}
+
+// setSteward records by as the one who last set email's credentials.
+func (s *Store) setSteward(tx *sql.Tx, by Manager, email string) error {
+	_, err := tx.Exec(`UPDATE local_users SET cred_set_by=?, cred_set_at=? WHERE email=?`, by.Actor, s.now(), email)
+	return err
+}
+
 // otherSuperAdmins counts enabled local super admins besides email.
 func (s *Store) otherSuperAdmins(tx *sql.Tx, email string) (int, error) {
 	var n int
@@ -165,8 +185,8 @@ func (s *Store) createLocalUserHash(ctx context.Context, by Manager, n NewLocalU
 			return Errf(ErrConflict, "a user %s already exists", email)
 		}
 		now := s.now()
-		if _, err := tx.Exec(`INSERT INTO local_users(email,display_name,role,password_hash,must_change_password,created_by,created_at,builtin) VALUES(?,?,?,?,?,?,?,?)`,
-			email, name, role, hash, boolInt(mustChange), by.Actor, now, boolInt(builtin)); err != nil {
+		if _, err := tx.Exec(`INSERT INTO local_users(email,display_name,role,password_hash,must_change_password,created_by,created_at,builtin,cred_set_by,cred_set_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			email, name, role, hash, boolInt(mustChange), by.Actor, now, boolInt(builtin), by.Actor, now); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`INSERT INTO users(username,role,source,email,first_login,last_login) VALUES(?,?,'password',?,'','')`, email, role, email); err != nil {
@@ -263,11 +283,14 @@ func (s *Store) ResetLocalPassword(ctx context.Context, by Manager, email, passw
 		if !t.local {
 			return Errf(ErrConflict, "%s signs in with SSO; its password is managed by the identity provider", email)
 		}
-		if err := checkManage(by, t.role, ""); err != nil {
+		if err := checkCredentials(by, t.role, ""); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`UPDATE local_users SET password_hash=?, must_change_password=1, failed_attempts=0, locked_until='', password_changed_at='' WHERE email=?`,
 			hash, email); err != nil {
+			return err
+		}
+		if err := s.setSteward(tx, by, email); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`UPDATE sessions SET revoked=1 WHERE username=?`, email); err != nil {
@@ -296,7 +319,7 @@ func (s *Store) SetLocalUserRole(ctx context.Context, by Manager, email, role, r
 		if !t.local {
 			return Errf(ErrConflict, "%s signs in with SSO; its role comes from the identity provider groups", email)
 		}
-		if err := checkManage(by, t.role, to); err != nil {
+		if err := checkCredentials(by, t.role, to); err != nil {
 			return err
 		}
 		if t.role == to {
@@ -310,6 +333,9 @@ func (s *Store) SetLocalUserRole(ctx context.Context, by Manager, email, role, r
 			}
 		}
 		if _, err := tx.Exec(`UPDATE local_users SET role=? WHERE email=?`, to, email); err != nil {
+			return err
+		}
+		if err := s.setSteward(tx, by, email); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`UPDATE users SET role=? WHERE username=?`, to, email); err != nil {
@@ -550,6 +576,9 @@ func (s *Store) RecoverSuperAdmin(ctx context.Context, email, password string) e
 			return err
 		}
 		if _, err := tx.Exec(`UPDATE users SET disabled=0, disabled_reason='' WHERE username=?`, email); err != nil {
+			return err
+		}
+		if err := s.setSteward(tx, Manager{Actor: "system:cli", Role: RoleSuperAdmin}, email); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`UPDATE sessions SET revoked=1 WHERE username=?`, email); err != nil {

@@ -621,6 +621,9 @@ func (s *Server) deploymentAction(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &body) {
 		return
 	}
+	if !s.agentDeploymentManaged(w, r, r.PathValue("id")) {
+		return
+	}
 	v, err := s.store.DeploymentAction(r.Context(), actor(r), r.PathValue("id"), r.PathValue("action"), body.Reason)
 	if err != nil {
 		s.fail(w, err)

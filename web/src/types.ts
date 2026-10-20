@@ -112,6 +112,9 @@ export type Deployment = NewDeployment & {
   // Roles contract: 2-person approval of deployments and rollbacks (absent on older servers).
   approvals?: DeploymentApproval[] | null; approvals_required?: number;
   rejected_by?: string; rejected_at?: string;
+  // Approved scope: endpoints fixed when the last approval activated it, and
+  // endpoints that joined its groups afterwards and were left out.
+  scope_endpoints?: number; scope_excluded?: number;
 };
 export type DeploymentApproval = { by: string; at: string; reason: string };
 export type Target = {

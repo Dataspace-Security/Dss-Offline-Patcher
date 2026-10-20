@@ -526,7 +526,13 @@ func TestUserManagementAPI(t *testing.T) {
 	if w := do(h, req{method: "GET", path: "/api/me", cookie: uma}); w.Code != 401 {
 		t.Fatalf("role change must end sessions: %d", w.Code)
 	}
-	w = post(adm, "/api/users/uma@bank.example/reset_password", map[string]string{"reason": "forgot"})
+	// uma is an admin now: another admin no longer resets or re-roles her.
+	for _, p := range []string{"reset_password", "reset_mfa", "set_role"} {
+		if w := post(adm, "/api/users/uma@bank.example/"+p, map[string]string{"role": "user", "reason": "x"}); w.Code != 403 {
+			t.Fatalf("admin %s on an admin: %d %s", p, w.Code, w.Body)
+		}
+	}
+	w = post(sup, "/api/users/uma@bank.example/reset_password", map[string]string{"reason": "forgot"})
 	var rp map[string]any
 	json.Unmarshal(w.Body.Bytes(), &rp)
 	if w.Code != 200 || len(rp["temp_password"].(string)) < 12 {
