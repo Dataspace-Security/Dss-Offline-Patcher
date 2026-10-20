@@ -20,7 +20,9 @@ func agentPkg(version string) manifest.Package {
 // returns its signed-in client: agent deployments need two bank admins.
 func (e *env) secondBankAdmin(t *testing.T) *http.Client {
 	t.Helper()
-	if c := e.api("POST", "/api/users", tokSuper, map[string]string{"email": "ada.admin@bank.example", "display_name": "Ada", "role": "admin", "password": "temporary password Ada"}, nil); c != 201 {
+	// Created by adam (a bank admin), not by the vendor who creates the
+	// agent deployments: an account its creator set up cannot approve.
+	if c := e.api("POST", "/api/users", tokAdmin, map[string]string{"email": "ada.admin@bank.example", "display_name": "Ada", "role": "admin", "password": "temporary password Ada"}, nil); c != 201 {
 		t.Fatalf("create second admin: %d", c)
 	}
 	return e.passwordUser(t, "ada.admin@bank.example", "temporary password Ada", "ada's own passphrase")
@@ -108,6 +110,20 @@ func TestAgentPackagesVendorOnly(t *testing.T) {
 	c, b := call(t, ada, "POST", e.srv.URL+"/api/deployments/"+d.DeploymentID+"/approve", reason, true)
 	if c != 200 || !strings.Contains(string(b), `"state":"active"`) {
 		t.Fatalf("second bank admin activates: %d %s", c, b)
+	}
+	// Running it is the vendor's too: bank roles cannot pause, resume,
+	// advance, cancel or retry an agent-version rollout.
+	for _, act := range []string{"pause", "resume", "advance", "cancel", "retry_failed"} {
+		for _, tok := range []string{tokOperator, tokAdmin} {
+			if c, msg := e.apiErr("POST", "/api/deployments/"+d.DeploymentID+"/"+act, tok, reason); c != 403 || !strings.Contains(msg, "vendor (super admin)") {
+				t.Fatalf("bank role %s on an agent deployment: %d %q", act, c, msg)
+			}
+		}
+	}
+	for _, act := range []string{"pause", "resume"} {
+		if c := e.api("POST", "/api/deployments/"+d.DeploymentID+"/"+act, tokSuper, reason, nil); c != 200 {
+			t.Fatalf("super admin %s: %d", act, c)
+		}
 	}
 	e.cycle(a)
 	e.cycle(a)

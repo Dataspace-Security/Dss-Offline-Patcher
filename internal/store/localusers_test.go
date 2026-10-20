@@ -262,8 +262,13 @@ func TestUserManagementLimits(t *testing.T) {
 	is("user manages users", s.SetUserDisabled(ctx, byUser, "adam@bank.example", true, "x"), ErrForbidden)
 	is("unknown user", s.SetUserDisabled(ctx, byAdmin, "ghost@bank.example", true, "x"), ErrNotFound)
 	ok("admin promotes user to admin", s.SetLocalUserRole(ctx, byAdmin, "uma@bank.example", RoleAdmin, "team lead"))
-	is("same role", s.SetLocalUserRole(ctx, byAdmin, "uma@bank.example", RoleAdmin, "x"), ErrConflict)
-	ok("admin demotes admin to viewer", s.SetLocalUserRole(ctx, byAdmin, "uma@bank.example", RoleViewer, "audit only"))
+	// An admin does not set another admin's credentials or role (they could
+	// sign in as them); only the super admin does.
+	is("admin changes an admin's role", s.SetLocalUserRole(ctx, byAdmin, "uma@bank.example", RoleViewer, "x"), ErrForbidden)
+	is("admin resets an admin's password", s.ResetLocalPassword(ctx, byAdmin, "uma@bank.example", "temporary password 1", "x"), ErrForbidden)
+	is("admin resets an admin's MFA", s.ResetMFA(ctx, byAdmin, "uma@bank.example", "x"), ErrForbidden)
+	is("same role", s.SetLocalUserRole(ctx, bySuper, "uma@bank.example", RoleAdmin, "x"), ErrConflict)
+	ok("super admin demotes admin to viewer", s.SetLocalUserRole(ctx, bySuper, "uma@bank.example", RoleViewer, "audit only"))
 	is("bad role", s.SetLocalUserRole(ctx, byAdmin, "uma@bank.example", "god", "x"), ErrInvalid)
 	// Nobody changes themselves.
 	is("disable self", s.SetUserDisabled(ctx, byAdmin, "adam@bank.example", true, "x"), ErrConflict)

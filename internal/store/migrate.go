@@ -59,6 +59,15 @@ var columnMigrations = []struct{ table, column, ddl string }{
 	{"mfa", "failed_attempts", "INTEGER NOT NULL DEFAULT 0"},
 	{"mfa", "locked_until", "TEXT NOT NULL DEFAULT ''"},
 	{"mfa", "lockouts", "INTEGER NOT NULL DEFAULT 0"},
+	// Credential steward of a local user: who last set its credentials
+	// (created it, reset its password or MFA, changed its role) and when.
+	// Approvals from accounts the deployment's creator controls, or from two
+	// accounts freshly set up by one person, are refused (deploy_approval.go).
+	{"local_users", "cred_set_by", "TEXT NOT NULL DEFAULT ''"},
+	{"local_users", "cred_set_at", "TEXT NOT NULL DEFAULT ''"},
+	// When a deployment's approved endpoint set was fixed (deployment_scope;
+	// "" = not yet, still waiting for approval).
+	{"deployments", "scope_at", "TEXT NOT NULL DEFAULT ''"},
 }
 
 func hasColumn(db *sql.DB, table, column string) (bool, error) {
@@ -102,6 +111,8 @@ var tableMigrations = []string{
 	acqPolicySchema,
 	// Wrong passwords per (account, client address) (authlimits.go).
 	loginFailuresSchema,
+	// Approved endpoint set of each deployment (deploy_scope.go).
+	deploymentScopeSchema,
 }
 
 // The role names operator and approver were removed: stored users and
@@ -133,6 +144,13 @@ func migrate(db *sql.DB) error {
 		if _, err := db.Exec(q); err != nil {
 			return fmt.Errorf("role rename: %w", err)
 		}
+	}
+	// Accounts from before credential stewards: their creator set them up.
+	if _, err := db.Exec(`UPDATE local_users SET cred_set_by=created_by, cred_set_at=created_at WHERE cred_set_by=''`); err != nil {
+		return fmt.Errorf("credential stewards: %w", err)
+	}
+	if err := migrateDeploymentScopes(db); err != nil {
+		return fmt.Errorf("deployment scopes: %w", err)
 	}
 	return nil
 }

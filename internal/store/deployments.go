@@ -75,6 +75,10 @@ type Deployment struct {
 	RejectedBy        string     `json:"rejected_by"`
 	RejectedAt        string     `json:"rejected_at"`
 	ActivatedAt       string     `json:"activated_at"`
+	// Approved scope (deploy_scope.go): endpoints fixed at activation, and
+	// endpoints that joined a ring group afterwards and were left out.
+	ScopeEndpoints int `json:"scope_endpoints"`
+	ScopeExcluded  int `json:"scope_excluded"`
 }
 
 type DeploymentDetail struct {
@@ -144,6 +148,9 @@ func getDeploymentCounted(ctx context.Context, q querier, id string) (Deployment
 
 func fillCounts(ctx context.Context, q querier, d *Deployment) error {
 	if err := fillApprovals(ctx, q, d); err != nil {
+		return err
+	}
+	if err := fillScope(ctx, q, d); err != nil {
 		return err
 	}
 	rows, err := q.QueryContext(ctx, `SELECT state, COUNT(*) FROM targets WHERE deployment_id=? GROUP BY state`, d.DeploymentID)
@@ -766,7 +773,17 @@ func (s *Store) ensureTarget(ctx context.Context, tx *sql.Tx, d Deployment, e En
 		return nil
 	}
 	ring := ringFor(d.Rings, e.Groups, e.EndpointID)
-	if ring < 0 || ring > d.CurrentRing {
+	if ring < 0 {
+		return nil
+	}
+	// Only endpoints of the approved scope (fixed at activation) are
+	// targeted; a later member of a ring group is recorded as excluded.
+	if ok, err := inScope(ctx, tx, d.DeploymentID, e.EndpointID); err != nil {
+		return err
+	} else if !ok {
+		return s.excludeFromScope(ctx, tx, d, e, ring)
+	}
+	if ring > d.CurrentRing {
 		return nil
 	}
 	var n int
@@ -910,8 +927,9 @@ func (s *Store) evaluate(ctx context.Context, tx *sql.Tx, id string, failRing in
 	if terminal != total && !advanceable {
 		return nil
 	}
-	// An empty first ring is not "finished" (its endpoints may not have
-	// enrolled yet); an empty later ring is skipped like a finished one.
+	// An empty first ring (no pilot machine in the approved scope) is not
+	// "finished": moving on would skip the pilot, so an operator decides;
+	// an empty later ring is skipped like a finished one.
 	if d.AutoAdvance && (total > 0 || d.CurrentRing > 0) && d.CurrentRing < len(d.Rings)-1 {
 		// The ring is finished. Move on only if it stayed within the failure
 		// threshold (the same test as the auto-pause); otherwise it waits for
@@ -932,7 +950,9 @@ func (s *Store) evaluate(ctx context.Context, tx *sql.Tx, id string, failRing in
 		if err != nil {
 			return err
 		}
-		if done {
+		if done && d.CurrentRing == 0 && total == 0 {
+			reason = "no endpoint was in the ring groups when it was approved (the approved scope is empty)"
+		} else if done {
 			reason = "all targets finished; remaining rings have no endpoints"
 		}
 	}
@@ -972,20 +992,15 @@ func (s *Store) autoAdvance(ctx context.Context, tx *sql.Tx, d Deployment) error
 	return s.evaluate(ctx, tx, d.DeploymentID, -1)
 }
 
-// remainingRingsEmpty reports whether d has targets but no active endpoint
-// belongs to a ring after the current one.
+// remainingRingsEmpty reports whether no endpoint of d's approved scope
+// (still active) belongs to a ring after the current one. The scope is
+// fixed at activation, so endpoints enrolling later never fill a ring.
 func (s *Store) remainingRingsEmpty(ctx context.Context, tx *sql.Tx, d Deployment) (bool, error) {
-	var n int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM targets WHERE deployment_id=?`, d.DeploymentID).Scan(&n); err != nil {
-		return false, err
-	}
-	if n == 0 {
-		return false, nil // nothing targeted yet: endpoints may still enroll
-	}
 	if d.CurrentRing >= len(d.Rings)-1 {
 		return true, nil
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT endpoint_id, groups FROM endpoints WHERE retired_at=''`)
+	rows, err := tx.QueryContext(ctx, `SELECT e.endpoint_id, e.groups FROM deployment_scope s JOIN endpoints e ON e.endpoint_id=s.endpoint_id
+		WHERE s.deployment_id=? AND s.in_scope=1 AND e.retired_at=''`, d.DeploymentID)
 	if err != nil {
 		return false, err
 	}

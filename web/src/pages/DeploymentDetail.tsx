@@ -35,7 +35,7 @@ function targetRank(t: Target): number {
 
 export default function DeploymentDetailPage() {
   const { id = "" } = useParams();
-  const canOperate = useCan("user");
+  const isUser = useCan("user");
   const isSuper = useCan("super_admin");
   // Exceptions are an Admin decision; Users can ask an Admin; viewers see no actions.
   const canException = useCan("admin");
@@ -100,6 +100,9 @@ export default function DeploymentDetailPage() {
   const pending = d.state === "pending_approval";
   const liveCount = (d.targets ?? []).filter((t) => t.live).length;
   const p = pkg.data;
+  // Running an agent-version rollout (pause, resume, next stage, retry,
+  // cancel) is the vendor's, like creating it (server: 403 for bank roles).
+  const canOperate = isUser && (isSuper || !p || !isAgentPackage(p));
   // Rolling back an agent version is the vendor's (super admin) call, like deploying it.
   const canRollBack = !rollback && p && (p.state === "approved" || p.state === "revoked") && (isSuper || !isAgentPackage(p));
   const lastContact = (t: Target): string | undefined => {
@@ -158,13 +161,13 @@ export default function DeploymentDetailPage() {
           <div>
             <b>{ready.empty ? `${stageLabel(ready.name, ready.index)} has no endpoints.` : `${stageLabel(ready.name, ready.index)} finished:`}</b>{" "}
             {ready.empty
-              ? <>No endpoint is in {ready.groups.length ? ready.groups.map((g) => <span key={g} className="tag">{g}</span>) : "its groups"} (or none has checked in yet). The deployment waits here until the next stage is started.</>
+              ? <>No endpoint was in {ready.groups.length ? ready.groups.map((g) => <span key={g} className="tag">{g}</span>) : "its groups"} when it was approved (machines added later are left out). The deployment waits here until the next stage is started.</>
               : <>{ready.verified} verified, {ready.failed} failed{ready.skipped ? `, ${ready.skipped} not applicable / excepted` : ""}.</>}
             {" "}Start <b>{ringName(ready.index + 1)}</b>?
           </div>
           {canOperate
             ? <button className="btn btn-primary" onClick={() => setAction("advance")}>Start {ringName(ready.index + 1)}…</button>
-            : <span className="muted">A User or Admin starts the next stage.</span>}
+            : <span className="muted">{p && isAgentPackage(p) ? "The vendor (super admin) starts the next stage." : "A User or Admin starts the next stage."}</span>}
         </div>
       )}
       {d.state === "paused" && (
@@ -222,6 +225,13 @@ export default function DeploymentDetailPage() {
           {isSuper
             ? <>Upgrade the agent to 0.9.0 or later on {oldAgent.length === 1 ? "it" : "them"} (<Link to={paths.agentVersions()}>Upgrade agent</Link>), then deploy this package again.</>
             : <>The vendor (super admin) upgrades the agent; then this package can be deployed to {oldAgent.length === 1 ? "it" : "them"}.</>}
+        </div>
+      )}
+      {(d.scope_excluded ?? 0) > 0 && (
+        <div className="banner banner-warn">
+          <b>{d.scope_excluded} endpoint{d.scope_excluded === 1 ? "" : "s"} left out:</b> {d.scope_excluded === 1 ? "it" : "they"} joined this
+          {rollback ? " rollback" : " deployment"}'s groups after it was approved for {d.scope_endpoints ?? 0} endpoint{d.scope_endpoints === 1 ? "" : "s"}.
+          {" "}Approval covers only those; create a new {rollback ? "rollback" : "deployment"} (with its own approvals) to include the others.
         </div>
       )}
       {deferred.length > 0 && (
@@ -307,7 +317,7 @@ export default function DeploymentDetailPage() {
                     <td className="detail-cell"><TargetDetailText detail={t.detail} /></td>
                     <td className="nowrap"><ClockRel value={t.updated_at} /></td>
                     <td className="nowrap">
-                      {bad && !rollback && canOperate && (canException
+                      {bad && !rollback && isUser && (canException
                         ? <button className="btn btn-sm" onClick={() => setExcFor(t)}>Raise exception…</button>
                         : <button className="btn btn-sm" onClick={() => setExcFor(t)} title="Only Admins can create exceptions">Ask an Admin…</button>)}
                     </td>
