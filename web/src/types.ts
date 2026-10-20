@@ -75,7 +75,7 @@ export type Hardware = {
   disks?: { mount: string; total_bytes: number; free_bytes: number }[];
   ip_addresses?: string[]; mac_address?: string; boot_time?: string; logged_in_user?: string; timezone?: string;
 };
-export type InventoryItem = { kind: "kb" | "product" | "pkg" | "app" | "agent"; id: string; name: string; version: string; source?: "appstore";
+export type InventoryItem = { kind: "kb" | "product" | "pkg" | "app" | "appx" | "agent"; id: string; name: string; version: string; source?: "appstore" | "msstore";
   /** P2: "user" = per-user install (one user's profile); empty = whole machine. */
   scope?: "user" | "";
 };
@@ -288,7 +288,8 @@ export type FleetUpdates = {
     requested?: AcquisitionRequestRef | null; // latest export listing it
     /** EXE contract (assumed server fields, same values as the Library): "no" = Import is not offered. */
     importable?: Importable; importable_reason?: string;
-    endpoints: { endpoint_id: string; hostname: string; installed: string }[] }[];
+    uncovered?: number; uncovered_builds?: number[];
+    endpoints: { endpoint_id: string; hostname: string; installed: string; package_id?: string }[] }[];
 };
 
 // ---- UX iteration (docs/proposals/ux-simplification.md, contract: docs/proposals/ux-api-contract.md) ----
@@ -334,6 +335,8 @@ export type FleetStatusRow = {
   /** EXE contract (assumed server fields, same values as the Library): "no" = Import is not offered. */
   importable?: Importable; importable_reason?: string;
   up_to_date: number; outdated: number; being_patched: number; verified: number; failed: number; exception: number;
+  /** Machines needing it that no catalog package applies to (e.g. 25H2 when only the 24H2 package of a shared KB is imported), and their builds. */
+  uncovered?: number; uncovered_builds?: number[];
   endpoints: FleetStatusEndpoint[];
 };
 export type FleetStatus = { intel: IntelSummary | null; rows: FleetStatusRow[] };

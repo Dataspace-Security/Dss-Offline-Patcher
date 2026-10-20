@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -45,6 +46,26 @@ func LookupKnown(product string, build int, arch string) (KnownWindows, bool) {
 
 // IsServer reports whether a Windows product name is a server release.
 func IsServer(product string) bool { return strings.Contains(strings.ToLower(product), "server") }
+
+// sharedKBBuilds are Windows builds that get the same KB numbers as an older
+// build of the same family (25H2 with 24H2, 23H2 with 22H2, 21H2 with 22H2
+// on Windows 10). Their packages get the build in the ID so both can be in
+// the catalog; the older build keeps the plain ID existing catalogs use.
+var sharedKBBuilds = map[int]bool{26200: true, 22631: true, 19044: true}
+
+// KBPackageSuffix is what follows "<KB>-<arch>" in the package ID of a
+// Windows update for product at build: "-server" for Windows Server (it
+// shares KB numbers with the client release of the same build), "-<build>"
+// for a build that shares KB numbers with an older one, else "".
+func KBPackageSuffix(product string, server bool, build int) string {
+	if server || IsServer(product) {
+		return "-server"
+	}
+	if sharedKBBuilds[build] {
+		return "-" + strconv.Itoa(build)
+	}
+	return ""
+}
 
 // Empty is a policy with nothing in it (acquire.json alone applies).
 func Empty() Policy {

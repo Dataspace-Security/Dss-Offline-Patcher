@@ -36,13 +36,27 @@ function olderVersion(a: string, b: string): boolean {
   return false;
 }
 
+/** Windows 10/11 and Server builds by release name (KB numbers are shared across some of them). */
+const BUILD_NAMES: Record<number, string> = {
+  19044: "10 21H2", 19045: "10 22H2", 20348: "Server 2022", 22621: "11 22H2", 22631: "11 23H2", 26100: "11 24H2 / Server 2025", 26200: "11 25H2",
+};
+function buildName(b: number): string {
+  return BUILD_NAMES[b] ? `${BUILD_NAMES[b]} (build ${b})` : `build ${b}`;
+}
+function buildRange(min: number, max: number): string {
+  if (min > 0 && min === max) return buildName(min);
+  if (min > 0 && max > 0) return `builds ${min}–${max}`;
+  return min > 0 ? `build ${min} or later` : `build ${max} or earlier`;
+}
+
 function notApplicable(p: Package, e: Endpoint): string | null {
   const a = p.applicability;
   if (isExePackage(p) && olderVersion(e.agent_version ?? "", MIN_AGENT_EXE)) return `agent ${e.agent_version} too old for EXE packages (upgrade the agent to ${MIN_AGENT_EXE} or later)`;
   if (a.os && e.os && a.os.toLowerCase() !== e.os.toLowerCase()) return `${e.os} endpoint, ${a.os} package`;
   if (a.arch && a.arch !== "any" && a.arch !== e.arch) return `arch ${e.arch} ≠ ${a.arch}`;
-  if (a.min_build > 0 && e.build < a.min_build) return `build ${e.build} < ${a.min_build}`;
-  if (a.max_build > 0 && e.build > a.max_build) return `build ${e.build} > ${a.max_build}`;
+  if ((a.min_build > 0 && e.build < a.min_build) || (a.max_build > 0 && e.build > a.max_build)) {
+    return `package is for Windows ${buildRange(a.min_build, a.max_build)}, machine runs ${buildName(e.build)}`;
+  }
   const eds = a.editions ?? [];
   if (eds.length && e.edition && !eds.some((x) => x.toLowerCase() === e.edition.toLowerCase())) return `edition ${e.edition} not in ${eds.join(", ")}`;
   return null;
@@ -78,6 +92,9 @@ export type TargetSummary = {
   willInstall: number;
   /** Machines decided at their next check-in (no inventory / need data yet). */
   unknown: number;
+  /** Machines the package does not apply to (wrong Windows build, architecture, edition), and why. */
+  notApplicable?: number;
+  naReasons?: string[];
 };
 
 /** True when the preview is sure nobody installs it: every machine in the stages is up to date, lacks the app or is not applicable. */
@@ -97,9 +114,12 @@ export function TargetPreview({ pkg, rings, endpoints, fleet: fleetProp, onSumma
   const sTargeted = view ? view.targeted.length : -1;
   const sWill = view ? view.willInstall : -1;
   const sUnknown = view ? view.unknown : -1;
+  const naRows = view ? view.targeted.filter((r) => r.outcome === "not_applicable") : [];
+  const sNA = naRows.length;
+  const sReasons = Array.from(new Set(naRows.map((r) => r.na ?? ""))).filter(Boolean).sort().join("|");
   useEffect(() => {
-    onSummary?.(sTargeted < 0 ? null : { targeted: sTargeted, willInstall: sWill, unknown: sUnknown });
-  }, [sTargeted, sWill, sUnknown]); // eslint-disable-line react-hooks/exhaustive-deps
+    onSummary?.(sTargeted < 0 ? null : { targeted: sTargeted, willInstall: sWill, unknown: sUnknown, notApplicable: sNA, naReasons: sReasons ? sReasons.split("|") : [] });
+  }, [sTargeted, sWill, sUnknown, sNA, sReasons]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => () => onSummary?.(null), []); // eslint-disable-line react-hooks/exhaustive-deps
   if (!view) return null;
   return <PreviewBody pkg={pkg} rings={rings} {...view} />;

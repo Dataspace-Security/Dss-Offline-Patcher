@@ -121,15 +121,20 @@ type fleetStatusRow struct {
 	Catalog   *catalogLink         `json:"catalog"`
 	Requested *store.AcqRequestRef `json:"requested"`
 	// Importable / ImportableReason: as on GET /api/updates and the Library.
-	Importable       string                `json:"importable"`
-	ImportableReason string                `json:"importable_reason"`
-	UpToDate         int                   `json:"up_to_date"`
-	Outdated         int                   `json:"outdated"`
-	BeingPatched     int                   `json:"being_patched"`
-	Verified         int                   `json:"verified"`
-	Failed           int                   `json:"failed"`
-	Exception        int                   `json:"exception"`
-	Endpoints        []fleetStatusEndpoint `json:"endpoints"`
+	Importable       string `json:"importable"`
+	ImportableReason string `json:"importable_reason"`
+	UpToDate         int    `json:"up_to_date"`
+	Outdated         int    `json:"outdated"`
+	BeingPatched     int    `json:"being_patched"`
+	Verified         int    `json:"verified"`
+	Failed           int    `json:"failed"`
+	Exception        int    `json:"exception"`
+	// Uncovered / UncoveredBuilds: as on GET /api/updates (machines needing
+	// it that no catalog package applies to, e.g. 25H2 with only the 24H2
+	// package of a shared KB). Import stays offered for them.
+	Uncovered       int                   `json:"uncovered"`
+	UncoveredBuilds []int                 `json:"uncovered_builds,omitempty"`
+	Endpoints       []fleetStatusEndpoint `json:"endpoints"`
 }
 
 type fleetStatus struct {
@@ -248,11 +253,14 @@ func (s *Server) fleetStatus(ctx context.Context) (fleetStatus, error) {
 	for _, u := range snap.all {
 		cat := u.statusCatalog()
 		row := fleetStatusRow{Kind: u.Kind, Key: u.Key, Name: u.Name, Latest: u.Latest, Catalog: cat, Requested: refFor(refs, u.Kind, u.Key),
-			Importable: u.Importable, ImportableReason: u.ImportableReason,
+			Importable: u.Importable, ImportableReason: u.ImportableReason, Uncovered: u.Uncovered, UncoveredBuilds: u.UncoveredBuilds,
 			Endpoints: make([]fleetStatusEndpoint, 0, len(u.Endpoints)+len(u.current))}
 		add := func(n fleetNeed, outdated bool) {
 			var st store.TargetStatus
-			if cat != nil {
+			switch {
+			case n.PackageID != "":
+				st = ft.Status(n.PackageID, n.EndpointID) // the package for its build
+			case cat != nil && (u.Kind == "app" || !outdated):
 				st = ft.Status(cat.PackageID, n.EndpointID)
 			}
 			e := fleetStatusEndpoint{EndpointID: n.EndpointID, Hostname: n.Hostname, Status: endpointStatus(st, outdated), Installed: n.Installed}

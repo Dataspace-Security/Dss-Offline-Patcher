@@ -108,6 +108,14 @@ func osArch() string {
 // inventoryTTL or after an install, not at every check-in.
 const kbScript = `ConvertTo-Json -Compress @(Get-CimInstance -ClassName Win32_QuickFixEngineering | ForEach-Object { [string]$_.HotFixID })`
 
+// appxScript lists Microsoft Store / MSIX apps installed for any user:
+// main packages only (no frameworks, resource or bundle parts) and not the
+// ones signed as part of Windows itself. Shown in the inventory; the update
+// intelligence does not match them (the Store updates them).
+const appxScript = `ConvertTo-Json -Compress @(Get-AppxPackage -AllUsers -PackageTypeFilter Main -ErrorAction SilentlyContinue |
+  Where-Object { -not $_.IsFramework -and $_.SignatureKind -ne 'System' } |
+  ForEach-Object { @{ id = [string]$_.PackageFamilyName; name = [string]$_.Name; version = [string]$_.Version } })`
+
 var uninstallKeys = []string{
 	`SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall`,
 	`SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall`,
@@ -139,7 +147,19 @@ func (w *Windows) Inventory() ([]store.InventoryItem, bool, error) {
 	if err != nil {
 		return nil, false, fmt.Errorf("inventory: %w", err)
 	}
-	return append(items, mergeUserInventory(prods, userProducts())...), rebootPending(), nil
+	items = append(items, mergeUserInventory(prods, userProducts())...)
+	return append(items, storeApps(ctx)...), rebootPending(), nil
+}
+
+// storeApps is the Microsoft Store / MSIX part of the inventory. Best
+// effort: if PowerShell cannot list them (Server Core, policy), the rest of
+// the inventory is still reported.
+func storeApps(ctx context.Context) []store.InventoryItem {
+	out, err := powershell(ctx, appxScript)
+	if err != nil {
+		return nil
+	}
+	return parseStoreApps(out)
 }
 
 var productKeyRe = regexp.MustCompile(`^\{[0-9A-Fa-f-]{36}\}$`)

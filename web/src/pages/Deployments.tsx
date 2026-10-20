@@ -51,7 +51,7 @@ export function DeploymentList() {
       {data && data.length === 0 && (
         <Empty>
           No deployments yet.{" "}
-          <Link to={`${paths.catalog()}?state=approved&needed=1`}>
+          <Link to={`${paths.catalog()}?state=approved`}>
             Catalog · approved &amp; needed{fleet.data && pkgs.data ? ` (${readyCount})` : ""}
           </Link>{" "}
           — open a package there and use <b>Patch this…</b>.

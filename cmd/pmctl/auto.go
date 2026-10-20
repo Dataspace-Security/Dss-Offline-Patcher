@@ -113,6 +113,16 @@ type autoMSProd struct {
 	MinSeverity string `json:"min_severity"`
 }
 
+// idSuffix is PackageSuffix, or for a product pinned to one build that
+// shares KB numbers with another (25H2 with 24H2), the build: so both
+// builds' packages of one KB get different IDs.
+func (p autoMSProd) idSuffix() string {
+	if p.PackageSuffix == "" && p.MinBuild > 0 && p.MinBuild == p.MaxBuild {
+		return acqpolicy.KBPackageSuffix(p.MSRCProduct, false, p.MinBuild)
+	}
+	return p.PackageSuffix
+}
+
 type autoSource struct {
 	URL      string `json:"url"`       // https; {version} is substituted for checksum URLs
 	Regex    string `json:"regex"`     // first capture group (or whole match)

@@ -281,25 +281,41 @@ func buildAcqRequest(updates []*fleetUpdate, li *libIndex, body acqRequestBody) 
 			continue
 		}
 		seen["os\x00"+u.Key] = true
-		arches := make([]string, 0, len(u.releases))
-		for a := range u.releases {
-			arches = append(arches, a)
+		keys := make([]string, 0, len(u.releases))
+		for k := range u.releases {
+			keys = append(keys, k)
 		}
-		sort.Strings(arches)
-		for _, a := range arches {
-			rel := u.releases[a]
+		sort.Strings(keys)
+		// One entry per architecture and build the fleet needs. Builds the
+		// catalog already has a package for are left out unless every build
+		// is covered (a re-request), so a 25H2 request does not fetch the
+		// 24H2 package of the same KB again.
+		var all, uncovered []acqrequest.KB
+		for _, k := range keys {
+			rel := u.releases[k]
 			if !acqrequest.ValidArch(strings.ToLower(rel.Arch)) {
 				continue
 			}
-			n := 0
+			n, open := 0, 0
 			for _, e := range u.Endpoints {
-				if strings.EqualFold(e.arch, rel.Arch) {
+				if strings.EqualFold(e.arch, rel.Arch) && (rel.Build == 0 || e.build == rel.Build) {
 					n++
+					if e.PackageID == "" {
+						open++
+					}
 				}
 			}
-			req.KBs = append(req.KBs, acqrequest.KB{KB: strings.ToUpper(rel.KB), Product: acqrequest.CleanText(rel.Product), Title: acqrequest.CleanText(rel.Title),
-				Build: rel.Build, Arch: strings.ToLower(rel.Arch), Server: rel.Server, Endpoints: n})
+			kb := acqrequest.KB{KB: strings.ToUpper(rel.KB), Product: acqrequest.CleanText(rel.Product), Title: acqrequest.CleanText(rel.Title),
+				Build: rel.Build, Arch: strings.ToLower(rel.Arch), Server: rel.Server, Endpoints: n}
+			all = append(all, kb)
+			if open > 0 {
+				uncovered = append(uncovered, kb)
+			}
 		}
+		if len(uncovered) > 0 {
+			all = uncovered
+		}
+		req.KBs = append(req.KBs, all...)
 	}
 	if len(refused) > 0 {
 		// The Library already knows the acquisition zone would refuse these

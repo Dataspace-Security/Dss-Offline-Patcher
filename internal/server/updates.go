@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -147,8 +148,17 @@ type catalogLink struct {
 // is installed.
 type catalogIndex struct {
 	byKB           map[string]catalogLink
+	kbPkgs         map[string][]kbPackage // every package of a KB with its applicability
 	byCode, byName map[string]namedPackage
 	byID           map[string]catalogLink // every package by package_id (Library: pmctl's winget package ids)
+}
+
+// kbPackage is one Windows update package and the builds it applies to. One
+// KB number can name several packages: Windows 11 24H2 (26100) and 25H2
+// (26200) share KB numbers, and so do 22H2 and 23H2.
+type kbPackage struct {
+	link catalogLink
+	pkg  store.Package
 }
 
 type namedPackage struct {
@@ -161,7 +171,7 @@ func (s *Server) catalogIndex(ctx context.Context) (*catalogIndex, error) {
 	if err != nil {
 		return nil, err
 	}
-	ci := &catalogIndex{byKB: map[string]catalogLink{}, byCode: map[string]namedPackage{}, byName: map[string]namedPackage{}, byID: map[string]catalogLink{}}
+	ci := &catalogIndex{byKB: map[string]catalogLink{}, kbPkgs: map[string][]kbPackage{}, byCode: map[string]namedPackage{}, byName: map[string]namedPackage{}, byID: map[string]catalogLink{}}
 	// keep the newest version per product; on a tie, the approved one.
 	keep := func(m map[string]namedPackage, k string, p store.Package) {
 		cur, ok := m[k]
@@ -176,6 +186,7 @@ func (s *Server) catalogIndex(ctx context.Context) (*catalogIndex, error) {
 			if cur, ok := ci.byKB[strings.ToUpper(p.KB)]; !ok || cur.State != "approved" {
 				ci.byKB[strings.ToUpper(p.KB)] = catalogLink{PackageID: p.PackageID, State: p.State}
 			}
+			ci.kbPkgs[strings.ToUpper(p.KB)] = append(ci.kbPkgs[strings.ToUpper(p.KB)], kbPackage{catalogLink{PackageID: p.PackageID, State: p.State}, p})
 		}
 		if p.ProductCode != "" {
 			keep(ci.byCode, strings.ToLower(p.ProductCode), p)
@@ -215,6 +226,23 @@ func (ci *catalogIndex) forOS(kb string) *catalogLink {
 		return &l
 	}
 	return nil
+}
+
+// forOSAt is the package of kb that applies to endpoint e (an approved one
+// first), or nil: a 24H2 package is no answer for a 25H2 machine even though
+// both updates carry the same KB number. Same rule as deployments use.
+func (ci *catalogIndex) forOSAt(kb string, e store.Endpoint) *catalogLink {
+	var found *catalogLink
+	for _, p := range ci.kbPkgs[strings.ToUpper(kb)] {
+		if ok, _ := store.Applicable(p.pkg, e); !ok {
+			continue
+		}
+		if found == nil || (found.State != "approved" && p.link.State == "approved") {
+			l := p.link
+			found = &l
+		}
+	}
+	return found
 }
 
 func (ci *catalogIndex) forApp(u intel.AppUpdate) *catalogLink {
@@ -324,7 +352,7 @@ func (s *Server) endpointUpdates(w http.ResponseWriter, r *http.Request) {
 		res := ix.Match(toIntelEndpoint(e.Endpoint, e.Inventory))
 		out.Current, out.Unmatched = res.Current, res.Unmatched
 		for _, u := range res.OS {
-			out.OS = append(out.OS, osUpdateView{OSUpdate: u, Catalog: ci.forOS(u.KB), Requested: refFor(refs, "os", u.KB)})
+			out.OS = append(out.OS, osUpdateView{OSUpdate: u, Catalog: ci.forOSAt(u.KB, e.Endpoint), Requested: refFor(refs, "os", u.KB)})
 		}
 		for _, u := range res.Apps {
 			imp, why := importableFor(ix, "app", u.AppID, u.LatestVersion, []string{strings.ToLower(e.Arch)})
@@ -349,10 +377,15 @@ type fleetUpdate struct {
 	// and requests for them are refused.
 	Importable       string `json:"importable"`
 	ImportableReason string `json:"importable_reason"`
+	// Uncovered: endpoints needing it that no catalog package applies to
+	// (Windows: the catalog has the KB only for another build, e.g. the 24H2
+	// package of a KB 25H2 shares). Their builds go in UncoveredBuilds.
+	Uncovered       int   `json:"uncovered"`
+	UncoveredBuilds []int `json:"uncovered_builds,omitempty"`
 
 	// For acquisition requests (not shown): the Windows release, and the
 	// architectures and installed forms of an app seen across the fleet.
-	releases  map[string]intel.WindowsRelease // by architecture (a KB can cover x64 and arm64)
+	releases  map[string]intel.WindowsRelease // by architecture and build (a KB can cover x64 and arm64, 24H2 and 25H2)
 	arches    map[string]bool
 	installed map[acqrequest.Installed]bool
 	// For fleet status (not shown): endpoints that already have it, and the
@@ -361,10 +394,61 @@ type fleetUpdate struct {
 	currentCat *catalogLink
 }
 
+// releaseKey keys fleetUpdate.releases.
+func releaseKey(arch string, build int) string {
+	return strings.ToLower(arch) + "/" + strconv.Itoa(build)
+}
+
+// linkCatalog sets the row's package and its uncovered endpoints. Windows
+// rows link to the package that applies to most endpoints needing the KB
+// (approved first), so "Patch this" never offers a package that applies to
+// none of them; app rows keep the package forApp found.
+func (u *fleetUpdate) linkCatalog(ci *catalogIndex) {
+	builds := map[int]bool{}
+	u.Uncovered, u.UncoveredBuilds = 0, nil
+	for _, n := range u.Endpoints {
+		if n.PackageID == "" {
+			u.Uncovered++
+			if u.Kind == "os" && n.build > 0 && !builds[n.build] {
+				builds[n.build] = true
+				u.UncoveredBuilds = append(u.UncoveredBuilds, n.build)
+			}
+		}
+	}
+	sort.Ints(u.UncoveredBuilds)
+	if u.Kind != "os" || len(u.Endpoints) == 0 {
+		return
+	}
+	count := map[string]int{}
+	for _, n := range u.Endpoints {
+		if n.PackageID != "" {
+			count[n.PackageID]++
+		}
+	}
+	u.Catalog = nil
+	for id, c := range count {
+		l := ci.byID[id]
+		if u.Catalog == nil {
+			u.Catalog = &l
+			continue
+		}
+		best := count[u.Catalog.PackageID]
+		better := (l.State == "approved") != (u.Catalog.State == "approved") && l.State == "approved"
+		if better || ((l.State == "approved") == (u.Catalog.State == "approved") && (c > best || (c == best && id < u.Catalog.PackageID))) {
+			u.Catalog = &l
+		}
+	}
+}
+
 // statusCatalog is the package whose targets decide fleet status.
 func (u *fleetUpdate) statusCatalog() *catalogLink {
 	if u.Catalog != nil {
 		return u.Catalog
+	}
+	if u.Kind == "os" && len(u.Endpoints) > 0 {
+		// Machines need the KB but no package applies to their build: the
+		// package other builds installed is no offer for them.
+		return nil
 	}
 	return u.currentCat
 }
@@ -373,7 +457,11 @@ type fleetNeed struct {
 	EndpointID string `json:"endpoint_id"`
 	Hostname   string `json:"hostname"`
 	Installed  string `json:"installed"`
-	arch       string
+	// PackageID: the catalog package that applies to this endpoint ("" =
+	// none; for Windows updates the package must match its build).
+	PackageID string `json:"package_id,omitempty"`
+	arch      string
+	build     int
 }
 
 // fleetSnapshot is the matcher's view of the whole fleet. Shared: read only.
@@ -467,26 +555,33 @@ func buildFleet(ix *intel.Index, ci *catalogIndex, eps []store.Endpoint) *fleetS
 		support, last := ix.OSSupport(ie)
 		snap.perEP[e.EndpointID] = store.EndpointMissing{OS: len(res.OS), Apps: len(res.Apps), OSSupport: support, OSLastUpdate: last}
 		for _, o := range res.OS {
-			u := get("os", o.KB, o.Title, o.KB, ci.forOS(o.KB))
-			if cur, ok := u.releases[o.Arch]; ok && cur.Build != o.Build {
-				o.Build = 0 // one KB for several builds (e.g. 22H2 and 23H2): do not pin the build
-			}
+			cat := ci.forOSAt(o.KB, e)
+			u := get("os", o.KB, o.Title, o.KB, nil)
 			if u.releases == nil {
 				u.releases = map[string]intel.WindowsRelease{}
 			}
-			u.releases[o.Arch] = o.WindowsRelease
-			u.Endpoints = append(u.Endpoints, fleetNeed{EndpointID: e.EndpointID, Hostname: e.Hostname, Installed: e.OSVersion, arch: e.Arch})
+			u.releases[releaseKey(o.Arch, o.Build)] = o.WindowsRelease
+			n := fleetNeed{EndpointID: e.EndpointID, Hostname: e.Hostname, Installed: e.OSVersion, arch: e.Arch, build: e.Build}
+			if cat != nil {
+				n.PackageID = cat.PackageID
+			}
+			u.Endpoints = append(u.Endpoints, n)
 		}
 		for _, a := range res.Apps {
-			u := get("app", a.AppID, a.Name, a.LatestVersion, ci.forApp(a))
+			cat := ci.forApp(a)
+			u := get("app", a.AppID, a.Name, a.LatestVersion, cat)
 			u.arches[strings.ToLower(e.Arch)] = true
 			u.installed[acqrequest.Installed{ProductCode: a.ProductCode, Name: a.InstalledName, Version: a.InstalledVersion}] = true
-			u.Endpoints = append(u.Endpoints, fleetNeed{EndpointID: e.EndpointID, Hostname: e.Hostname, Installed: a.InstalledVersion, arch: e.Arch})
+			n := fleetNeed{EndpointID: e.EndpointID, Hostname: e.Hostname, Installed: a.InstalledVersion, arch: e.Arch, build: e.Build}
+			if cat != nil {
+				n.PackageID = cat.PackageID
+			}
+			u.Endpoints = append(u.Endpoints, n)
 		}
 		for _, w := range res.CurrentOS {
 			u := get("os", w.KB, w.Title, w.KB, nil)
 			if u.currentCat == nil {
-				u.currentCat = ci.forOS(w.KB)
+				u.currentCat = ci.forOSAt(w.KB, e)
 			}
 			u.current = append(u.current, fleetNeed{EndpointID: e.EndpointID, Hostname: e.Hostname, Installed: e.OSVersion, arch: e.Arch})
 		}
@@ -500,6 +595,7 @@ func buildFleet(ix *intel.Index, ci *catalogIndex, eps []store.Endpoint) *fleetS
 	}
 	snap.byKey = agg
 	for _, u := range agg {
+		u.linkCatalog(ci)
 		u.Importable, u.ImportableReason = importableFor(ix, u.Kind, u.Key, u.Latest, u.fleetArches())
 		snap.all = append(snap.all, u)
 	}

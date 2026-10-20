@@ -10,7 +10,7 @@ import (
 )
 
 type InventoryItem struct {
-	Kind    string `json:"kind"` // "kb" | "product"
+	Kind    string `json:"kind"` // "kb" | "product" | "appx" (Windows Store/MSIX) | macOS kinds
 	ID      string `json:"id"`
 	Name    string `json:"name"`
 	Version string `json:"version"`

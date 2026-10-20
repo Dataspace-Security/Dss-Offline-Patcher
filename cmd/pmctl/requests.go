@@ -36,6 +36,7 @@ import (
 	"strings"
 	"time"
 
+	"offpatch/internal/acqpolicy"
 	"offpatch/internal/acqrequest"
 	"offpatch/internal/acqstatus"
 	"offpatch/internal/acquire"
@@ -354,7 +355,7 @@ func (r *requestRun) fetchKB(k acqrequest.KB) error {
 		}
 	}
 	res, err := acquire.FetchKB(r.ctx, r.cat, r.ms, acquire.FetchKBOptions{KB: k.KB, Product: prod, Arch: k.Arch, MinBuild: k.Build, MaxBuild: k.Build,
-		PackageID: k.KB + "-" + k.Arch, OutDir: r.downloads, SpecPath: r.spec, RecordUBR: r.c.ExpectedUBR, ExpectedUBR: r.st.WindowsUBR[k.KB+"/"+strconv.Itoa(k.Build)],
+		PackageID: k.KB + "-" + k.Arch + acqpolicy.KBPackageSuffix(prod, k.Server, k.Build), OutDir: r.downloads, SpecPath: r.spec, RecordUBR: r.c.ExpectedUBR, ExpectedUBR: r.st.WindowsUBR[k.KB+"/"+strconv.Itoa(k.Build)],
 		SkipPrerequisite: func(id string) bool {
 			_, done := r.st.Done[id]
 			return done || slices.Contains(r.rep.New, id)

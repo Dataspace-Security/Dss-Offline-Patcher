@@ -38,7 +38,9 @@ export default function Catalog({ agents = false }: { agents?: boolean }) {
   const state = sp.get("state") ?? "";
   const kind = (agents ? "" : sp.get("kind") ?? "") as KindFilter;
   const pathOf = agents ? paths.agentVersions : paths.catalog;
-  const onlyNeeded = sp.get("needed") === "1";
+  // Packages no machine needs are hidden by default (needed=all shows them);
+  // Agent versions always lists everything.
+  const onlyNeeded = !agents && sp.get("needed") !== "all";
   const { packageId } = useParams();
   const navigate = useNavigate();
   const list = useLoad(() => api.get<Package[]>(`/api/packages${qs({ state })}`), [state], 30000);
@@ -51,7 +53,16 @@ export default function Catalog({ agents = false }: { agents?: boolean }) {
   const all = (list.data ?? []).filter((p) => isAgentPackage(p) === agents);
   const kindCount = (k: KindFilter) => all.filter((p) => !k || kindGroup(p.kind) === k).length;
   const fleetOf = (id: string): PackageFleet | undefined => needs.data?.[id];
-  const rows = all.filter((p) => (!kind || kindGroup(p.kind) === kind) && (!onlyNeeded || (fleetOf(p.package_id)?.needed ?? 0) > 0));
+  // In use: some machine needs it, or a deployment of it is running or failed somewhere.
+  const inUse = (p: Package) => {
+    const f = fleetOf(p.package_id);
+    return !!f && ((f.needed ?? 0) > 0 || (f.deploying ?? 0) > 0 || (f.failed ?? 0) > 0);
+  };
+  // Until fleet status loads (or if it fails) nothing is hidden.
+  const filterNeeded = onlyNeeded && !!needs.data;
+  const ofKind = all.filter((p) => !kind || kindGroup(p.kind) === kind);
+  const rows = ofKind.filter((p) => !filterNeeded || inUse(p) || p.package_id === packageId);
+  const hiddenCount = ofKind.length - rows.length;
   const num = (id: string, f: (x: PackageFleet) => number) => (needs.data ? (fleetOf(id) ? f(fleetOf(id)!) : 0) : undefined);
 
   const select = (id: string | null) =>
@@ -71,9 +82,11 @@ export default function Catalog({ agents = false }: { agents?: boolean }) {
               {STATES.map((s) => <option key={s} value={s}>{s}</option>)}
             </select>
           </label>
-          <label className="check" title="Only packages that at least one endpoint still needs">
-            <input type="checkbox" checked={onlyNeeded} onChange={(e) => setParam("needed", e.target.checked ? "1" : "")} /> needed only
-          </label>
+          {!agents && (
+            <label className="check" title="Only packages that at least one endpoint still needs (or that are being deployed)">
+              <input type="checkbox" checked={onlyNeeded} onChange={(e) => setParam("needed", e.target.checked ? "" : "all")} /> needed only
+            </label>
+          )}
         </div>
       </PageHeader>
       {!agents && <div className="chips">
@@ -98,6 +111,12 @@ export default function Catalog({ agents = false }: { agents?: boolean }) {
           )}
           {list.data && (all.length > 0 || !!state) && rows.length === 0 && (
             <Empty>No packages match{state ? ` state “${state}”` : ""}{kind ? ` · ${kind}` : ""}{onlyNeeded ? " · needed" : ""}.</Empty>
+          )}
+          {filterNeeded && hiddenCount > 0 && (
+            <div className="hint">
+              {hiddenCount} package{hiddenCount === 1 ? "" : "s"} no machine needs {hiddenCount === 1 ? "is" : "are"} hidden (up to date, not installed or not applicable everywhere).{" "}
+              <button type="button" className="btn btn-sm" onClick={() => setParam("needed", "all")}>Show {hiddenCount === 1 ? "it" : "them"}</button>
+            </div>
           )}
           {rows.length > 0 && (
             <table className="table">

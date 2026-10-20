@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"offpatch/internal/intel"
+	"offpatch/internal/manifest"
+	"offpatch/internal/store"
 )
 
 // The x86 and x64 builds of one product normalize to the same name: the
@@ -38,5 +40,51 @@ func TestCatalogLinkArchlessPackage(t *testing.T) {
 	ci.byName[nameKey(intel.Normalize("7-Zip"), "7-Zip")] = namedPackage{link: catalogLink{PackageID: "7zip", State: "approved"}, version: "26.04"}
 	if got := ci.forApp(intel.AppUpdate{InstalledName: "7-Zip 26.03 (x64 edition)", InstalledVersion: "26.03.00.0"}); got == nil || got.PackageID != "7zip" {
 		t.Errorf("7-Zip (x64 edition) not linked to the arch-less 7-Zip package: %+v", got)
+	}
+}
+
+// Windows 11 24H2 (26100) and 25H2 (26200) share KB numbers. A catalog with
+// only the 24H2 package must not show 25H2 machines the KB as "in catalog"
+// (lab: Patch this then said 0 machines will install).
+func TestKBLinkFollowsBuild(t *testing.T) {
+	ci := &catalogIndex{byKB: map[string]catalogLink{}, kbPkgs: map[string][]kbPackage{}, byCode: map[string]namedPackage{}, byName: map[string]namedPackage{}, byID: map[string]catalogLink{}}
+	add := func(id, state string, build int) {
+		p := store.Package{PackageID: id, State: state, KB: "KB5127648",
+			Applicability: manifest.Applicability{OS: "windows", Arch: "x64", MinBuild: build, MaxBuild: build}}
+		l := catalogLink{PackageID: id, State: state}
+		ci.byID[id] = l
+		ci.kbPkgs["KB5127648"] = append(ci.kbPkgs["KB5127648"], kbPackage{l, p})
+	}
+	add("KB5127648-x64", "approved", 26100)
+	ep := func(build int) store.Endpoint { return store.Endpoint{OS: "windows", Arch: "x64", Build: build} }
+
+	if got := ci.forOSAt("kb5127648", ep(26100)); got == nil || got.PackageID != "KB5127648-x64" {
+		t.Fatalf("24H2 machine not linked: %+v", got)
+	}
+	if got := ci.forOSAt("KB5127648", ep(26200)); got != nil {
+		t.Fatalf("25H2 machine linked to the 24H2 package: %+v", got)
+	}
+
+	row := &fleetUpdate{Kind: "os", Key: "KB5127648", Endpoints: []fleetNeed{
+		{EndpointID: "a", build: 26200}, {EndpointID: "b", build: 26200},
+	}}
+	row.linkCatalog(ci)
+	if row.Catalog != nil || row.Uncovered != 2 || len(row.UncoveredBuilds) != 1 || row.UncoveredBuilds[0] != 26200 {
+		t.Fatalf("25H2-only row: catalog %+v uncovered %d builds %v", row.Catalog, row.Uncovered, row.UncoveredBuilds)
+	}
+
+	// With the 25H2 package imported (its own ID), each build gets its own.
+	add("KB5127648-x64-26200", "quarantined", 26200)
+	if got := ci.forOSAt("KB5127648", ep(26200)); got == nil || got.PackageID != "KB5127648-x64-26200" {
+		t.Fatalf("25H2 machine not linked to the 25H2 package: %+v", got)
+	}
+	row = &fleetUpdate{Kind: "os", Key: "KB5127648", Endpoints: []fleetNeed{
+		{EndpointID: "a", build: 26200, PackageID: "KB5127648-x64-26200"},
+		{EndpointID: "b", build: 26200, PackageID: "KB5127648-x64-26200"},
+		{EndpointID: "c", build: 26100, PackageID: "KB5127648-x64"},
+	}}
+	row.linkCatalog(ci)
+	if row.Catalog == nil || row.Catalog.PackageID != "KB5127648-x64" || row.Uncovered != 0 {
+		t.Fatalf("mixed row should prefer the approved package: %+v uncovered %d", row.Catalog, row.Uncovered)
 	}
 }

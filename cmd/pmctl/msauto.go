@@ -148,7 +148,7 @@ func (r *msRun) candidates() (cands []msCand, superseded map[string]string, msrc
 				for _, s := range fu.Supersedes {
 					superseded[strings.ToUpper(s)] = fu.KB
 				}
-				id := fu.KB + "-" + p.Arch + p.PackageSuffix
+				id := fu.KB + "-" + p.Arch + p.idSuffix()
 				if seen[id] {
 					continue
 				}
@@ -196,7 +196,7 @@ func (r *msRun) delivered(id string) bool {
 
 func (r *msRun) feeds(cands []msCand, msrcErr string) {
 	for _, p := range r.c.Microsoft.Products {
-		name := p.MSRCProduct + " " + p.Arch + p.PackageSuffix
+		name := p.MSRCProduct + " " + p.Arch + p.idSuffix()
 		var kbs, fresh, failed []string
 		for _, cd := range cands {
 			if cd.p != p {

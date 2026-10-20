@@ -570,6 +570,10 @@ func ringFor(rings []Ring, groups []string, endpointID string) int {
 	return -1
 }
 
+// Applicable reports whether package p applies to endpoint e and, if not, why
+// (the rule deployments resolve targets with).
+func Applicable(p Package, e Endpoint) (bool, string) { return applicable(p, e) }
+
 func applicable(p Package, e Endpoint) (bool, string) {
 	a := p.Applicability
 	if !strings.EqualFold(e.OS, a.OS) {

@@ -340,10 +340,7 @@ func applyPolicy(c *autoConfig, pr *policyRun) {
 			if k, ok := acqpolicy.LookupKnown(w.Product, w.Build, w.Arch); ok {
 				catProd = k.CatalogProduct
 			}
-			suffix := ""
-			if acqpolicy.IsServer(w.Product) {
-				suffix = "-server" // shares KB numbers with the client release of the same build
-			}
+			suffix := acqpolicy.KBPackageSuffix(w.Product, false, w.Build) // Server and 25H2/23H2 share KB numbers
 			c.Microsoft.Products = append(c.Microsoft.Products, autoMSProd{MSRCProduct: w.Product, CatalogProduct: catProd, Arch: w.Arch,
 				MinBuild: w.Build, MaxBuild: w.Build, MinSeverity: sev, PackageSuffix: suffix})
 			r.Detail = "added by the policy"

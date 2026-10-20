@@ -27,6 +27,22 @@ const NAMES_SHOWN = 5;
 const rowKey = (r: { kind: string; key: string }) => `${r.kind}:${r.key.toLowerCase()}`;
 const BULK = "__bulk__";
 
+/** "build 26200" / "builds 22631, 26200" / "their build". */
+function buildsText(builds: number[] | undefined): string {
+  if (!builds?.length) return "their build";
+  return `build${builds.length === 1 ? "" : "s"} ${builds.join(", ")}`;
+}
+
+/** The catalog package covers only some of the Windows builds that need this KB. */
+function UncoveredNote({ r }: { r: FleetStatusRow }) {
+  const n = r.uncovered ?? 0;
+  return (
+    <div className="small text-amber" title="Windows releases such as 24H2 and 25H2 share KB numbers but need different packages">
+      {n} machine{n === 1 ? "" : "s"} on {buildsText(r.uncovered_builds)} can't use this package: import the update for {n === 1 ? "its" : "their"} build
+    </div>
+  );
+}
+
 /** One endpoint per endpoint_id (an app with two Apps & features entries reports the machine twice). */
 function uniqueEndpoints<T extends { endpoint_id: string }>(list: T[]): T[] {
   const seen = new Set<string>();
@@ -49,6 +65,8 @@ function groupRows(rows: FleetStatusRow[]): FleetStatusRow[] {
       catalog: prev.catalog ?? r.catalog,
       requested: !prev.requested ? r.requested : !r.requested ? prev.requested : prev.requested.at >= r.requested.at ? prev.requested : r.requested,
       importable: prev.importable ?? r.importable, importable_reason: prev.importable_reason ?? r.importable_reason,
+      uncovered: (prev.uncovered ?? 0) + (r.uncovered ?? 0),
+      uncovered_builds: Array.from(new Set([...(prev.uncovered_builds ?? []), ...(r.uncovered_builds ?? [])])).sort(),
       up_to_date: prev.up_to_date + r.up_to_date, outdated: prev.outdated + r.outdated, being_patched: prev.being_patched + r.being_patched,
       verified: prev.verified + r.verified, failed: prev.failed + r.failed, exception: prev.exception + r.exception,
       endpoints: uniqueEndpoints([...(prev.endpoints ?? []), ...(r.endpoints ?? [])]),
@@ -89,7 +107,9 @@ export default function PatchUpdates() {
   // What the Library knows about importing each app (super admin; others rely on the row fields).
   const library = useLibraryImportability(isSuper);
   const infoOf = (r: FleetStatusRow): ImportInfo => importInfoOf(r, library);
-  const requestable = (r: FleetStatusRow) => isRequestable(r.catalog, r.requested, infoOf(r));
+  // A Windows row whose package covers only some builds stays importable for the others.
+  const requestable = (r: FleetStatusRow) => isRequestable(r.catalog, r.requested, infoOf(r))
+    || (r.kind === "os" && (r.uncovered ?? 0) > 0 && cantImportReason(infoOf(r), r.requested) === null);
   const intel = status.data?.intel ?? null;
   // Endpoints that still need each update (names for the list).
   const neededBy = useMemo(() => {
@@ -257,10 +277,18 @@ export default function PatchUpdates() {
                     <td onClick={(e) => e.stopPropagation()}>
                       <div className="fs-catalog">
                         <CatalogState link={r.catalog} />
-                        {r.requested && r.catalog && <div><RequestedPill r={r.requested} /></div>}                      </div>
+                        {r.requested && r.catalog && <div><RequestedPill r={r.requested} /></div>}
+                        {r.catalog && (r.uncovered ?? 0) > 0 && <UncoveredNote r={r} />}
+                      </div>
                     </td>
                     <td><FleetBar r={r} /></td>
                     <td className="right" onClick={(e) => e.stopPropagation()}>
+                      {r.catalog && r.kind === "os" && (r.uncovered ?? 0) > 0 && requestable(r) && (
+                        <button type="button" className="btn btn-sm" disabled={busy !== null} onClick={() => void sendRequest([r], key)}
+                                title="Import the update for the Windows builds the catalog package does not cover">
+                          {busy === key ? "Sending…" : `Import for ${buildsText(r.uncovered_builds)}`}
+                        </button>
+                      )}{" "}
                       {needsAction(r) || r.catalog
                         ? <PipelineAction link={r.catalog} requested={r.requested} fleet={r.catalog ? fleet.data?.[r.catalog.package_id] : undefined}
                                           onPatch={setPatching} importInfo={infoOf(r)}

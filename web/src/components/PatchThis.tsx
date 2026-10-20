@@ -80,6 +80,11 @@ export function AlreadyRunning({ deploymentId, onOpen }: { deploymentId: string;
   );
 }
 
+/** True when every machine in the stages is outside the package's applicability (e.g. a 24H2 package and 25H2 machines). */
+function notApplicableToAll(s: TargetSummary | null): boolean {
+  return !!s && s.targeted > 0 && (s.notApplicable ?? 0) === s.targeted;
+}
+
 /** Guided drawer: approve (if needed) → choose a preset → preview → create. */
 export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThisProps) {
   const navigate = useNavigate();
@@ -177,7 +182,9 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
   if (preset === "standard" && pilotEmpty) problems.push("No test machines: no endpoint is in group pilot. Choose Every compatible machine that needs it, or put 2–5 machines in group pilot first.");
   if (preset === "emergency" && !justification.trim()) problems.push("Emergency deployments require a justification.");
   if (epsL.data && counts.every((c) => c === 0)) problems.push("No endpoint is in these stages.");
-  else if (nothingToDo(summary)) problems.push("Nothing to do: every machine is already up to date or doesn't need it.");
+  else if (nothingToDo(summary)) problems.push(notApplicableToAll(summary)
+    ? `This package doesn't apply to any machine in these stages (${summary!.naReasons?.join("; ") || "not applicable"}). Nothing can be installed: import the update built for their Windows version from Patches → Needed.`
+    : "Nothing to do: every machine is already up to date or doesn't need it.");
   // The plan (deadline, stage sizes) depends on the policy and the endpoint
   // list: never create from a half-loaded plan (e.g. silently without the
   // policy deadline).
@@ -199,10 +206,10 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
       {approved && canDeploy && !sodBlocks && runningId && (
         <Link className="btn btn-primary" to={`/deployments/${enc(runningId)}`} onClick={onClose}>Open the running deployment</Link>
       )}
-      {approved && canDeploy && !sodBlocks && !runningId && (
+      {approved && canDeploy && !sodBlocks && !runningId && !nothingToDo(summary) && (
         <span className="reason-hint" title={othersMustApprove(deployApprovals)}>{needsApprovalsText(deployApprovals)}</span>
       )}
-      {approved && canDeploy && !sodBlocks && !runningId && (
+      {approved && canDeploy && !sodBlocks && !runningId && !nothingToDo(summary) && (
         <button className={`btn ${preset === "emergency" ? "btn-danger" : "btn-primary"}`} disabled={!canCreate || busy}
                 onClick={() => void create(draft)}>
           {busy ? "Creating…" : preset === "emergency" ? "Create emergency deployment" : "Create deployment"}

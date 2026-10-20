@@ -170,3 +170,23 @@ func TestDiff(t *testing.T) {
 		t.Errorf("no change: %v", d)
 	}
 }
+
+// Builds that share KB numbers get distinct package IDs; existing IDs stay.
+func TestKBPackageSuffix(t *testing.T) {
+	for _, c := range []struct {
+		product string
+		server  bool
+		build   int
+		want    string
+	}{
+		{"Windows 11 Version 24H2 for x64-based Systems", false, 26100, ""},
+		{"Windows 11 Version 25H2 for x64-based Systems", false, 26200, "-26200"},
+		{"Windows 11 Version 23H2 for x64-based Systems", false, 22631, "-22631"},
+		{"Windows Server 2025", false, 26100, "-server"},
+		{"Windows 11 Version 24H2", true, 26100, "-server"},
+	} {
+		if got := KBPackageSuffix(c.product, c.server, c.build); got != c.want {
+			t.Errorf("%s %d: %q, want %q", c.product, c.build, got, c.want)
+		}
+	}
+}
