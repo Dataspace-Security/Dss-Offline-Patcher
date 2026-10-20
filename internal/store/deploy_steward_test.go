@@ -96,6 +96,14 @@ func TestApprovalSameSteward(t *testing.T) {
 			t.Fatalf("fresh-account alert severity %s", a.Severity)
 		}
 	}
+	// The console is told before anyone clicks Approve.
+	cur, _ := s.GetDeployment(ctx, d.DeploymentID)
+	if why := s.DeploymentApprovalBlock(ctx, cur.Deployment, "user:x2@bank.example"); !strings.Contains(why, "set up both accounts") {
+		t.Fatalf("approval block for x2: %q", why)
+	}
+	if why := s.DeploymentApprovalBlock(ctx, cur.Deployment, "user:approver-a"); why != "" {
+		t.Fatalf("approval block for an independent approver: %q", why)
+	}
 	_, err := s.ApproveDeployment(ctx, "user:x2@bank.example", RoleUser, d.DeploymentID, "ok")
 	if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "set up both accounts") {
 		t.Fatalf("second account of the same steward: %v", err)

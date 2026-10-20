@@ -184,7 +184,7 @@ type approvalRefusal struct {
 // be independent of the deployment's creator and of every earlier
 // approver. SSO accounts have no steward (the identity provider manages
 // them) and are independent unless they set up the other account.
-func (s *Store) checkSteward(ctx context.Context, tx *sql.Tx, d Deployment, actor string) (steward, *approvalRefusal, error) {
+func (s *Store) checkSteward(ctx context.Context, tx querier, d Deployment, actor string) (steward, *approvalRefusal, error) {
 	st, err := credSteward(ctx, tx, actor)
 	if err != nil {
 		return st, nil, err
@@ -228,6 +228,31 @@ func independentOfApprovers(ctx context.Context, tx querier, actor string, appro
 		}
 	}
 	return nil
+}
+
+// DeploymentApprovalBlock is why actor's approval of d would be refused by
+// the independence rule ("" when it would not), so the console can say so
+// instead of offering Approve.
+func (s *Store) DeploymentApprovalBlock(ctx context.Context, d Deployment, actor string) string {
+	if d.State != "pending_approval" {
+		return ""
+	}
+	_, why, err := s.checkSteward(ctx, s.db, d, actor)
+	if err != nil || why == nil {
+		return ""
+	}
+	return strings.TrimPrefix(why.err.Error(), ErrConflict.Error()+": ")
+}
+
+// PackageApprovalBlock is the same for a package waiting for approval.
+func (s *Store) PackageApprovalBlock(ctx context.Context, p Package, actor string) string {
+	if p.State != "quarantined" {
+		return ""
+	}
+	if err := independentOfApprovers(ctx, s.db, actor, p.Approvals); err != nil {
+		return strings.TrimPrefix(err.Error(), ErrConflict.Error()+": ")
+	}
+	return ""
 }
 
 // notIndependent says why accounts a and b (with their stewards) cannot

@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -382,6 +383,20 @@ func setupCodeCmd(args []string, out io.Writer) error {
 		return err
 	}
 	defer st.Close()
+	emailSet := false
+	fs.Visit(func(f *flag.Flag) { emailSet = emailSet || f.Name == "email" })
+	if !emailSet {
+		// The built-in account may have been created under another e-mail
+		// (install-ubuntu.sh --admin-email): pick the account that still has
+		// the default password.
+		who, err := st.DefaultSuperAdminPasswordInUse(context.Background())
+		if err != nil {
+			return err
+		}
+		if len(who) > 0 && !slices.Contains(who, store.DefaultSuperAdminEmail) {
+			*email = who[0]
+		}
+	}
 	code, expires, err := st.CreateSetupCode(context.Background(), *email)
 	if *ifNeeded && (errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConflict)) {
 		fmt.Fprintln(out, "no setup code needed:", err)

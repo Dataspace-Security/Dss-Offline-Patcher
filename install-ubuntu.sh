@@ -1710,7 +1710,7 @@ backup_keys() {
            "(bank safe / HSM / password manager, two copies), then delete it here:" \
            "  sudo cat $BACKUP_IDENTITY     (store the whole file)" \
            "  sudo shred -u $BACKUP_IDENTITY" \
-           "Restores need it: pmserver restore ... -identity <file> (runbook 05)."
+           "Also keep a copy of $SRV_DATA/audit-signing.pub with it: restore checks the"            "backup's signature with that public key before decrypting (-pub <file>)."            "Restores need it: pmserver restore ... -identity <file> (runbook 05)."
   fi
   # Backups made before encryption stay as they are (never deleted here), with a warning.
   while IFS= read -r m; do

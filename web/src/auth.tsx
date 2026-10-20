@@ -121,6 +121,7 @@ export function deploymentApprovalStatus(d: Deployment, me: Me | null, policy?: 
   else if (iApproved) whyNot = "You already approved this. Waiting for someone else.";
   else if (me?.role === "super_admin") whyNot = "Only the bank's Admins and Users approve deployments.";
   else if (!isBankApprover(me)) whyNot = "Only Admins and Users can approve deployments.";
+  else if (d.approval_block) whyNot = d.approval_block;
   return { approvals, required, mine, iApproved, canApprove: pending && whyNot === "", whyNot };
 }
 

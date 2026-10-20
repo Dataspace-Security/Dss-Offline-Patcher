@@ -122,6 +122,9 @@ function Spinner() {
  * and the server answers a missing or wrong code exactly like a wrong
  * password, so nobody learns whether the default password alone was right.
  * After the password has been changed the code is not needed and ignored.
+ * An install whose built-in account has another e-mail (--admin-email)
+ * opens the field with "I have a setup code"; a typed code is always sent
+ * (the server ignores it for other accounts).
  */
 const BUILTIN_SUPER_ADMIN_EMAIL = "superadmin@dataspacesecurity.com";
 
@@ -129,6 +132,7 @@ function PasswordForm({ onLogin, onMfa }: { onLogin: (me: Me) => void; onMfa: ()
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [setupCode, setSetupCode] = useState("");
+  const [wantCode, setWantCode] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -138,7 +142,7 @@ function PasswordForm({ onLogin, onMfa }: { onLogin: (me: Me) => void; onMfa: ()
     if (!id || !password || busy) return;
     setBusy(true);
     setError(null);
-    const body = id === BUILTIN_SUPER_ADMIN_EMAIL && setupCode.trim()
+    const body = setupCode.trim()
       ? { email: id, password, setup_code: setupCode.trim() }
       : { email: id, password };
     try {
@@ -170,7 +174,10 @@ function PasswordForm({ onLogin, onMfa }: { onLogin: (me: Me) => void; onMfa: ()
         <PasswordInput name="password" autoComplete="current-password" aria-invalid={error ? true : undefined}
                        value={password} onChange={(e) => setPassword(e.target.value)} />
       </label>
-      {normalizeEmail(email) === BUILTIN_SUPER_ADMIN_EMAIL && (
+      {normalizeEmail(email) !== BUILTIN_SUPER_ADMIN_EMAIL && !wantCode && (
+        <button type="button" className="btn-link small" onClick={() => setWantCode(true)}>I have a setup code (first sign-in)</button>
+      )}
+      {(normalizeEmail(email) === BUILTIN_SUPER_ADMIN_EMAIL || wantCode) && (
         <label className="field">
           <span>Setup code <em className="muted">first sign-in only</em></span>
           <input name="setup_code" autoComplete="one-time-code" autoCapitalize="characters" spellCheck={false}

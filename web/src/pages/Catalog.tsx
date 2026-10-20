@@ -237,8 +237,8 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
             <span className="spacer" />
             {p.state === "quarantined" && canApprove && (
               <>
-                <button className="btn btn-primary" onClick={() => setAction("approve")} disabled={alreadyApproved}
-                        title={alreadyApproved ? "You have already approved this package; someone else must approve it" : undefined}>
+                <button className="btn btn-primary" onClick={() => setAction("approve")} disabled={alreadyApproved || !!p.approval_block}
+                        title={alreadyApproved ? "You have already approved this package; someone else must approve it" : p.approval_block || undefined}>
                   Approve…
                 </button>
                 <button className="btn btn-danger" onClick={() => setAction("reject")}>Reject…</button>

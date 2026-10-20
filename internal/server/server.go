@@ -519,13 +519,28 @@ func (s *Server) getBundle(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, v)
 }
 
+// packageView is a package plus, for the signed-in user, why their approval
+// would be refused (the independence rule), so the console can say so.
+type packageView struct {
+	store.Package
+	ApprovalBlock string `json:"approval_block,omitempty"`
+}
+
+func (s *Server) packageView(r *http.Request, p store.Package) packageView {
+	return packageView{Package: p, ApprovalBlock: s.store.PackageApprovalBlock(r.Context(), p, actor(r))}
+}
+
 func (s *Server) listPackages(w http.ResponseWriter, r *http.Request) {
 	v, err := s.store.ListPackages(r.Context(), r.URL.Query().Get("state"))
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	writeJSON(w, 200, v)
+	out := make([]packageView, 0, len(v))
+	for _, p := range v {
+		out = append(out, s.packageView(r, p))
+	}
+	writeJSON(w, 200, out)
 }
 
 func (s *Server) getPackage(w http.ResponseWriter, r *http.Request) {
@@ -534,7 +549,7 @@ func (s *Server) getPackage(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	writeJSON(w, 200, v)
+	writeJSON(w, 200, s.packageView(r, v))
 }
 
 func (s *Server) packageAction(w http.ResponseWriter, r *http.Request) {
@@ -597,13 +612,24 @@ func (s *Server) createEnrollmentToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 201, v)
 }
 
+// deploymentListItem is a deployment plus why the signed-in user's
+// approval would be refused (see packageView).
+type deploymentListItem struct {
+	store.Deployment
+	ApprovalBlock string `json:"approval_block,omitempty"`
+}
+
 func (s *Server) listDeployments(w http.ResponseWriter, r *http.Request) {
 	v, err := s.store.ListDeployments(r.Context())
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	writeJSON(w, 200, v)
+	out := make([]deploymentListItem, 0, len(v))
+	for _, d := range v {
+		out = append(out, deploymentListItem{Deployment: d, ApprovalBlock: s.store.DeploymentApprovalBlock(r.Context(), d, actor(r))})
+	}
+	writeJSON(w, 200, out)
 }
 
 func (s *Server) createDeployment(w http.ResponseWriter, r *http.Request) {
@@ -628,7 +654,9 @@ func (s *Server) getDeployment(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	writeJSON(w, 200, s.withLive(v))
+	dv := s.withLive(v)
+	dv.ApprovalBlock = s.store.DeploymentApprovalBlock(r.Context(), v.Deployment, actor(r))
+	writeJSON(w, 200, dv)
 }
 
 func (s *Server) deploymentAction(w http.ResponseWriter, r *http.Request) {

@@ -143,6 +143,9 @@ type targetView struct {
 type deploymentView struct {
 	store.Deployment
 	Targets []targetView `json:"targets"`
+	// ApprovalBlock: why the signed-in user's approval would be refused
+	// (independence rule); "" when it would not.
+	ApprovalBlock string `json:"approval_block,omitempty"`
 }
 
 func (s *Server) withLive(d store.DeploymentDetail) deploymentView {

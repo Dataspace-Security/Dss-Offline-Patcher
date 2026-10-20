@@ -243,7 +243,10 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
                 {approvals.map((a, i) => <li key={i}><b>{a.by}</b> <span className="muted">{fmtTime(a.at)}</span>{a.reason && <> — {a.reason}</>}</li>)}
               </ul>
             )}
-            {canApprove && !iApproved && (
+            {canApprove && !iApproved && pkg.approval_block && (
+              <div className="banner banner-info">{pkg.approval_block}</div>
+            )}
+            {canApprove && !iApproved && !pkg.approval_block && (
               <>
                 <label className="field">
                   <span>Reason <em className="req">required</em></span>
