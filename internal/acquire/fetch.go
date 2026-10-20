@@ -419,7 +419,10 @@ type FetchURLOptions struct {
 	// before the spec entry is written (e.g. the Authenticode check of an
 	// EXE installer). An error leaves the spec unchanged.
 	VerifyPayload func(path string) error
-	Progress      func(done, total int64)
+	// VendorSignature, if set, is the signature already verified at fetch
+	// time (signer, pin, revocation); pmctl build keeps it.
+	VendorSignature *manifest.VendorSignature
+	Progress        func(done, total int64)
 }
 
 // FetchURL downloads a vendor file over HTTPS, requires it to match the
@@ -476,7 +479,7 @@ func FetchURL(ctx context.Context, o FetchURLOptions) (*FetchResult, error) {
 		KB: o.KB, ProductCode: o.ProductCode, PackageName: o.PackageName, Severity: o.Severity, ReleaseDate: o.ReleaseDate,
 		Supersedes:    filterKBs(o.Supersedes, o.KB),
 		Applicability: manifest.Applicability{OS: osForKind(o.Kind, o.OS), Arch: o.Arch, MinBuild: o.MinBuild, MaxBuild: o.MaxBuild},
-		SourceURL:     o.URL, Path: path, Exe: o.Exe,
+		SourceURL:     o.URL, Path: path, Exe: o.Exe, VendorSignature: o.VendorSignature,
 	}
 	// Validate metadata before spending bandwidth.
 	if err := ValidateEntry(e, 1, o.SHA256); err != nil {

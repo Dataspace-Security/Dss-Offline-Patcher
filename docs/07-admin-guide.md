@@ -568,6 +568,25 @@ shows under Status as **Refused**; the previous version stays in force.
 Nothing here weakens the checks: every file is still verified by its hash or signature and
 arrives in quarantine for approval. See docs/08-acquisition.md "Auto-download policy".
 
+What the policy **cannot** do, whoever edits it (the downloader's own `acquire.json` decides):
+
+- **Point downloads at a new host.** Mirrors, catalog / MSRC addresses and vendor download
+  links must be on the downloader's `allowed_source_hosts` (by default only the official
+  Microsoft, winget and GitHub hosts). Anything else shows under Status as **failed: refused**
+  and the default address stays. To use a bank mirror, the downloader's operator adds its host
+  to `acquire.json` first. Private, loopback and link-local addresses are always refused unless
+  listed in `allowed_private_hosts`.
+- **Jump the version.** A policy file more than 100 versions past the last one the downloader
+  applied is refused (Status: Refused); older versions are ignored.
+- **Change who signs an app.** The downloader remembers the code-signing name (CN and O) of
+  every winget EXE/MSI and signed vendor download the first time it fetches it. A later version
+  signed by someone else is refused and shown as a failure under Status until the downloader's
+  operator runs `pmctl trust-signer <winget id>` (or `vendor:<source id>`); `pmctl trust-signer
+  -list` shows what is pinned and pending. A revoked signing certificate is always refused.
+  The package's **Signer** in the Catalog shows the verified name, its organisation, the winget
+  publisher (and whether they agree), the certificate fingerprint and the revocation result:
+  check them when you approve.
+
 ### 3.12 EXE packages (WebView2, VC++ runtimes, Git, ...)
 
 Apps that winget publishes only as EXE installers (plain exe, Inno Setup, NSIS, WiX Burn) are

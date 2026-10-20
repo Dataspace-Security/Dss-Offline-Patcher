@@ -78,6 +78,10 @@ func TestAutoAcquisitionRequestsExe(t *testing.T) {
 	if err != nil || !rep.Sent || len(rep.Failures) != 0 || len(rep.New) != 5 {
 		t.Fatalf("run: %v %+v", err, rep)
 	}
+	// Each EXE signer is pinned on first use (signerpin.go).
+	if pins, err := loadSignerPins(filepath.Join(dir, "work", signerPinsFile)); err != nil || pins.Pins["winget:git.git"] == nil || pins.Pins["winget:git.git"].CN != "Microsoft Corporation" {
+		t.Errorf("signer pins: %+v %v", pins, err)
+	}
 	checkItems(t, rep.Items, "acq-request-exe", map[string][2]string{"Google.Chrome": {"fetched", ""}, "Microsoft.EdgeWebView2Runtime": {"fetched", ""},
 		"Microsoft.VCRedist.2015+.x64": {"fetched", ""}, "Git.Git": {"fetched", ""}, "Notepad++.Notepad++": {"fetched", ""}})
 	if w := strings.Join(rep.Warnings, "\n"); !strings.Contains(w, "nullsoft installer registers no known silent uninstall") {
@@ -119,7 +123,7 @@ func TestAutoAcquisitionRequestsExe(t *testing.T) {
 		t.Fatalf("exe packages: %v", exes)
 	}
 	for k, p := range exes {
-		if p.VendorSignature.Status != "valid" || p.VendorSignature.Signer != "Microsoft Corporation" || p.Exe.Signer != "Microsoft Corporation" ||
+		if p.VendorSignature.Status != "valid" || !strings.HasPrefix(p.VendorSignature.Signer, "Microsoft Corporation (") || p.Exe.Signer != "Microsoft Corporation" ||
 			p.PackageName != p.Exe.Detect.DisplayName || p.Exe.Scope != "machine" || !slices.Contains(p.Exe.SuccessCodes, 0) || !strings.HasSuffix(p.File.Name, ".exe") {
 			t.Errorf("%s: %+v %+v", k, p, p.Exe)
 		}

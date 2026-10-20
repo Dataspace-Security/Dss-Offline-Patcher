@@ -24,8 +24,10 @@
 // Trusted roots are the host's system roots plus the code-signing roots
 // shipped in roots.pem (Microsoft's code-signing roots are not in the
 // Mozilla-derived bundles Linux distributions use). Revocation is not
-// checked (acquisition hosts may have no CRL/OCSP reachability); the
-// verified signer is recorded in the manifest and shown for approval.
+// checked here; Result carries the signer and issuer certificates so the
+// caller can (pmctl checks the CRL on the acquisition host, see
+// acquire.RevocationChecker). The verified signer is recorded in the
+// manifest and shown for approval.
 package authenticode
 
 import (
@@ -52,12 +54,16 @@ var rootsPEM []byte
 
 // Result describes a verified signature.
 type Result struct {
-	Signer     string    // signer certificate subject CommonName, e.g. "Microsoft Corporation"
-	Subject    string    // full subject DN
-	Issuer     string    // issuer CommonName
-	Thumbprint string    // SHA-256 of the signer certificate, hex
-	Digest     string    // sha256 | sha384 | sha512
-	SignedAt   time.Time // verified timestamp; zero if none
+	Signer       string    // signer certificate subject CommonName, e.g. "Microsoft Corporation"
+	Organization string    // signer certificate subject O (first value), "" if none
+	Subject      string    // full subject DN
+	Issuer       string    // issuer CommonName
+	Thumbprint   string    // SHA-256 of the signer certificate, hex
+	Digest       string    // sha256 | sha384 | sha512
+	SignedAt     time.Time // verified timestamp; zero if none
+	// Leaf is the signer certificate and IssuerCert the certificate that
+	// issued it (from the verified chain), for a revocation check.
+	Leaf, IssuerCert *x509.Certificate
 }
 
 // Options control verification.
@@ -234,7 +240,8 @@ func (v *verifier) one(p *parsed) (*Result, error) {
 	if tsErr == nil {
 		at = signedAt
 	}
-	if err := chain(cert, p.certs, v.o.Roots, x509.ExtKeyUsageCodeSigning, at); err != nil {
+	issuer, err := verifyChain(cert, p.certs, v.o.Roots, x509.ExtKeyUsageCodeSigning, at)
+	if err != nil {
 		if tsErr != nil {
 			return nil, fmt.Errorf("signer certificate %q not trusted for code signing (no verified timestamp: %v): %w", cert.Subject.CommonName, tsErr, err)
 		}
@@ -244,8 +251,13 @@ func (v *verifier) one(p *parsed) (*Result, error) {
 		return nil, errors.New("signer certificate has no subject CommonName")
 	}
 	tp := sha256.Sum256(cert.Raw)
-	return &Result{Signer: strings.TrimSpace(cert.Subject.CommonName), Subject: cert.Subject.String(), Issuer: cert.Issuer.CommonName,
-		Thumbprint: hex.EncodeToString(tp[:]), Digest: strings.ToLower(strings.ReplaceAll(h.String(), "-", "")), SignedAt: signedAt}, nil
+	org := ""
+	if len(cert.Subject.Organization) > 0 {
+		org = strings.TrimSpace(cert.Subject.Organization[0])
+	}
+	return &Result{Signer: strings.TrimSpace(cert.Subject.CommonName), Organization: org, Subject: cert.Subject.String(), Issuer: cert.Issuer.CommonName,
+		Thumbprint: hex.EncodeToString(tp[:]), Digest: strings.ToLower(strings.ReplaceAll(h.String(), "-", "")), SignedAt: signedAt,
+		Leaf: cert, IssuerCert: issuer}, nil
 }
 
 func nestedSignatures(p *parsed) ([]*parsed, error) {

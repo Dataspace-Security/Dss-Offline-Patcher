@@ -390,7 +390,17 @@ Apps whose winget manifest has no MSI for an architecture (WebView2, OneDrive, t
 | Key | Meaning |
 |---|---|
 | `authenticode_roots` | PEM file of extra trust anchors (e.g. a vendor's private code-signing root), added to the system roots and the shipped ones. |
-| `exe_signers` | If set, only EXE installers whose verified signer CommonName is in this list are accepted. |
+| `exe_signers` | If set, only EXE installers whose verified signer is in this list are accepted. Each entry is an exact CommonName (`"Google LLC"`) or a subject DN whose CN and O must both match (`"CN=Google LLC, O=Google LLC"`); never a substring. A CN listed here also approves a signer change (below). |
+| `exe_signer_pins` | Per package, the exact signer: `{"Google.Chrome": {"cn": "Google LLC", "o": "Google LLC"}, "vendor:tool": {"cn": "..."}}`. Overrides the signer pmctl pinned on first use. |
+| `require_revocation_check` | `true`: refuse an installer whose CRL cannot be fetched. Default `false`: recorded as `revocation unknown`. |
+| `allowed_source_hosts` | Hosts an auto-download policy may download from (see "Auto-download policy"). Default: the official hosts. |
+| `allowed_private_hosts` | Host names that may resolve to private / loopback addresses (an internal mirror). |
+
+**Signer pinning (trust on first use).** For winget EXE installers (any host), winget MSIs (Windows acquisition hosts only: elsewhere an MSI's signature cannot be checked and `vendor_signature` stays `not_checked`) and vendor-url downloads verified by `signer`, pmctl records the verified signer per package in `work_dir/signer-pins.json`: leaf certificate SHA-256, CN and O. A later version is accepted if CN and O are unchanged (a renewed certificate only changes the fingerprint, which is updated). A different CN or O is refused, the file deleted, and the package reported as failed in the status report until the operator approves it with `pmctl trust-signer -config acquire.json <winget id | vendor:<source id>>` (`-list` shows pins and pending changes), an `exe_signer_pins` entry, or the new CN in `exe_signers`.
+
+**Revocation.** The signing certificate is checked against the CRL in its CRLDistributionPoints (downloaded over http or https, at most 32 MiB and 30 s, SSRF-guarded, verified against the issuing certificate, cached in `work_dir/crl-cache` until its NextUpdate). Revoked: refused (a certificate revoked for a reason other than key compromise after a timestamped signature does not count, as on Windows). CRL unavailable: `revocation unknown`, refused only with `require_revocation_check`.
+
+**What approvers see.** `vendor_signature.signer` (the Catalog's **Signer**) reads e.g. `Google LLC (O=Google LLC; winget publisher "Google LLC" matches; cert sha256 1a2b3c4d5e6f7a8b; revocation good; matches the pinned signer)`. A winget Publisher that does not name the signer shows `DIFFERS` and adds a warning to the run.
 
 **Authenticode on Linux (and every other OS).** `internal/acquire/authenticode` uses only the Go standard library:
 
@@ -402,7 +412,7 @@ Apps whose winget manifest has no MSI for an architecture (WebView2, OneDrive, t
 
 Trust anchors are the host's system roots plus the code-signing roots shipped in `internal/acquire/authenticode/roots.pem`: Microsoft Root Certificate Authority 2010 and 2011, Microsoft Identity Verification Root CA 2020, DigiCert Trusted Root G4, DigiCert Assured ID Root CA and USERTrust RSA. Their SHA-256 fingerprints are pinned in the tests. Microsoft's code-signing roots are not in the Mozilla-derived bundles Linux distributions use, hence the shipped set.
 
-**Not checked:** revocation (acquisition hosts may have no CRL or OCSP access). SHA-1-only signatures and SHA-1 timestamps are refused, which is stricter than Windows. The recorded signer is shown on the package for approval. The agent verifies the signature again (WinVerifyTrust) and checks that the signer is `exe.signer` before it runs the installer.
+**Not checked by this package:** revocation (pmctl auto checks the CRL, see above; OCSP is not used). SHA-1-only signatures and SHA-1 timestamps are refused, which is stricter than Windows. The recorded signer is shown on the package for approval. The agent verifies the signature again (WinVerifyTrust) and checks that the signer is `exe.signer` before it runs the installer.
 
 **On the isolated server:**
 
@@ -473,7 +483,7 @@ What the policy holds (`internal/acqpolicy`):
 |---|---|---|
 | Windows updates | `{product, build, arch, classification: security\|all, enabled}`, chosen from the releases the downloader knows plus those in the update intelligence | Adds the release to the Microsoft feed (`catalog_product` from the known list; Windows Server entries get the package suffix `-server`), or re-classifies the matching `acquire.json` product (`all` = every severity, `security` = `acquire.json`'s `min_severity`, `important` if `acquire.json` has no Microsoft section). `enabled: false` removes the matching `acquire.json` product. |
 | Apps | `{source: winget, id, arch[], channel: latest, enabled, note}` | Kept at the newest version the update intelligence's Library knows (the id is added to the Library list, so its newest version is looked up by the same run's intelligence and downloaded on the next run). One MSI per architecture, checked against the winget manifest's SHA-256, package id `<id>-<version>[-<arch>]`. An app that an `acquire.json` app feed covers (same `winget_id`) is left to that feed; `enabled: false` also skips that feed. |
-| Sources | `winget` (index `url`, `manifests_url`), `microsoft-catalog` / `msrc` (`url`), `vendor-url`, `internal-mirror` | URL overrides replace `intel.winget_url`, `winget_manifests_url`, `catalog_url`, `msrc_url`. Switching off `microsoft-catalog` or `msrc` stops all Windows downloads; switching off `winget` stops policy apps. `internal-mirror {url, replaces: winget-index\|winget-manifests\|microsoft-catalog\|msrc}` wins over the source's own URL. `vendor-url {name, url, kind msi\|msu, version, expected_sha256 \| signer, product_code?, kb (msu), arch?, vendor?}` is fetched like `pmctl fetch-url`: the file must match `expected_sha256`, or (Windows downloader only) carry a valid Authenticode signature whose subject contains `signer`; package id `<source id>-<version>`; an MSI without `product_code` has it read from the file. EXE installers are refused. |
+| Sources | `winget` (index `url`, `manifests_url`), `microsoft-catalog` / `msrc` (`url`), `vendor-url`, `internal-mirror` | URL overrides replace `intel.winget_url`, `winget_manifests_url`, `catalog_url`, `msrc_url`. Switching off `microsoft-catalog` or `msrc` stops all Windows downloads; switching off `winget` stops policy apps. `internal-mirror {url, replaces: winget-index\|winget-manifests\|microsoft-catalog\|msrc}` wins over the source's own URL. `vendor-url {name, url, kind msi\|msu, version, expected_sha256 \| signer, product_code?, kb (msu), arch?, vendor?}` is fetched like `pmctl fetch-url`: the file must match `expected_sha256`, or (Windows downloader only) carry a valid Authenticode signature from exactly `signer` (a CN, or `CN=…, O=…` with both compared; never a substring) and pass the signer pin; package id `<source id>-<version>`; an MSI without `product_code` has it read from the file. EXE installers are refused. |
 | Limits | `max_download_gb_per_run` (0 = none), `keep_last_n_versions` (0 = by age) | A run stops downloading once this much was read (the rest fails for this run and is retried next run). Downloaded files of policy apps and vendor downloads beyond the newest N sent versions are deleted (state `families`). |
 | Schedule | read-only | Shown from the status report (`schedule` in `acquire.json`); the timer belongs to the installer. |
 
@@ -482,6 +492,35 @@ no `#fragment`, no query parameter that looks like a credential (`token`, `key`,
 `sig`, `auth`, …), SHA-256 as 64 hex characters, winget ids and versions as for requests, at
 most 50 Windows entries, 500 apps and 100 sources, one enabled source per type (vendor
 downloads excepted) and per mirrored upstream, limits 0–10000 GB and 0–100 versions.
+
+**What only `acquire.json` decides (the policy cannot extend it).** The policy file is not
+signed offline, so pmctl bounds what it can do (`cmd/pmctl/netpolicy.go`):
+
+- `allowed_source_hosts`: every address a policy sets (winget index / manifests, catalog, MSRC,
+  internal mirrors, vendor-url) must be https on a listed host: exact names or `*.domain`
+  (which does not match `domain` itself); `"default"` stands for the built-in official hosts,
+  which also apply when the key is absent: `cdn.winget.microsoft.com`,
+  `raw.githubusercontent.com`, `www.catalog.update.microsoft.com`,
+  `catalog.update.microsoft.com`, `api.msrc.microsoft.com`, `download.windowsupdate.com`,
+  `*.download.windowsupdate.com`, `*.delivery.mp.microsoft.com`, `download.microsoft.com`. A
+  source outside the list is **refused**: status report result `failed`, detail `refused: …`,
+  and a `policy_error`; the default address stays. Once accepted, every request to that
+  upstream, **redirects included**, and the download links a mirrored catalog page returns
+  must stay on the list.
+- **SSRF guard** on every request pmctl auto makes: https only, never to loopback, RFC 1918,
+  link-local (169.254/16, cloud metadata), CGNAT, multicast or reserved addresses. IP literals
+  are refused before sending; host names are resolved at dial time and the connection goes to
+  the checked address. Hosts in `acquire.json`'s own URLs (`catalog_url`, `msrc_url`,
+  `winget_manifests_url`, `intel.winget_url`, `apps[]`) and in `allowed_private_hosts` may be
+  private (an internal mirror). With a proxy the target name is checked before sending.
+- **Installer URLs from winget manifests** point at each vendor's own host, so they are not held
+  to `allowed_source_hosts`: they get the SSRF guard and https, the manifest SHA-256 (from an
+  allowlisted manifest source) and, for EXE and (on Windows hosts) MSI, the signer pin and CRL
+  check (see "EXE installers").
+- **Version jumps**: pmctl remembers the last accepted `policy_version` (`state.json`
+  `policy_version`, and the active `policy.json`). A file more than 100 versions past it is
+  refused (moved to `rejected/`, reported as `policy_error`); older ones are ignored. The first
+  policy a downloader ever sees is accepted at any version.
 
 ### How the policy reaches the downloader
 

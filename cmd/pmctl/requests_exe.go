@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode"
 
+	"offpatch/internal/acqpolicy"
 	"offpatch/internal/acqrequest"
 	"offpatch/internal/acquire"
 	"offpatch/internal/intel"
@@ -32,14 +33,15 @@ func (r *requestRun) fetchWingetExe(a acqrequest.App, arch string, m *acquire.Wi
 	if err != nil {
 		return err
 	}
-	signer, err := verifyExeSigner(dl.Path)
+	res, err := verifyExeResult(dl.Path)
 	if err != nil {
 		os.Remove(dl.Path) // never left where a later run could pick it up
 		return unsupportedItem(shortReason("the installer's Authenticode signature is not valid: "+strings.TrimPrefix(err.Error(), "Authenticode: ")),
 			fmt.Sprintf("%s %s (%s): %v", a.WingetID, m.Version, in.URL, err))
 	}
+	signer := res.Signer
 	// Best effort: the locale manifest's product name and publisher.
-	loc, _ := acquire.FetchWingetLocale(r.ctx, r.hc, r.c.WingetManifestsURL, m.ID, m.Version)
+	loc, _ := acquire.FetchWingetLocale(r.ctx, r.c.sourceClient(r.hc, acqpolicy.UpstreamWingetManifests), r.c.WingetManifestsURL, m.ID, m.Version)
 	name := exeDisplayName(in, a, m, loc)
 	if name == "" {
 		return unsupportedItem("no Apps & features name to detect the installed app",
@@ -48,6 +50,12 @@ func (r *requestRun) fetchWingetExe(a acqrequest.App, arch string, m *acquire.Wi
 	pub := wingetPublisher(in, m)
 	if loc != nil && loc.Publisher != "" && m.Publisher == "" {
 		pub = loc.Publisher
+	}
+	// Revocation, and the signer pinned for this winget id (signerpin.go).
+	vs, err := pinInstaller(r.ctx, r.c, r.pins, pinKeyWinget(a.WingetID), m.Version, pub, infoFromResult(res))
+	if err != nil {
+		os.Remove(dl.Path)
+		return err
 	}
 	ex, err := in.ExeInstall(acquire.ExeInstallOptions{Signer: signer, DisplayName: name, Publisher: arpPublisher(in, pub)})
 	if err != nil {
@@ -74,7 +82,7 @@ func (r *requestRun) fetchWingetExe(a acqrequest.App, arch string, m *acquire.Wi
 	_, err = acquire.FetchURL(r.ctx, acquire.FetchURLOptions{URL: in.URL, SHA256: in.SHA256, FileName: file, PackageID: wingetPackageID(a.WingetID, a.Version, arch),
 		Title: title + " " + ver, Vendor: pub, Kind: manifest.KindExe, PackageName: name, OS: "windows",
 		Version: ver, Severity: "important", ReleaseDate: rel, Arch: arch, OutDir: r.downloads, SpecPath: r.spec, HTTP: r.hc, Exe: ex,
-		Verified: "sha256(winget manifest " + murl + ")+authenticode(" + signer + ")",
+		Verified: "sha256(winget manifest " + murl + ")+authenticode(" + signer + ")", VendorSignature: &vs,
 		VerifyPayload: func(p string) error {
 			got, err := verifyExeSigner(p)
 			if err == nil && got != signer {
