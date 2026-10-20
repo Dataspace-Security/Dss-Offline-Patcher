@@ -115,6 +115,8 @@ var tableMigrations = []string{
 	loginFailuresSchema,
 	// Approved endpoint set of each deployment (deploy_scope.go).
 	deploymentScopeSchema,
+	// One-time setup codes of the built-in super admin (setupcode.go).
+	setupCodesSchema,
 }
 
 // The role names operator and approver were removed: stored users and

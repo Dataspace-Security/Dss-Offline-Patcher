@@ -41,7 +41,11 @@ func loginKey(ip string) string {
 }
 
 // loginLimited applies the per-IP sign-in limit (429 with Retry-After).
+// Through the console proxy proxyAuthLimited has already applied it.
 func (s *Server) loginLimited(w http.ResponseWriter, r *http.Request) bool {
+	if p := proxiedInfo(r); p != nil && p.loginCharged {
+		return false
+	}
 	ip := clientIP(r)
 	if ok, wait := s.loginLimit.allow(loginKey(ip)); !ok {
 		s.log.Warn("sign-in rate limited", "ip", ip)
@@ -52,8 +56,10 @@ func (s *Server) loginLimited(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-// passwordLogin: POST /api/auth/login {email, password} → session cookie.
-// One answer for unknown email, wrong password and locked account.
+// passwordLogin: POST /api/auth/login {email, password, setup_code} →
+// session cookie. One answer for unknown email, wrong password, locked
+// account and (built-in account on the default password) a missing or
+// wrong setup code: the store decides, store/setupcode.go.
 func (s *Server) passwordLogin(w http.ResponseWriter, r *http.Request) {
 	if s.loginLimited(w, r) {
 		return
@@ -65,15 +71,16 @@ func (s *Server) passwordLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, loginMaxBody)
 	var body struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Email     string `json:"email"`
+		Password  string `json:"password"`
+		SetupCode string `json:"setup_code"`
 	}
 	if !decode(w, r, &body) {
 		return
 	}
 	// Wrong passwords lock the account per client address (store
 	// authlimits.go): the same key as the rate limit.
-	res, err := s.store.LoginPasswordFrom(r.Context(), body.Email, body.Password, loginKey(clientIP(r)), s.cfg.SessionTTL.Duration)
+	res, err := s.store.LoginSetupCodeFrom(r.Context(), body.Email, body.Password, body.SetupCode, loginKey(clientIP(r)), s.cfg.SessionTTL.Duration)
 	switch {
 	case errors.Is(err, store.ErrBadCredentials):
 		writeErr(w, http.StatusUnauthorized, badCredentials)

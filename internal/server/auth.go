@@ -198,6 +198,9 @@ func (s *Server) authCallback(w http.ResponseWriter, r *http.Request) {
 
 // setSessionCookie: the console session (SSO and local users alike).
 func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, tok string) {
+	if p := proxiedInfo(r); p != nil {
+		s.proxyAuth.markKnown(loginKey(p.ClientIP)) // reserved sign-in share (proxyauth.go)
+	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: tok, Path: "/", HttpOnly: true, Secure: secureRequest(r),
 		SameSite: http.SameSiteStrictMode, MaxAge: int(s.cfg.SessionTTL.Seconds())})
 }

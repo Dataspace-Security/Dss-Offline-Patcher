@@ -290,6 +290,9 @@ func (s *Store) ResetLocalPassword(ctx context.Context, by Manager, email, passw
 			hash, email); err != nil {
 			return err
 		}
+		if err := deleteSetupCode(tx, email); err != nil {
+			return err
+		}
 		if err := s.setSteward(tx, by, email); err != nil {
 			return err
 		}
@@ -377,12 +380,19 @@ func (s *Store) LoginPassword(ctx context.Context, email, password string, ttl t
 	return s.LoginPasswordFrom(ctx, email, password, "", ttl)
 }
 
-// LoginPasswordFrom verifies an email + password from client source (the
-// rate-limit key of the client address) and opens a session. Every failure
-// is ErrBadCredentials (audited with the real reason, folded per source),
+// LoginPasswordFrom is LoginSetupCodeFrom without a setup code.
+func (s *Store) LoginPasswordFrom(ctx context.Context, email, password, source string, ttl time.Duration) (PasswordLogin, error) {
+	return s.LoginSetupCodeFrom(ctx, email, password, "", source, ttl)
+}
+
+// LoginSetupCodeFrom verifies an email + password from client source (the
+// rate-limit key of the client address) and opens a session. An account
+// still on the built-in default password also needs its one-time setup code
+// (setupcode.go; ignored for other accounts). Every failure is
+// ErrBadCredentials (audited with the real reason, folded per source),
 // except a disabled account with the right password (ErrDisabled) and
 // ErrBusy. Locks: see authlimits.go (per source, then per account).
-func (s *Store) LoginPasswordFrom(ctx context.Context, email, password, source string, ttl time.Duration) (PasswordLogin, error) {
+func (s *Store) LoginSetupCodeFrom(ctx context.Context, email, password, setupCode, source string, ttl time.Duration) (PasswordLogin, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	source = loginSource(source)
 	var hash, role string
@@ -411,6 +421,11 @@ func (s *Store) LoginPasswordFrom(ctx context.Context, email, password, source s
 	}
 	// The lock is read after the slow check, in the transaction that records
 	// the outcome: parallel guesses cannot all pass a lock set meanwhile.
+	// The default password alone is not enough: the setup code is checked
+	// here, after the same slow work, and a missing or wrong one is a wrong
+	// password to the caller (no oracle for the default password).
+	needsCode := hash == defaultPasswordHash
+	codeWrong := false
 	var lockReason, lockedUntil string
 	var lockedNow bool
 	err = s.tx(ctx, func(tx *sql.Tx) error {
@@ -418,8 +433,19 @@ func (s *Store) LoginPasswordFrom(ctx context.Context, email, password, source s
 		if lockReason, lockedUntil, err = s.passwordLocked(tx, email, source); err != nil || lockReason != "" {
 			return err
 		}
-		if !ok {
-			lockedNow, err = s.recordPasswordFailure(tx, email, source, "password")
+		if ok && needsCode {
+			codeOK, err := s.setupCodeOK(tx, email, setupCode)
+			if err != nil {
+				return err
+			}
+			codeWrong = !codeOK
+		}
+		if !ok || codeWrong {
+			what := "password"
+			if ok {
+				what = "setup code"
+			}
+			lockedNow, err = s.recordPasswordFailure(tx, email, source, what)
 			return err
 		}
 		_, err = tx.Exec(`DELETE FROM login_failures WHERE email=? AND source=?`, email, source)
@@ -433,6 +459,9 @@ func (s *Store) LoginPasswordFrom(ctx context.Context, email, password, source s
 	}
 	if !ok {
 		return fail("wrong password", map[string]any{"locked": lockedNow})
+	}
+	if codeWrong {
+		return fail("default password without a valid setup code", map[string]any{"locked": lockedNow, "setup_code_given": strings.TrimSpace(setupCode) != ""})
 	}
 	res := PasswordLogin{Email: email, Role: canonicalOr(role), MustChangePassword: must == 1}
 	enrolled, err := s.MFAEnrolled(ctx, email)
@@ -525,6 +554,9 @@ func (s *Store) ChangeOwnPassword(ctx context.Context, email, current, next, kee
 			nh, s.now(), email); err != nil {
 			return err
 		}
+		if err := deleteSetupCode(tx, email); err != nil {
+			return err
+		}
 		res, err := tx.Exec(`UPDATE sessions SET revoked=1 WHERE username=? AND id_hash != ? AND revoked=0`, email, HashSecret(keepToken))
 		if err != nil {
 			return err
@@ -570,6 +602,9 @@ func (s *Store) RecoverSuperAdmin(ctx context.Context, email, password string) e
 			return err
 		}
 		if _, err := tx.Exec(`UPDATE users SET disabled=0, disabled_reason='' WHERE username=?`, email); err != nil {
+			return err
+		}
+		if err := deleteSetupCode(tx, email); err != nil {
 			return err
 		}
 		if err := clearAuthLocks(tx, email); err != nil { // per-address and account-wide sign-in locks too

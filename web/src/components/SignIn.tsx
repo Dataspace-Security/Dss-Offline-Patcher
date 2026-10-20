@@ -111,9 +111,24 @@ function Spinner() {
   return <span className="spinner" aria-hidden="true" />;
 }
 
+/**
+ * The built-in super admin (the vendor account the installer creates with the
+ * fixed default password). While it still has that password the server also
+ * wants the one-time setup code the installer printed (`pmserver setup-code`
+ * on the server; security review S-1).
+ *
+ * No password oracle: the field is offered whenever this e-mail is typed,
+ * whatever the account's state (nothing is asked of the server to decide),
+ * and the server answers a missing or wrong code exactly like a wrong
+ * password, so nobody learns whether the default password alone was right.
+ * After the password has been changed the code is not needed and ignored.
+ */
+const BUILTIN_SUPER_ADMIN_EMAIL = "superadmin@dataspacesecurity.com";
+
 function PasswordForm({ onLogin, onMfa }: { onLogin: (me: Me) => void; onMfa: () => void }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [setupCode, setSetupCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -123,9 +138,13 @@ function PasswordForm({ onLogin, onMfa }: { onLogin: (me: Me) => void; onMfa: ()
     if (!id || !password || busy) return;
     setBusy(true);
     setError(null);
+    const body = id === BUILTIN_SUPER_ADMIN_EMAIL && setupCode.trim()
+      ? { email: id, password, setup_code: setupCode.trim() }
+      : { email: id, password };
     try {
-      const res = await api.signIn<LoginResponse>("/api/auth/login", { email: id, password });
+      const res = await api.signIn<LoginResponse>("/api/auth/login", body);
       setPassword("");
+      setSetupCode("");
       if (res?.mfa_required) { onMfa(); return; }
       // Set-up still needed (mfa_enrollment_required): the session only allows enrolment; App shows the set-up screen.
       onLogin(await fetchMe());
@@ -151,6 +170,15 @@ function PasswordForm({ onLogin, onMfa }: { onLogin: (me: Me) => void; onMfa: ()
         <PasswordInput name="password" autoComplete="current-password" aria-invalid={error ? true : undefined}
                        value={password} onChange={(e) => setPassword(e.target.value)} />
       </label>
+      {normalizeEmail(email) === BUILTIN_SUPER_ADMIN_EMAIL && (
+        <label className="field">
+          <span>Setup code <em className="muted">first sign-in only</em></span>
+          <input name="setup_code" autoComplete="one-time-code" autoCapitalize="characters" spellCheck={false}
+                 placeholder="XXXX-XXXX-XXXX" maxLength={32} aria-invalid={error ? true : undefined}
+                 value={setupCode} onChange={(e) => setSetupCode(e.target.value)} />
+          <span className="hint">Printed by the installer (or <code>pmserver setup-code</code> on the server). Leave empty once the default password has been changed.</span>
+        </label>
+      )}
       <ErrorBanner error={error} />
       <button className="btn btn-primary btn-block btn-lg" disabled={busy || !email.trim() || !password}>
         {busy ? <><Spinner /> Signing in…</> : "Sign in"}
