@@ -54,12 +54,12 @@ type Server struct {
 
 	enrollLimit *ipLimiter
 	loginLimit  *ipLimiter // email + password sign-in, per client IP
-	// proxyAuthLimit: one bucket for every sign-in step arriving through
-	// the console_proxy listener (forwarded client IPs can be forged by a
-	// local process); see consoleproxy.go.
-	proxyAuthLimit *ipLimiter
-	preAuth        preAuthStore // MFA pre-auth nonces (single use, mfa.go)
-	repKey         reportKey    // audit-signing key, for compliance packages
+	// proxyAuth: the listener-wide sign-in budget of the console_proxy
+	// listener (forwarded client IPs can be forged by a local process),
+	// with a reserved share for recently signed-in addresses; proxyauth.go.
+	proxyAuth *proxyAuthGate
+	preAuth   preAuthStore // MFA pre-auth nonces (single use, mfa.go)
+	repKey    reportKey    // audit-signing key, for compliance packages
 }
 
 func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger) (*Server, error) {
@@ -69,7 +69,7 @@ func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger
 	s.progress = newProgressMap()
 	s.enrollLimit = newIPLimiter(enrollBurst, enrollEvery)
 	s.loginLimit = newIPLimiter(loginBurst, loginEvery)
-	s.proxyAuthLimit = newIPLimiter(proxyAuthBurst, proxyAuthEvery)
+	s.proxyAuth = newProxyAuthGate()
 	store.WarmPasswordCheck()
 	dl := map[string]time.Duration{}
 	for k, v := range cfg.PatchDeadlines {

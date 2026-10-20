@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -71,6 +72,12 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "setup-code":
+			if err := setupCodeCmd(os.Args[2:], os.Stdout); err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+				os.Exit(1)
+			}
+			return
 		case "init-pki":
 			if err := initPKI(os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, "error:", err)
@@ -129,7 +136,7 @@ func run(cfgPath string, log *slog.Logger) error {
 	if who, err := st.DefaultSuperAdminPasswordInUse(context.Background()); err != nil {
 		return err
 	} else if len(who) > 0 {
-		log.Warn("the built-in super admin still uses the vendor's default password: sign in to the console and change it", "users", strings.Join(who, ","))
+		log.Warn("the built-in super admin still uses the vendor's default password: sign in with it and the setup code (pmserver setup-code) and change it", "users", strings.Join(who, ","))
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -334,6 +341,45 @@ func runAdminCmd(cmd string, args []string, out io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(out, "created the built-in super admin (password shown ONCE; only its hash is stored)\nemail:    %s\npassword: %s\n", u.Email, pw)
+	return nil
+}
+
+// setupCodeCmd: pmserver setup-code gives the built-in super admin, while
+// it still has the vendor's default password, a new one-time setup code
+// (replacing an earlier one), printed once: the first sign-in needs it with
+// the default password (store/setupcode.go). Only its hash is stored. With
+// -if-needed (the installer) an account that does not exist or has its own
+// password is not an error: nothing is printed but a note.
+func setupCodeCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("setup-code", flag.ContinueOnError)
+	cfgPath := fs.String("config", "pmserver.json", "server config")
+	email := fs.String("email", store.DefaultSuperAdminEmail, "sign-in email of the built-in super admin")
+	ifNeeded := fs.Bool("if-needed", false, "succeed without a code when the account has its own password or does not exist")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := server.LoadConfig(*cfgPath)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
+		return err
+	}
+	st, err := store.Open(filepath.Join(cfg.DataDir, "pm.db"))
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	code, expires, err := st.CreateSetupCode(context.Background(), *email)
+	if *ifNeeded && (errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConflict)) {
+		fmt.Fprintln(out, "no setup code needed:", err)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "setup code for the first sign-in (shown ONCE; only its hash is stored; valid until the password is changed)\nemail:      %s\nsetup_code: %s\nexpires_at: %s\n",
+		strings.ToLower(strings.TrimSpace(*email)), code, expires.Format("2006-01-02T15:04:05Z"))
 	return nil
 }
 

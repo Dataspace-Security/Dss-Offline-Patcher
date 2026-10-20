@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -54,8 +55,15 @@ func TestCreateAdminUsesEmbeddedDefault(t *testing.T) {
 		t.Fatalf("profile %+v", lp)
 	}
 	if plain := os.Getenv("OFFPATCH_TEST_DEFAULT_SA_PW"); plain != "" {
-		if _, err := st.LoginPassword(ctx, store.DefaultSuperAdminEmail, plain, time.Hour); err != nil {
-			t.Fatalf("default password does not sign in: %v", err)
+		if _, err := st.LoginPassword(ctx, store.DefaultSuperAdminEmail, plain, time.Hour); err == nil {
+			t.Fatal("the default password signed in without the setup code")
+		}
+		code, _, err := st.CreateSetupCode(ctx, store.DefaultSuperAdminEmail)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.LoginSetupCodeFrom(ctx, store.DefaultSuperAdminEmail, plain, code, "", time.Hour); err != nil {
+			t.Fatalf("default password + setup code does not sign in: %v", err)
 		}
 	}
 	st.Close()
@@ -163,5 +171,52 @@ func TestCreateAdminRandomPassword(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "email:    vendor@dataspacesecurity.com") || !strings.Contains(out.String(), "password: ") {
 		t.Fatalf("output: %s", out.String())
+	}
+}
+
+// setup-code: a code for the built-in account while it has the default
+// password (printed once, stored hashed); -if-needed is quiet once the
+// account has its own password, without it that is an error.
+func TestSetupCodeCmd(t *testing.T) {
+	cfg, data := labConfig(t)
+	var out bytes.Buffer
+	if err := runAdminCmd("create-admin", []string{"-config", cfg, "-if-fresh"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { // only the hash is stored: the database never holds a printed code
+		b, _ := os.ReadFile(filepath.Join(data, "pm.db"))
+		if m := regexp.MustCompile(`[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}`).Find(b); m != nil {
+			t.Errorf("a setup code in plaintext in the database: %s", m)
+		}
+	}()
+	codeRe := regexp.MustCompile(`(?m)^setup_code: ([A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4})$`)
+	for _, args := range [][]string{{"-config", cfg}, {"-config", cfg, "-if-needed"}} {
+		out.Reset()
+		if err := setupCodeCmd(args, &out); err != nil {
+			t.Fatal(err)
+		}
+		m := codeRe.FindStringSubmatch(out.String())
+		if m == nil || !strings.Contains(out.String(), "email:      "+store.DefaultSuperAdminEmail) || !strings.Contains(out.String(), "expires_at: ") {
+			t.Fatalf("output: %s", out.String())
+		}
+		if strings.Count(out.String(), m[1]) != 1 {
+			t.Fatalf("code printed more than once: %s", out.String())
+		}
+	}
+	out.Reset()
+	if err := runAdminCmd("reset-admin", []string{"-config", cfg}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := setupCodeCmd([]string{"-config", cfg, "-if-needed"}, &out); err != nil || !strings.Contains(out.String(), "no setup code needed") || codeRe.MatchString(out.String()) {
+		t.Fatalf("-if-needed after reset-admin: %v %s", err, out.String())
+	}
+	if err := setupCodeCmd([]string{"-config", cfg}, &out); err == nil {
+		t.Fatal("setup-code for an account with its own password must fail without -if-needed")
+	}
+	cfg2, _ := labConfig(t)
+	out.Reset()
+	if err := setupCodeCmd([]string{"-config", cfg2, "-if-needed"}, &out); err != nil || !strings.Contains(out.String(), "no setup code needed") {
+		t.Fatalf("-if-needed without the account: %v %s", err, out.String())
 	}
 }

@@ -40,7 +40,7 @@ func (s *Store) DeleteLocalUser(ctx context.Context, by Manager, email, reason s
 		}
 		var builtin int
 		tx.QueryRow(`SELECT builtin FROM local_users WHERE email=?`, email).Scan(&builtin)
-		for _, q := range []string{`DELETE FROM sessions WHERE username=?`, `DELETE FROM mfa WHERE email=?`, `DELETE FROM local_users WHERE email=?`, `DELETE FROM users WHERE username=?`} {
+		for _, q := range []string{`DELETE FROM sessions WHERE username=?`, `DELETE FROM mfa WHERE email=?`, `DELETE FROM setup_codes WHERE email=?`, `DELETE FROM local_users WHERE email=?`, `DELETE FROM users WHERE username=?`} {
 			if _, err := tx.Exec(q, email); err != nil {
 				return err
 			}

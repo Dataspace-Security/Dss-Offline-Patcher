@@ -8,7 +8,6 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // Console behind a reverse proxy (docs/07-admin-guide.md "Console behind a
@@ -26,8 +25,9 @@ import (
 //     logs) and X-Forwarded-Proto (right-most value). A request without a
 //     valid forwarded client address is refused (400). The main listener
 //     never reads those headers (no spoofing).
-//   - sign-in steps through it share one listener-wide limit on top of the
-//     per-client ones (a local process could forge X-Forwarded-For).
+//   - sign-in steps through it are limited per client first, then share one
+//     listener-wide limit (a local process could forge X-Forwarded-For),
+//     with a reserved share for recently signed-in addresses (proxyauth.go).
 //   - it serves nothing over plain HTTP: X-Forwarded-Proto must be "https"
 //     (GET/HEAD are redirected to https://, everything else gets 403), so
 //     credentials and cookies never travel unencrypted, and session cookies
@@ -113,6 +113,9 @@ func (p *ConsoleProxyConfig) trusted(ip net.IP) bool {
 type proxied struct {
 	ClientIP string // the browser's address per X-Forwarded-For / X-Real-IP
 	HTTPS    bool   // X-Forwarded-Proto: https
+	// loginCharged: proxyAuthLimited already took this sign-in step from the
+	// client's loginLimit bucket (loginLimited does not take it again).
+	loginCharged bool
 }
 
 const keyProxied ctxKey = 101
@@ -196,32 +199,6 @@ func forwardedHTTPS(r *http.Request) bool {
 		v = v[i+1:]
 	}
 	return strings.EqualFold(strings.TrimSpace(v), "https")
-}
-
-// proxyAuthPaths: the sign-in steps that get the listener-wide limit.
-var proxyAuthPaths = map[string]bool{"/api/auth/login": true, "/api/auth/mfa": true, "/api/auth/password": true,
-	"/api/auth/mfa/disable": true, "/api/auth/mfa/enroll/confirm": true}
-
-const (
-	// proxyAuthBurst sign-in steps through the console proxy in total (all
-	// clients together), then one more every proxyAuthEvery. On top of the
-	// per-client limits: a local process can forge X-Forwarded-For.
-	proxyAuthBurst = 30
-	proxyAuthEvery = time.Second
-)
-
-// proxyAuthLimited applies the listener-wide sign-in limit (429).
-func (s *Server) proxyAuthLimited(w http.ResponseWriter, r *http.Request, client string) bool {
-	if r.Method != http.MethodPost || !proxyAuthPaths[path.Clean("/"+r.URL.Path)] {
-		return false
-	}
-	if ok, wait := s.proxyAuthLimit.allow("console_proxy"); !ok {
-		s.log.Warn("console proxy: sign-in limit for all clients reached", "ip", client, "path", r.URL.Path)
-		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
-		writeErr(w, http.StatusTooManyRequests, "too many sign-in attempts right now; retry in a moment")
-		return true
-	}
-	return false
 }
 
 // redirectHost: the configured public name the browser used (server_name or
@@ -309,7 +286,7 @@ func (s *Server) ConsoleProxyHandler() http.Handler {
 			return
 		}
 		w.Header().Set("Strict-Transport-Security", hstsValue)
-		if s.proxyAuthLimited(w, r, client) {
+		if s.proxyAuthLimited(w, r, info) {
 			return
 		}
 		inner.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), keyProxied, info)))

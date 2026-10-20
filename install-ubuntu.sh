@@ -1779,7 +1779,7 @@ EOF
 
 CURL_CA=()
 PUBLIC_OK=0 AGENT_URL_NOW=""
-ADMIN_CREATED_EMAIL="" ADMIN_DEFAULT_PW=0
+ADMIN_CREATED_EMAIL="" ADMIN_DEFAULT_PW=0 ADMIN_SETUP_CODE="" ADMIN_SETUP_EMAIL="" ADMIN_SETUP_EXPIRES=""
 if [ $IS_SERVER = 1 ]; then
   step "Management server"
   # $SRV_DATA and $ETC/pki belong to $SVC_USER, which is internet-facing: root changes nothing
@@ -2018,6 +2018,21 @@ PY
   else
     ok "existing database: users are kept as they are (an upgrade creates no accounts)"
     [ "$ADMIN_EMAIL_SET" = 0 ] || warn "--admin-email is used on a fresh install only; this database already exists, nothing was created"
+  fi
+  # One-time setup code (S-1): while the built-in account still has the default password, its first
+  # sign-in also needs this code, so the shared default alone cannot take the account over. A new
+  # code on every run (fresh install, or an upgrade while the default is still in use); only its hash
+  # is stored and it ends when the password is changed. Shown once, in the summary.
+  setup_email_args=()
+  [ -n "$ADMIN_CREATED_EMAIL" ] && setup_email_args=(-email "$ADMIN_CREATED_EMAIL")
+  if out=$(as_user "$SVC_USER" "$PREFIX/bin/pmserver" setup-code -config "$ETC/pmserver.json" "${setup_email_args[@]}" -if-needed 2>&1); then
+    ADMIN_SETUP_CODE=$(printf '%s\n' "$out" | awk '/^setup_code:/{print $2}')
+    ADMIN_SETUP_EMAIL=$(printf '%s\n' "$out" | awk '/^email:/{print $2}')
+    ADMIN_SETUP_EXPIRES=$(printf '%s\n' "$out" | awk '/^expires_at:/{print $2}')
+    if [ -n "$ADMIN_SETUP_CODE" ]; then ok "one-time setup code issued for $ADMIN_SETUP_EMAIL (shown in the summary)"
+    else ok "built-in super admin: no setup code needed (it has its own password)"; fi
+  else
+    die "could not issue the setup code for the built-in super admin: $out"
   fi
   if [ $PUBLIC_WANTED = 1 ]; then
     step "Public certificate for the console"
@@ -2456,6 +2471,23 @@ if [ $IS_SERVER = 1 ]; then
   else
     echo "  Super admin:    existing accounts kept (an upgrade creates or re-enables no accounts)"
   fi
+  if [ -n "$ADMIN_SETUP_CODE" ]; then
+    echo
+    sc_line() { printf '  |  %-74s|\n' "$1"; }
+    echo "  +----------------------------------------------------------------------------+"
+    sc_line "FIRST SIGN-IN SETUP CODE (shown once; only its hash is stored)"
+    sc_line ""
+    sc_line "Account:     $ADMIN_SETUP_EMAIL"
+    sc_line "Setup code:  $ADMIN_SETUP_CODE"
+    sc_line "Expires:     $ADMIN_SETUP_EXPIRES (or when the password is changed)"
+    sc_line ""
+    sc_line "Sign in with the default password AND this code (Setup code field)."
+    sc_line "Without it the default password is refused. Lost or expired? On this server:"
+    sc_line "  sudo runuser -u $SVC_USER -- $PREFIX/bin/pmserver setup-code \\"
+    sc_line "    -config $ETC/pmserver.json"
+    echo "  +----------------------------------------------------------------------------+"
+    echo
+  fi
   echo "  Lost password:  sudo runuser -u $SVC_USER -- $PREFIX/bin/pmserver reset-admin -config $ETC/pmserver.json -email <email>"
   echo "  Backups:        daily → $BACKUP_DIR (keeps $BACKUP_KEEP); copy them off the machine (they hold the CA key)"
   if [ $INSECURE = 0 ] && [ $PUBLIC_OK = 0 ] && [ -z "$(state_get PUBLIC_NAMES)" ]; then
@@ -2470,7 +2502,8 @@ if [ $IS_SERVER = 1 ]; then
   cat <<EOF
 
   Next steps (in the console, $URL_PUBLIC):
-    1. Sign in: set a new password and enrol MFA when asked (first sign-in of the built-in account).
+    1. Sign in (built-in account: default password + the setup code above), then set a new password
+       and enrol MFA when asked.
     2. Settings → Users: create the bank's Admin.
     3. Endpoints → Create enrollment token → run the PowerShell line on each PC
        (Windows PowerShell as Administrator; the PC needs TCP $PORT to ${IP:-this server}).

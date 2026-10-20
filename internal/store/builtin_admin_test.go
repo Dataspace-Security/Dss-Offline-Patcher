@@ -59,7 +59,14 @@ func TestBuiltinSuperAdminDefaultPassword(t *testing.T) {
 		t.Log("OFFPATCH_TEST_DEFAULT_SA_PW not set: skipping the sign-in with the default password")
 		return
 	}
-	l, err := s.LoginPassword(ctx, DefaultSuperAdminEmail, plain, time.Hour)
+	if _, err := s.LoginPassword(ctx, DefaultSuperAdminEmail, plain, time.Hour); err == nil {
+		t.Fatal("the default password signed in without the setup code")
+	}
+	code, _, err := s.CreateSetupCode(ctx, DefaultSuperAdminEmail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := s.LoginSetupCodeFrom(ctx, DefaultSuperAdminEmail, plain, code, "", time.Hour)
 	if err != nil || l.Role != RoleSuperAdmin || !l.MustChangePassword {
 		t.Fatalf("sign in with the default password: %+v %v", l, err)
 	}

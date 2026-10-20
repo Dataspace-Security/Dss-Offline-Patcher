@@ -32,8 +32,10 @@ single-server deployment. Then:
    default `dsspatcher.local`, which the server announces by mDNS so admin PCs on the same
    network segment find it with no setup; from other subnets use internal DNS or the hosts-file
    line the installer prints, see §5.5) as
-   `superadmin@dataspacesecurity.com` with the default password (vendor handbook). The first
-   sign-in requires a new password and MFA enrolment (authenticator app). This account is created
+   `superadmin@dataspacesecurity.com` with the default password (vendor handbook) **and the
+   one-time setup code** the installer prints in a box at the end of its summary (the console shows
+   a "Setup code" field for this email). The first sign-in requires a new password and MFA
+   enrolment (authenticator app). This account is created
    on a **fresh install only** (no database yet); upgrades never create or re-enable accounts.
 3. **Settings → Users**: create the bank's Admin.
 4. **Endpoints → Create enrollment token** → run the PowerShell line on each PC as Administrator
@@ -257,7 +259,18 @@ is HTTP 403 and audited `access.denied`). The full matrix is in
   `superadmin@dataspacesecurity.com`) with the vendor's **default password** (in the vendor
   handbook; only its hash is in `pmserver`). The server forces a password change at the first
   sign-in (nothing else works until then), then the authenticator set-up; pmserver logs a warning at
-  every start while the default is in use. An account created by an earlier version that still has
+  every start while the default is in use.
+- **One-time setup code.** The default password is the same everywhere, so on its own it does not
+  sign in: while the account still has it, the sign-in also needs a setup code (12 characters,
+  `XXXX-XXXX-XXXX`), which only someone with root on the server can get. The installer prints one
+  in a box at the end of its summary on a fresh install, and again on every upgrade while the
+  default password is still in use (a new code replaces the old one). A lost or expired code:
+  `runuser -u offpatch -- /opt/offpatch/bin/pmserver setup-code -config /etc/offpatch/pmserver.json`
+  (printed once; audited `user.setup_code_created`). Only its hash is stored; it expires after
+  7 days and is deleted when the password is changed. A missing or wrong code gets the same
+  "wrong email or password" answer as a wrong password and counts towards the lockout (audited
+  `auth.login_failed`, reason "default password without a valid setup code"), so the code field
+  never tells anyone whether the default password was right. Other accounts never need a code. An account created by an earlier version that still has
   the default password gets the same forced change at the next start (audited
   `user.password_change_forced`). The super admin then creates the bank's first Admin. `pmserver create-admin -password-random` creates it with a random
   password printed once instead.
@@ -907,10 +920,14 @@ opens a second listener, `console_proxy`, on loopback for that proxy only:
   right-most `X-Forwarded-Proto` value (the one the proxy wrote). The main listener (8443) ignores
   all these headers, so they cannot be spoofed there.
 - **One sign-in limit for the whole listener.** Sign-in steps through it (`POST /api/auth/login`,
-  `/api/auth/mfa`, `/api/auth/password`, MFA confirm / disable) share a bucket of 30, then 1 per
-  second, on top of the per-client limits: any local process can send a made-up
-  `X-Forwarded-For`, so per-client limits alone do not stop guessing. Over the limit: **429**
-  with `Retry-After`.
+  `/api/auth/mfa`, `/api/auth/password`, MFA confirm / disable) are first checked against the
+  client's own limit (10, then 1 every 6 seconds); only requests that pass it count against a
+  bucket shared by the whole listener (30, then 1 per second): any local process can send a made-up
+  `X-Forwarded-For`, so per-client limits alone do not stop guessing, but one client can never
+  drain the shared bucket. When many addresses drain it at once, addresses that signed in
+  successfully through the proxy in the last 24 hours still get a reserved share (10, then 1 every
+  3 seconds). Over a limit: **429** with `Retry-After`. Refusals by the shared bucket for a minute
+  or more are logged as an error and raise one alert (`auth.signin_flood`).
 - **Never plain HTTP to the browser.** When `X-Forwarded-Proto` is not `https` (Temps also
   forwards its port 80 to the same upstream), `GET`/`HEAD` get **308** to
   `https://<name><path>` when the `X-Forwarded-Host` (else `Host`) is `server_name` or one of

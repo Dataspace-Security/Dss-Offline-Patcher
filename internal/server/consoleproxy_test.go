@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const proxyCfg = `"console_proxy": {"listen": "127.0.0.1:8090", "trusted_proxies": ["127.0.0.1/32", "::1/128"]},`
@@ -196,6 +197,8 @@ func TestConsoleProxyForwardedHeaders(t *testing.T) {
 func TestConsoleProxyGlobalAuthLimit(t *testing.T) {
 	s := newRolesServer(t, proxyCfg, true)
 	h := s.ConsoleProxyHandler()
+	frozen := time.Now() // no refill while the test runs, however slow
+	s.proxyAuth.shared.now = func() time.Time { return frozen }
 	bad := map[string]string{"email": "nobody@x.example", "password": "x"}
 	for i := 0; i < proxyAuthBurst; i++ {
 		xff := "198.51.100." + strconv.Itoa(i+1)
