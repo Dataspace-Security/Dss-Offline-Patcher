@@ -134,8 +134,8 @@ func (s *Store) ApproveDeployment(ctx context.Context, actor, role, id, reason s
 
 // FreshCredentials: an account whose credentials someone set (created it,
 // reset its password or MFA, changed its role) this recently is freshly
-// provisioned. Two approvals from fresh accounts of the same steward are
-// refused, and any approval from a fresh account raises an alert.
+// provisioned: an approval from it raises an alert. (Independence itself
+// is checked at any account age: checkSteward.)
 const FreshCredentials = 7 * 24 * time.Hour
 
 // steward is who last set a local account's credentials, and when
@@ -177,39 +177,72 @@ type approvalRefusal struct {
 }
 
 // checkSteward applies the credential-steward rules to actor's approval
-// of d: whoever set up the approver's account must not be the creator of
-// the deployment (that person could sign in as the approver), and two
-// accounts freshly set up by the same person do not count as two people.
+// of d. Two accounts are not independent when one set up the other's
+// credentials or the same person set up both, at any account age (security
+// review S-2: one admin could otherwise create the creator and both
+// approvers, wait, and pass the two-person rule alone). The approver must
+// be independent of the deployment's creator and of every earlier
+// approver. SSO accounts have no steward (the identity provider manages
+// them) and are independent unless they set up the other account.
 func (s *Store) checkSteward(ctx context.Context, tx *sql.Tx, d Deployment, actor string) (steward, *approvalRefusal, error) {
 	st, err := credSteward(ctx, tx, actor)
-	if err != nil || !st.local || st.by == "" {
+	if err != nil {
 		return st, nil, err
 	}
-	if st.by == d.CreatedBy {
-		return st, &approvalRefusal{
-			err: Errf(ErrConflict, "your account's credentials were last set (created or reset) by %s, who created this deployment, so your approval would not be a second person's; another approver is needed",
-				strings.TrimPrefix(st.by, "user:")),
-			details: map[string]any{"rule": "steward_is_creator", "credentials_set_by": st.by, "credentials_set_at": st.at, "created_by": d.CreatedBy},
-		}, nil
-	}
-	if !s.freshCredentials(st) {
-		return st, nil, nil
-	}
+	others := []struct{ who, role string }{{d.CreatedBy, "created this deployment"}}
 	for _, a := range d.Approvals {
-		o, err := credSteward(ctx, tx, a.By)
+		others = append(others, struct{ who, role string }{a.By, "already approved it"})
+	}
+	for _, o := range others {
+		ost, err := credSteward(ctx, tx, o.who)
 		if err != nil {
 			return st, nil, err
 		}
-		if o.by == st.by && s.freshCredentials(o) {
+		if why := notIndependent(actor, st, o.who, ost); why != "" {
 			return st, &approvalRefusal{
-				err: Errf(ErrConflict, "%s already approved, and %s set up both your accounts within the last %d days; approvals from accounts one person provisioned do not count as two people, so another approver is needed",
-					strings.TrimPrefix(a.By, "user:"), strings.TrimPrefix(st.by, "user:"), int(FreshCredentials.Hours()/24)),
-				details: map[string]any{"rule": "same_fresh_steward", "credentials_set_by": st.by, "credentials_set_at": st.at,
-					"other_approver": a.By, "other_credentials_set_at": o.at},
+				err: Errf(ErrConflict, "%s %s, and %s, so your approval would not be a second person's; an approver whose account was set up by someone else is needed",
+					strings.TrimPrefix(o.who, "user:"), o.role, why),
+				details: map[string]any{"rule": "steward", "credentials_set_by": st.by, "credentials_set_at": st.at,
+					"other": o.who, "other_credentials_set_by": ost.by, "why": why},
 			}, nil
 		}
 	}
 	return st, nil, nil
+}
+
+// independentOfApprovers refuses a package approval from an account that is
+// not independent of an earlier approver (same rule as deployments, S-3).
+func independentOfApprovers(ctx context.Context, tx querier, actor string, approvals []Approval) error {
+	st, err := credSteward(ctx, tx, actor)
+	if err != nil {
+		return err
+	}
+	for _, a := range approvals {
+		ost, err := credSteward(ctx, tx, a.By)
+		if err != nil {
+			return err
+		}
+		if why := notIndependent(actor, st, a.By, ost); why != "" {
+			return Errf(ErrConflict, "%s already approved this package, and %s, so your approval would not be a second person's; an approver whose account was set up by someone else is needed",
+				strings.TrimPrefix(a.By, "user:"), why)
+		}
+	}
+	return nil
+}
+
+// notIndependent says why accounts a and b (with their stewards) cannot
+// count as two people, or "" when they can.
+func notIndependent(a string, ast steward, b string, bst steward) string {
+	name := func(x string) string { return strings.TrimPrefix(x, "user:") }
+	switch {
+	case ast.by != "" && ast.by == b:
+		return fmt.Sprintf("%s set up your account's credentials", name(b))
+	case bst.by != "" && bst.by == a:
+		return fmt.Sprintf("you set up %s's credentials", name(b))
+	case ast.by != "" && ast.by == bst.by:
+		return fmt.Sprintf("%s set up both accounts' credentials", name(ast.by))
+	}
+	return ""
 }
 
 // activateDeployment starts an approved deployment: state active, targets

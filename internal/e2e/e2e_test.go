@@ -104,6 +104,15 @@ func newEnvOpts(t *testing.T, tlsMode bool, extra string) *env {
 		}
 		mode = `"pki_dir": "pki",`
 	}
+	// Most scenarios predate the bank defaults (two package approvers for
+	// critical/important, separation of duties): they keep one approver
+	// and no separation unless the test's extra config sets them.
+	if !strings.Contains(extra, `"separation_of_duties"`) {
+		extra += `"separation_of_duties": false,`
+	}
+	if !strings.Contains(extra, `"approval_policy"`) {
+		extra += `"approval_policy": {"critical": 1, "important": 1},`
+	}
 	cfgJSON := fmt.Sprintf(`{`+mode+extra+`"data_dir": %q, "trusted_keys":[{"public_key": %q, "sources":["acq-zone-1"]}],
 	  "intake_interval":"1h"}`, filepath.Join(dir, "data"), e.pubPEM)
 	cfgPath := filepath.Join(dir, "pmserver.json")
@@ -138,13 +147,13 @@ func newEnvOpts(t *testing.T, tlsMode bool, extra string) *env {
 	e.cfg = cfg
 	e.srvHandler = h
 	e.sess, e.mfa = map[string]string{}, map[string][]byte{}
-	// The bank's staff accounts were set up long ago (one person creating
-	// several accounts and approving with them recently is refused, see
-	// TestApprovalCredentialStewards).
+	// The bank's staff accounts were set up long ago, each by a different
+	// person (accounts one person set up don't count as two approvers, see
+	// TestApprovalCredentialStewardsAndFixedScope).
 	realNow := e.st.Now
 	e.st.Now = func() time.Time { return realNow().Add(-60 * 24 * time.Hour) }
 	for _, u := range envUsers {
-		if _, err := e.st.CreateLocalUser(context.Background(), store.Manager{Actor: "system:test", Role: store.RoleSuperAdmin},
+		if _, err := e.st.CreateLocalUser(context.Background(), store.Manager{Actor: "system:setup-" + u.tok, Role: store.RoleSuperAdmin},
 			store.NewLocalUser{Email: u.email, Role: u.role, Password: envPW}, false); err != nil {
 			t.Fatal(err)
 		}

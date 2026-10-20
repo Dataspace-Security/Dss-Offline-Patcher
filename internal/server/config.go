@@ -194,6 +194,21 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	c.dir = filepath.Dir(path)
 	c.mfaOptOut = explicitFalse(b, "require_mfa")
+	// Bank defaults (security review S-3): critical and important packages
+	// need two approvers, and whoever approved a package may not deploy it.
+	// Only an explicit "separation_of_duties": false or an approval_policy
+	// entry in the file changes that.
+	if !explicitFalse(b, "separation_of_duties") {
+		c.SeparationOfDuties = true
+	}
+	if c.ApprovalPolicy == nil {
+		c.ApprovalPolicy = map[string]int{}
+	}
+	for _, sev := range []string{"critical", "important"} {
+		if _, set := c.ApprovalPolicy[sev]; !set {
+			c.ApprovalPolicy[sev] = 2
+		}
+	}
 	if c.Listen == "" {
 		c.Listen = "127.0.0.1:8080"
 	}

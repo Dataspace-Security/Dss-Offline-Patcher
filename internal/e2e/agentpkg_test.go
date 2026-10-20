@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -20,10 +21,12 @@ func agentPkg(version string) manifest.Package {
 // returns its signed-in client: agent deployments need two bank admins.
 func (e *env) secondBankAdmin(t *testing.T) *http.Client {
 	t.Helper()
-	// Created by adam (a bank admin), not by the vendor who creates the
-	// agent deployments: an account its creator set up cannot approve.
-	if c := e.api("POST", "/api/users", tokAdmin, map[string]string{"email": "ada.admin@bank.example", "display_name": "Ada", "role": "admin", "password": "temporary password Ada"}, nil); c != 201 {
-		t.Fatalf("create second admin: %d", c)
+	// Set up by neither the vendor who creates the agent deployments nor
+	// adam who approves them too: accounts one person set up (or that set
+	// up the other) don't count as two people.
+	if _, err := e.st.CreateLocalUser(context.Background(), store.Manager{Actor: "system:setup-ada", Role: store.RoleSuperAdmin},
+		store.NewLocalUser{Email: "ada.admin@bank.example", DisplayName: "Ada", Role: store.RoleAdmin, Password: "temporary password Ada"}, true); err != nil {
+		t.Fatalf("create second admin: %v", err)
 	}
 	return e.passwordUser(t, "ada.admin@bank.example", "temporary password Ada", "ada's own passphrase")
 }

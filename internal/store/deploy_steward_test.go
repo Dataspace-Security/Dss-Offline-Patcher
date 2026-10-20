@@ -44,7 +44,7 @@ func TestApprovalStewardIsCreator(t *testing.T) {
 	at(s, -90*24*time.Hour, func() { mkUser(t, s, byAdmin, "x1@bank.example", RoleUser) })
 	d := newPending(t, s, byAdmin.Actor)
 	_, err := s.ApproveDeployment(ctx, "user:x1@bank.example", RoleUser, d.DeploymentID, "ok")
-	if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "who created this deployment") {
+	if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "set up your account's credentials") {
 		t.Fatalf("approval from an account the creator set up (90 days ago): %v", err)
 	}
 	if auditCount(t, s, "deployment.approval_refused", d.DeploymentID) != 1 {
@@ -78,8 +78,8 @@ func TestApprovalStewardIsCreator(t *testing.T) {
 }
 
 // The super admin (vendor) creates two bank users and approves with both:
-// two freshly provisioned accounts of one steward count as one person.
-func TestApprovalSameFreshSteward(t *testing.T) {
+// two accounts one person set up count as one person, at any age (S-2).
+func TestApprovalSameSteward(t *testing.T) {
 	s, ctx := approvalFixture(t)
 	mkUser(t, s, bySuper, "x1@bank.example", RoleUser)
 	mkUser(t, s, bySuper, "x2@bank.example", RoleUser)
@@ -97,24 +97,25 @@ func TestApprovalSameFreshSteward(t *testing.T) {
 		}
 	}
 	_, err := s.ApproveDeployment(ctx, "user:x2@bank.example", RoleUser, d.DeploymentID, "ok")
-	if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "do not count as two people") {
-		t.Fatalf("second fresh account of the same steward: %v", err)
+	if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "set up both accounts") {
+		t.Fatalf("second account of the same steward: %v", err)
 	}
 	// A real colleague (not provisioned by the same person) completes it.
 	got, err := s.ApproveDeployment(ctx, "user:approver-a", RoleUser, d.DeploymentID, "ok")
 	if err != nil || got.State != "active" {
 		t.Fatalf("colleague approves: %v %s", err, got.State)
 	}
-	// After the fresh window the same two accounts are ordinary colleagues.
+	// Waiting does not make them two people.
 	if _, err := s.DeploymentAction(ctx, "user:otto@bank.example", d.DeploymentID, "cancel", "redo"); err != nil {
 		t.Fatal(err)
 	}
 	at(s, FreshCredentials+time.Hour, func() {
 		d2 := newPending(t, s, "user:otto@bank.example")
-		for _, x := range []string{"x1", "x2"} {
-			if _, err := s.ApproveDeployment(ctx, "user:"+x+"@bank.example", RoleUser, d2.DeploymentID, "ok"); err != nil {
-				t.Fatalf("%s after %v: %v", x, FreshCredentials, err)
-			}
+		if _, err := s.ApproveDeployment(ctx, "user:x1@bank.example", RoleUser, d2.DeploymentID, "ok"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.ApproveDeployment(ctx, "user:x2@bank.example", RoleUser, d2.DeploymentID, "ok"); !errors.Is(err, ErrConflict) {
+			t.Fatalf("x2 after %v: %v", FreshCredentials, err)
 		}
 		if n := openAlertsOf(t, s, "approval_fresh_account", d2.DeploymentID); n != 0 {
 			t.Fatalf("accounts set up long ago raised %d alerts", n)
@@ -122,33 +123,50 @@ func TestApprovalSameFreshSteward(t *testing.T) {
 	})
 }
 
-// The normal case: one admin created every bank account months ago,
-// including the deployment's creator; two colleagues approve.
-func TestApprovalAccountsCreatedLongAgoByOneAdmin(t *testing.T) {
+// One admin who created every bank account (creator and approvers alike)
+// cannot complete a deployment through them, however long ago (S-2); nor
+// can that admin approve a deployment of an account they set up. Accounts
+// set up by different people are independent.
+func TestApprovalAccountsOfOneAdmin(t *testing.T) {
 	s, ctx := approvalFixture(t)
+	byBea := Manager{Actor: "user:bea@bank.example", Role: RoleAdmin}
 	at(s, -120*24*time.Hour, func() {
 		mkUser(t, s, bySuper, "adam@bank.example", RoleAdmin)
-		for _, u := range []string{"otto", "bob", "carol"} {
+		mkUser(t, s, bySuper, "bea@bank.example", RoleAdmin)
+		for _, u := range []string{"otto", "bob"} {
 			mkUser(t, s, byAdmin, u+"@bank.example", RoleUser)
 		}
+		mkUser(t, s, byBea, "carol@bank.example", RoleUser)
+		mkUser(t, s, bySuper, "dina@bank.example", RoleUser)
 	})
 	d := newPending(t, s, "user:otto@bank.example")
-	for _, u := range []string{"bob", "carol"} {
+	if _, err := s.ApproveDeployment(ctx, "user:bob@bank.example", RoleUser, d.DeploymentID, "CAB-1"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("bob (same steward as otto): %v", err)
+	}
+	if _, err := s.ApproveDeployment(ctx, byAdmin.Actor, RoleAdmin, d.DeploymentID, "CAB-1"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("adam (set up otto): %v", err)
+	}
+	for _, u := range []string{"carol", "dina"} {
 		if _, err := s.ApproveDeployment(ctx, "user:"+u+"@bank.example", RoleUser, d.DeploymentID, "CAB-1"); err != nil {
 			t.Fatalf("%s approves: %v", u, err)
 		}
 	}
 	got, _ := s.GetDeployment(ctx, d.DeploymentID)
 	if got.State != "active" || openAlertsOf(t, s, "approval_fresh_account", d.DeploymentID) != 0 {
-		t.Fatalf("normal approval: %s, alerts %d", got.State, openAlertsOf(t, s, "approval_fresh_account", d.DeploymentID))
+		t.Fatalf("independent approvals: %s, alerts %d", got.State, openAlertsOf(t, s, "approval_fresh_account", d.DeploymentID))
 	}
-	// The admin who created everyone may also approve (they are not the creator).
-	if _, err := s.DeploymentAction(ctx, "user:otto@bank.example", d.DeploymentID, "cancel", "redo"); err != nil {
-		t.Fatal(err)
+}
+
+// Package approvals follow the same independence rule (S-3).
+func TestPackageApprovalIndependence(t *testing.T) {
+	s, ctx := approvalFixture(t)
+	mkUser(t, s, bySuper, "x1@bank.example", RoleUser)
+	mkUser(t, s, bySuper, "x2@bank.example", RoleUser)
+	if err := independentOfApprovers(ctx, s.db, "user:x2@bank.example", []Approval{{By: "user:x1@bank.example"}}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("same steward: %v", err)
 	}
-	d2 := newPending(t, s, "user:otto@bank.example")
-	if _, err := s.ApproveDeployment(ctx, byAdmin.Actor, RoleAdmin, d2.DeploymentID, "ok"); err != nil {
-		t.Fatalf("admin approves: %v", err)
+	if err := independentOfApprovers(ctx, s.db, "user:approver-a", []Approval{{By: "user:x1@bank.example"}}); err != nil {
+		t.Fatalf("independent: %v", err)
 	}
 }
 

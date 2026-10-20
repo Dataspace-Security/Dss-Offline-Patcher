@@ -151,3 +151,28 @@ func TestLogAuthMode(t *testing.T) {
 		}
 	}
 }
+
+// Bank defaults (security review S-3): two approvers for critical and
+// important packages and separation of duties, unless the file says so.
+func TestApprovalDefaults(t *testing.T) {
+	load := func(extra string) *Config {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), "pmserver.json")
+		if err := os.WriteFile(p, []byte(`{`+extra+`"insecure_http": true, "data_dir": "data", "trusted_keys": [{"public_key": "x", "sources": ["a"]}]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := LoadConfig(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	c := load("")
+	if !c.SeparationOfDuties || c.ApprovalPolicy["critical"] != 2 || c.ApprovalPolicy["important"] != 2 || c.ApprovalPolicy["moderate"] != 0 {
+		t.Fatalf("defaults: sod %v policy %v", c.SeparationOfDuties, c.ApprovalPolicy)
+	}
+	c = load(`"separation_of_duties": false, "approval_policy": {"critical": 3, "important": 1},`)
+	if c.SeparationOfDuties || c.ApprovalPolicy["critical"] != 3 || c.ApprovalPolicy["important"] != 1 {
+		t.Fatalf("explicit: sod %v policy %v", c.SeparationOfDuties, c.ApprovalPolicy)
+	}
+}

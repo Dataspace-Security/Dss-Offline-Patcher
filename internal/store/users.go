@@ -41,11 +41,15 @@ type User struct {
 	// Local (password) users only.
 	MustChangePassword bool `json:"must_change_password"`
 	// MFAEnrolled: a local user with an authenticator app enrolled.
-	MFAEnrolled       bool   `json:"mfa_enrolled"`
-	Locked            bool   `json:"locked"`
-	LockedUntil       string `json:"locked_until,omitempty"`
-	CreatedBy         string `json:"created_by,omitempty"`
-	CreatedAt         string `json:"created_at,omitempty"`
+	MFAEnrolled bool   `json:"mfa_enrolled"`
+	Locked      bool   `json:"locked"`
+	LockedUntil string `json:"locked_until,omitempty"`
+	CreatedBy   string `json:"created_by,omitempty"`
+	CreatedAt   string `json:"created_at,omitempty"`
+	// CredSetBy: who last set the credentials (created the account, reset
+	// its password or MFA, changed its role). Accounts set up by the same
+	// person do not count as two approvers (deploy_approval.go).
+	CredSetBy         string `json:"cred_set_by,omitempty"`
 	PasswordChangedAt string `json:"password_changed_at,omitempty"`
 }
 
@@ -179,7 +183,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT u.username,u.role,u.source,u.email,u.mfa,u.first_login,u.last_login,u.disabled,u.disabled_reason,
 		(SELECT COUNT(*) FROM sessions s WHERE s.username=u.username AND s.revoked=0 AND s.expires_at > ?),
 		l.email IS NOT NULL, COALESCE(l.display_name,''), COALESCE(l.role,''), COALESCE(l.must_change_password,0), COALESCE(l.locked_until,''),
-		COALESCE(l.created_by,''), COALESCE(l.created_at,''), COALESCE(l.password_changed_at,''), COALESCE(f.enrolled_at,''),
+		COALESCE(l.created_by,''), COALESCE(l.created_at,''), COALESCE(l.password_changed_at,''), COALESCE(l.cred_set_by,''), COALESCE(f.enrolled_at,''),
 		COALESCE(f.locked_until,''), (SELECT COALESCE(MAX(x.locked_until),'') FROM login_failures x WHERE x.email=u.username)
 		FROM users u LEFT JOIN local_users l ON l.email=u.username LEFT JOIN mfa f ON f.email=u.username ORDER BY u.username`, now)
 	if err != nil {
@@ -193,7 +197,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 		var local bool
 		var lrole, mfaAt, mfaLock, srcLock string
 		if err := rows.Scan(&u.Username, &u.Role, &u.Source, &u.Email, &m, &u.FirstLogin, &u.LastLogin, &d, &u.DisabledReason, &u.ActiveSessions,
-			&local, &u.DisplayName, &lrole, &must, &u.LockedUntil, &u.CreatedBy, &u.CreatedAt, &u.PasswordChangedAt, &mfaAt, &mfaLock, &srcLock); err != nil {
+			&local, &u.DisplayName, &lrole, &must, &u.LockedUntil, &u.CreatedBy, &u.CreatedAt, &u.PasswordChangedAt, &u.CredSetBy, &mfaAt, &mfaLock, &srcLock); err != nil {
 			return nil, err
 		}
 		u.MFAEnrolled = mfaAt != ""

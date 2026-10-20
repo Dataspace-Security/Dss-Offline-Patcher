@@ -36,7 +36,7 @@ func TestApprovalCredentialStewardsAndFixedScope(t *testing.T) {
 	if c, b := call(t, y1, "POST", path, reason, true); c != 200 {
 		t.Fatalf("y1 approves: %d %s", c, b)
 	}
-	if c, b := call(t, y2, "POST", path, reason, true); c != 409 || !strings.Contains(string(b), "do not count as two people") {
+	if c, b := call(t, y2, "POST", path, reason, true); c != 409 || !strings.Contains(string(b), "set up both accounts") {
 		t.Fatalf("y2 (same fresh steward) approves: %d %s", c, b)
 	}
 	var as []store.Alert
@@ -90,7 +90,7 @@ func TestApprovalCredentialStewardsAndFixedScope(t *testing.T) {
 	if c != 201 {
 		t.Fatalf("boss creates rollback: %d %s", c, b)
 	}
-	if c, b := call(t, x1, "POST", e.srv.URL+"/api/deployments/"+r.DeploymentID+"/approve", reason, true); c != 409 || !strings.Contains(string(b), "who created this deployment") {
+	if c, b := call(t, x1, "POST", e.srv.URL+"/api/deployments/"+r.DeploymentID+"/approve", reason, true); c != 409 || !strings.Contains(string(b), "set up your account's credentials") {
 		t.Fatalf("approval from an account the creator set up: %d %s", c, b)
 	}
 	// And the admin cannot take over another admin's account instead.

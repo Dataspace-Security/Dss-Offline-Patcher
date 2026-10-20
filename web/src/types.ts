@@ -202,6 +202,8 @@ export type User = {
   source: string; email?: string; mfa?: boolean; mfa_enrolled?: boolean;
   first_login?: string; last_login: string; disabled: boolean; disabled_reason?: string; active_sessions?: number;
   must_change_password?: boolean; locked_until?: string; created_by?: string; created_at?: string;
+  /** Who last set the credentials; accounts set up by the same person don't count as two approvers. */
+  cred_set_by?: string;
 };
 /** POST /api/users and /reset_password may echo the temporary password; otherwise the one the console sent is shown. */
 export type UserWriteResponse = Partial<User> & { temp_password?: string; password?: string };

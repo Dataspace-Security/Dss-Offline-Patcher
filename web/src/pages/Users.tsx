@@ -62,7 +62,7 @@ export default function Users() {
       {rows.length > 0 && (
         <table className="table">
           <thead>
-            <tr><th>Name</th><th>Role</th><th>Signs in with</th><th>MFA</th><th>Last sign-in</th><th>Status</th><th /></tr>
+            <tr><th>Name</th><th>Role</th><th>Signs in with</th><th title="Who last set this account's credentials. Accounts set up by the same person (or one set up by the other) don't count as two approvers.">Set up by</th><th>MFA</th><th>Last sign-in</th><th>Status</th><th /></tr>
           </thead>
           <tbody>
             {rows.map((u) => {
@@ -79,6 +79,7 @@ export default function Users() {
                   </td>
                   <td><RoleBadge role={u.role} /></td>
                   <td>{local ? "E-mail and password" : "Single sign-on"}</td>
+                  <td className="small">{local ? (u.cred_set_by ? u.cred_set_by.replace(/^user:/, "") : <span className="muted">—</span>) : <span className="muted">identity provider</span>}</td>
                   <td><MfaCell u={u} /></td>
                   <td className="nowrap">{u.last_login ? <RelTime value={u.last_login} /> : <span className="muted">never</span>}</td>
                   <td><Status u={u} /></td>

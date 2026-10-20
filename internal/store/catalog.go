@@ -503,6 +503,9 @@ func (s *Store) SetPackageState(ctx context.Context, actor, id, action, reason s
 			if approvedBy(p, actor) {
 				return Errf(ErrConflict, "%s already approved this package; a different approver is required", actor)
 			}
+			if err := independentOfApprovers(ctx, tx, actor, p.Approvals); err != nil {
+				return err
+			}
 			if _, err := tx.Exec(`INSERT INTO package_approvals(package_id,approver,reason,at) VALUES(?,?,?,?)`, id, actor, reason, s.now()); err != nil {
 				return err
 			}

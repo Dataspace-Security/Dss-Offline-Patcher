@@ -72,10 +72,13 @@ func TestTwoPersonDeploymentApproval(t *testing.T) {
 		t.Fatalf("create admin: %d", c)
 	}
 	adam := e.passwordUser(t, "adam.bank@bank.example", "temporary password A", "adam's own passphrase")
-	for _, u := range []string{"uma", "ivy"} {
-		if c, b := call(t, adam, "POST", e.srv.URL+"/api/users", map[string]string{"email": u + "@bank.example", "role": "user", "password": "temporary password " + u}, true); c != 201 {
-			t.Fatalf("create %s: %d %s", u, c, b)
-		}
+	// uma by adam, ivy by the vendor: set up by different people, so they
+	// count as two (accounts one person set up would not).
+	if c, b := call(t, adam, "POST", e.srv.URL+"/api/users", map[string]string{"email": "uma@bank.example", "role": "user", "password": "temporary password uma"}, true); c != 201 {
+		t.Fatalf("create uma: %d %s", c, b)
+	}
+	if c := e.api("POST", "/api/users", tokSuper, map[string]string{"email": "ivy@bank.example", "role": "user", "password": "temporary password ivy"}, nil); c != 201 {
+		t.Fatalf("create ivy: %d", c)
 	}
 	uma := e.passwordUser(t, "uma@bank.example", "temporary password uma", "uma's own passphrase")
 	ivy := e.passwordUser(t, "ivy@bank.example", "temporary password ivy", "ivy's own passphrase")
@@ -123,7 +126,12 @@ func TestTwoPersonDeploymentApproval(t *testing.T) {
 	if simHasKB(a1, "KB5009301") {
 		t.Fatal("installed after one approval")
 	}
-	c, d2 := approve(adam, "CAB ok")
+	// adam set up uma's account (the creator): not a second person.
+	if c, _ := approve(adam, "CAB ok"); c != 409 {
+		t.Fatalf("approval by the creator's admin: %d", c)
+	}
+	var d2 store.Deployment
+	c = e.api("POST", "/api/deployments/"+d.DeploymentID+"/approve", tokApprover, map[string]string{"reason": "CAB ok"}, &d2)
 	if c != 200 || d2.State != "active" || len(d2.Approvals) != 2 || d2.ActivatedAt == "" || !strings.Contains(d2.StateReason, "ivy@bank.example") {
 		t.Fatalf("second approval: %d %+v", c, d2)
 	}
@@ -139,7 +147,7 @@ func TestTwoPersonDeploymentApproval(t *testing.T) {
 	var acts []string
 	for _, ev := range evs {
 		acts = append(acts, ev.Action)
-		if ev.Action == "deployment.activated" && (!strings.Contains(string(ev.Details), "ivy@bank.example") || !strings.Contains(string(ev.Details), "adam.bank@bank.example")) {
+		if ev.Action == "deployment.activated" && (!strings.Contains(string(ev.Details), "ivy@bank.example") || !strings.Contains(string(ev.Details), "alice@bank.test")) {
 			t.Fatalf("activation names: %s", ev.Details)
 		}
 	}

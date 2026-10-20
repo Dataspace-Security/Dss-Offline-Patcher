@@ -368,15 +368,26 @@ and the `metrics_token` for `GET /metrics` are unchanged.
 3. **Approve…** with a reason (mandatory), for example your change number: `CHG-1042 tested on
    reference images`. Use **Reject…** with a reason for content you will not deploy.
 
-**Two-person approval.** `approval_policy` sets the number of approvals per severity (1–5, default 1),
-for example `{"critical": 2, "important": 2}`. The first approval is recorded
+**Two-person approval.** `approval_policy` sets the number of approvals per severity (1–5). Default:
+2 for `critical` and `important`, 1 for `moderate` and `low`; set a severity in the file to change
+it, for example `{"critical": 3}`. The first approval is recorded
 (`package.approval_recorded`) and the package stays `quarantined` showing "Approvals · 1 of 2". A
 second, **different** approver must approve. The same person approving twice gets HTTP 409. Only
 the last required approval publishes the content to the repository.
 
-**Separation of duties.** With `separation_of_duties: true`, anyone who approved a package cannot
-create a deployment for it (HTTP 409 "separation of duties: … a different operator must deploy
-it"). Plan who approves and who deploys.
+**Separation of duties.** On by default (`"separation_of_duties": false` turns it off): anyone who
+approved a package cannot create a deployment for it (HTTP 409 "separation of duties: … a different
+operator must deploy it"). Plan who approves and who deploys.
+
+**Independent approvers.** Each local account records who last set its credentials (created it,
+reset its password or MFA, or changed its role). Two accounts do not count as two people when one
+of them set up the other, or the same person set up both, however long ago. This applies to the
+deployment's creator and every approver of a deployment, and to the approvers of a package
+(HTTP 409 "… so your approval would not be a second person's"). So the accounts of the people who
+create, approve and deploy must be set up by **different** admins (or come from SSO): for example
+the vendor super admin creates two bank admins, and each bank admin creates part of the team. A
+single admin who creates every account cannot complete an approval through them. An approval from
+an account set up in the last 7 days is allowed but raises a critical alert.
 
 ### 3.3 Creating a staged deployment
 
