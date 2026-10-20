@@ -109,6 +109,8 @@ var tableMigrations = []string{
 	mfaSchema,
 	// Auto-download policy (acquisition), one row per saved version.
 	acqPolicySchema,
+	// A proposed auto-download policy change waiting for a second super admin.
+	acqPolicyPendingSchema,
 	// Wrong passwords per (account, client address) (authlimits.go).
 	loginFailuresSchema,
 	// Approved endpoint set of each deployment (deploy_scope.go).

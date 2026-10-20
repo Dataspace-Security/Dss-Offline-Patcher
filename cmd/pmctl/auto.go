@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -111,6 +112,17 @@ type autoConfig struct {
 	// are allowed too; everything else is refused at dial time (SSRF).
 	AllowedPrivateHosts []string `json:"allowed_private_hosts"`
 
+	// PolicyPublicKeys pins the server's auto-download policy signing key
+	// (base64 Ed25519, `pmserver policy-key`; S-4): policy files not signed
+	// by one of them are refused. Empty: unsigned policies are accepted with
+	// a warning in the status report (upgrades).
+	PolicyPublicKeys []string `json:"policy_public_keys"`
+	// VendorSHA256Pins: per vendor-url source id, the SHA-256 the operator
+	// of this host confirmed. Where Authenticode cannot be checked (MSI/MSU
+	// on a Linux acquisition host) a vendor-url source is downloaded only
+	// when its expected_sha256 equals this pin (S-4).
+	VendorSHA256Pins map[string]string `json:"vendor_sha256_pins"`
+
 	// Advanced: alternative endpoints (tests, or an internal mirror).
 	CatalogURL         string `json:"catalog_url"`
 	MSRCURL            string `json:"msrc_url"`
@@ -120,6 +132,8 @@ type autoConfig struct {
 	keepLastN int
 	// net: the network guards (netpolicy.go), set by setupNet.
 	net *netPolicy
+	// policyPins: PolicyPublicKeys, parsed by loadAutoConfig.
+	policyPins []ed25519.PublicKey
 }
 
 type autoMSProd struct {
@@ -260,6 +274,7 @@ type autoReport struct {
 	PolicyEditedBy  string                   `json:"policy_edited_by,omitempty"`
 	PolicyAppliedAt string                   `json:"policy_applied_at,omitempty"`
 	PolicyError     string                   `json:"policy_error,omitempty"`
+	PolicySignature string                   `json:"policy_signature,omitempty"`
 	Sources         []acqstatus.SourceResult `json:"sources,omitempty"`
 	RunRequest      string                   `json:"run_request,omitempty"`
 	Defaults        *acqpolicy.Base          `json:"-"` // acquire.json as policy entries (status report only)
@@ -352,6 +367,14 @@ func loadAutoConfig(path string) (*autoConfig, error) {
 	c.Send.To, c.Send.Log = abs(c.Send.To), abs(c.Send.Log)
 	c.Requests = abs(c.Requests)
 	c.AuthenticodeRoots = abs(c.AuthenticodeRoots)
+	if c.policyPins, err = acqpolicy.ParsePins(c.PolicyPublicKeys); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
+	}
+	for id, sum := range c.VendorSHA256Pins {
+		if len(sum) != 64 || strings.Trim(strings.ToLower(sum), "0123456789abcdef") != "" {
+			return nil, fmt.Errorf("config: vendor_sha256_pins[%q]: 64 hexadecimal characters", id)
+		}
+	}
 	if c.WorkDir == "" || c.Key == "" {
 		return nil, errors.New("config: work_dir and key are required")
 	}
@@ -1098,7 +1121,7 @@ func sendStatus(c *autoConfig, rep *autoReport) error {
 		Error: rep.Error, New: rep.New, Skipped: rep.Skipped, Superseded: rep.Superseded, Failures: rep.Failures, Warnings: rep.Warnings,
 		BundleID: rep.BundleID, Sent: rep.Sent, Feeds: rep.Feeds, Items: rep.Items,
 		PolicyVersion: rep.PolicyVersion, PolicySHA256: rep.PolicySHA256, PolicyEditedBy: rep.PolicyEditedBy, PolicyAppliedAt: rep.PolicyAppliedAt,
-		PolicyError: rep.PolicyError, Sources: rep.Sources, Defaults: rep.Defaults, RunRequest: rep.RunRequest}
+		PolicyError: rep.PolicyError, PolicySignature: rep.PolicySignature, Sources: rep.Sources, Defaults: rep.Defaults, RunRequest: rep.RunRequest}
 	if r.Feeds == nil {
 		r.Feeds = []acqstatus.Feed{}
 	}

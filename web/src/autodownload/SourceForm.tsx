@@ -90,7 +90,7 @@ export function SourceForm({ initial, others, onClose, onSave }: SourceFormProps
               </select>
             </label>
             {text("expected_sha256", "SHA-256 from the vendor", { mono: true, hint: "64 characters. The download is refused if it does not match." })}
-            {text("signer", "…or code-signing name", { placeholder: "Acme Ltd", hint: "Only on a Windows downloader: the file must carry a valid signature from this name." })}
+            {text("signer", "Code-signing name (optional with a SHA-256)", { placeholder: "Acme Ltd", hint: "The file must carry a valid signature from exactly this name. Without it, the signer the downloader sees first is kept (pinned)." })}
             {s.kind === "msi"
               ? text("product_code", "MSI product code (optional)", { placeholder: "{GUID}", mono: true, hint: "Leave empty to read it from the file." })
               : text("kb", "KB number", { placeholder: "KB5044284" })}

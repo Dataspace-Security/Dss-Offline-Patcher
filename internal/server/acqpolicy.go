@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -47,6 +48,7 @@ type downloaderView struct {
 	PolicySHA256    string                   `json:"policy_sha256"`
 	PolicyAppliedAt string                   `json:"policy_applied_at"`
 	PolicyError     string                   `json:"policy_error,omitempty"`
+	PolicySignature string                   `json:"policy_signature,omitempty"`
 	RunRequest      string                   `json:"run_request,omitempty"`
 	Sources         []acqstatus.SourceResult `json:"sources"`
 	// Reports: false when the downloader's pmctl predates the policy (it
@@ -68,6 +70,11 @@ type policyResponse struct {
 	Delivery     policyDelivery           `json:"delivery"`
 	Choices      []acqpolicy.KnownWindows `json:"windows_choices"`
 	LastRun      *runRequested            `json:"last_run_request"`
+	// Pending: a source change waiting for a second super admin (S-4);
+	// CanApprove: the signed-in user may approve it (is not the proposer).
+	Pending    *store.AcqPolicyPending `json:"pending"`
+	CanApprove bool                    `json:"can_approve"`
+	Signing    policySigning           `json:"signing"`
 }
 
 type policyDelivery struct {
@@ -91,6 +98,7 @@ type reportPolicyFields struct {
 	PolicySHA256    string                   `json:"policy_sha256"`
 	PolicyAppliedAt string                   `json:"policy_applied_at"`
 	PolicyError     string                   `json:"policy_error"`
+	PolicySignature string                   `json:"policy_signature"`
 	RunRequest      string                   `json:"run_request"`
 	Sources         []acqstatus.SourceResult `json:"sources"`
 	Defaults        *acqpolicy.Base          `json:"defaults"`
@@ -112,7 +120,7 @@ func (s *Server) downloaderState(ctx context.Context) (*downloaderView, *acqpoli
 		}
 		if view == nil {
 			view = &downloaderView{Source: rec.Source, Host: f.Host, FinishedAt: rec.FinishedAt, Outcome: rec.Outcome, Schedule: f.Schedule,
-				PolicySHA256: f.PolicySHA256, PolicyAppliedAt: f.PolicyAppliedAt, PolicyError: f.PolicyError, RunRequest: f.RunRequest,
+				PolicySHA256: f.PolicySHA256, PolicyAppliedAt: f.PolicyAppliedAt, PolicyError: f.PolicyError, PolicySignature: f.PolicySignature, RunRequest: f.RunRequest,
 				Sources: f.Sources, Reports: f.Defaults != nil || f.PolicyVersion != nil}
 			if f.PolicyVersion != nil {
 				view.PolicyVersion = *f.PolicyVersion
@@ -192,6 +200,12 @@ func (s *Server) getAcqPolicy(w http.ResponseWriter, r *http.Request) {
 	if resp.DefaultFeeds == nil {
 		resp.DefaultFeeds = []string{}
 	}
+	if resp.Pending, err = s.store.GetAcqPolicyPending(ctx); err != nil {
+		s.fail(w, err)
+		return
+	}
+	resp.CanApprove = resp.Pending != nil && !strings.EqualFold(resp.Pending.ProposedBy, actor(r))
+	resp.Signing = s.policySigningView()
 	if raw, _ := s.store.GetMeta(ctx, metaLastRunRequest); raw != "" {
 		var lr runRequested
 		if json.Unmarshal([]byte(raw), &lr) == nil {
@@ -287,6 +301,11 @@ func (s *Server) putAcqPolicy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rec, err := s.store.SaveAcqPolicy(ctx, actor(r), p, base, defaults.Policy)
+	if errors.Is(err, store.ErrNeedsSecondApprover) {
+		// Adds or changes a download source: a second super admin approves it (S-4).
+		s.proposeAcqPolicy(w, r, p, base, defaults.Policy)
+		return
+	}
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -303,13 +322,19 @@ func (s *Server) queuePolicy(ctx context.Context, r *http.Request, rec store.Acq
 	if dir == "" {
 		return "", ""
 	}
-	b, _ := json.MarshalIndent(acqpolicy.NewFile(rec.Version, rec.EditedBy, rec.EditedAt, rec.Policy), "", "  ")
 	details := map[string]any{"version": rec.Version, "sha256": rec.SHA256, "queued_to": dir}
 	qerr := ""
-	if err := writeQueued(dir, acqpolicy.FileName(rec.Version), append(b, '\n')); err != nil {
+	b, err := s.signedPolicyFile(rec)
+	if err == nil {
+		err = writeQueued(dir, acqpolicy.FileName(rec.Version), b)
+	}
+	if err != nil {
 		s.log.Error("auto-download policy not queued (download the file and carry it)", "version", rec.Version, "dir", dir, "err", err)
 		qerr, dir = err.Error(), ""
 		details["queued_to"], details["queued_error"] = "", qerr
+	} else if v := s.policySigningView(); v.Error == "" {
+		details["signed_by"] = v.KeyID
+		s.store.SetMeta(ctx, metaPolicySignedQueued, strconv.Itoa(rec.Version)+" "+v.KeyID)
 	}
 	s.store.Audit(ctx, store.Ev{Actor: actor(r), Action: "acquisition.policy_queued", ObjectType: "acquisition_policy",
 		ObjectID: strconv.Itoa(rec.Version), Failure: qerr != "", Details: details})
@@ -350,13 +375,17 @@ func (s *Server) acqPolicyFile(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	b, _ := json.MarshalIndent(acqpolicy.NewFile(rec.Version, rec.EditedBy, rec.EditedAt, rec.Policy), "", "  ")
+	b, err := s.signedPolicyFile(rec)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
 	s.store.Audit(ctx, store.Ev{Actor: actor(r), Action: "acquisition.policy_downloaded", ObjectType: "acquisition_policy",
-		ObjectID: strconv.Itoa(rec.Version), Details: map[string]any{"version": rec.Version, "sha256": rec.SHA256}})
+		ObjectID: strconv.Itoa(rec.Version), Details: map[string]any{"version": rec.Version, "sha256": rec.SHA256, "signed_by": s.policySigningView().KeyID}})
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+acqpolicy.FileName(rec.Version)+`"`)
 	w.WriteHeader(200)
-	w.Write(append(b, '\n'))
+	w.Write(b)
 }
 
 // requeueAcqPolicy writes the latest version to acquisition_requests_dir

@@ -63,6 +63,9 @@ type Report struct {
 	PolicyEditedBy  string `json:"policy_edited_by,omitempty"`
 	PolicyAppliedAt string `json:"policy_applied_at,omitempty"`
 	PolicyError     string `json:"policy_error,omitempty"`
+	// PolicySignature: how the policy in force was verified ("ed25519:<key id>",
+	// or "unsigned: ..." when acquire.json pins no policy key; S-4).
+	PolicySignature string `json:"policy_signature,omitempty"`
 	// Sources: per policy source / app / Windows entry results this run.
 	Sources []SourceResult `json:"sources,omitempty"`
 	// Defaults: what acquire.json configures, as policy entries (the console

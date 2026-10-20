@@ -48,7 +48,7 @@ func TestNormalizeRejects(t *testing.T) {
 		"credentials (query parameter":   func(p *Policy) { p.Sources[1].URL = "https://downloads.acme.example/a.msi?access_token=1" },
 		"expected_sha256 or signer":      func(p *Policy) { p.Sources[1].ExpectedSHA256 = "" },
 		"64 hexadecimal":                 func(p *Policy) { p.Sources[1].ExpectedSHA256 = "abc" },
-		"not both":                       func(p *Policy) { p.Sources[1].Signer = "Acme Inc" },
+		"Authenticode subject":           func(p *Policy) { p.Sources[1].Signer = "A" },
 		"exe is not supported":           func(p *Policy) { p.Sources[1].Kind = "exe" },
 		"an msu needs its KB":            func(p *Policy) { p.Sources[1].Kind = "msu" },
 		"not a winget package id":        func(p *Policy) { p.Apps[0].ID = "chrome" },

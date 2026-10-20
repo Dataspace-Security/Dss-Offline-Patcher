@@ -21,6 +21,7 @@ package main
 // (the request watcher) into a full run.
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +30,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -62,26 +64,60 @@ type policyRun struct {
 
 	maxBytes  int64
 	keepLastN int
+
+	// pins: acquire.json policy_public_keys (S-4); sigStatus: how the
+	// policy in force was verified; acceptEqual: the active policy was
+	// refused for its signature, so a signed copy of the same version is
+	// taken.
+	pins        []ed25519.PublicKey
+	sigStatus   string
+	acceptEqual bool
 }
 
 const activePolicyFile = "policy.json"
 
 func (pr *policyRun) result(r acqstatus.SourceResult) { pr.results = append(pr.results, r) }
 
+// unpinnedStatus starts the signature status of a policy accepted without
+// a pin.
+const unpinnedStatus = "not verified: acquire.json has no policy_public_keys"
+
+// checkSignature verifies f against the pinned policy keys: the key id,
+// or an error (refused). Without pins every file is accepted and the
+// status says so (the caller warns).
+func (pr *policyRun) checkSignature(f *acqpolicy.File) (string, error) {
+	if len(pr.pins) == 0 {
+		if f.Signature != nil {
+			return unpinnedStatus + " (file signed by " + f.Signature.KeyID + ")", nil
+		}
+		return unpinnedStatus + " (file unsigned)", nil
+	}
+	id, err := f.VerifySignature(pr.pins)
+	if err != nil {
+		return "", fmt.Errorf("%w (acquire.json policy_public_keys pins the server's policy signing key)", err)
+	}
+	return id, nil
+}
+
 // loadPolicy reads the active policy, takes over newer policy files and
 // collects run requests from the requests folder.
 func loadPolicy(c *autoConfig, dry bool, rep *autoReport, st *autoState) *policyRun {
-	pr := &policyRun{}
+	pr := &policyRun{pins: c.policyPins}
 	activePath := filepath.Join(c.WorkDir, activePolicyFile)
 	var active *activePolicy
+	refusedVersion := 0
 	if b, err := os.ReadFile(activePath); err == nil {
 		var a activePolicy
 		if err := json.Unmarshal(b, &a); err != nil {
 			pr.errs = append(pr.errs, fmt.Sprintf("%s is damaged (%v): acquire.json alone applies until the console delivers the policy again", activePath, err))
 		} else if err := a.File.Validate(); err != nil {
 			pr.errs = append(pr.errs, fmt.Sprintf("%s no longer validates (%v): acquire.json alone applies until the console delivers the policy again", activePath, err))
+		} else if stat, err := pr.checkSignature(&a.File); err != nil {
+			pr.errs = append(pr.errs, fmt.Sprintf("the policy in force (version %d) is refused: %v: acquire.json alone applies until the console delivers a signed policy",
+				a.File.PolicyVersion, err))
+			refusedVersion, pr.acceptEqual = a.File.PolicyVersion, true
 		} else {
-			active = &a
+			active, pr.sigStatus = &a, stat
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		pr.errs = append(pr.errs, "active policy: "+err.Error())
@@ -89,7 +125,7 @@ func loadPolicy(c *autoConfig, dry bool, rep *autoReport, st *autoState) *policy
 
 	// The last accepted policy_version (state.json, and the active policy):
 	// older files are ignored, files too far ahead refused.
-	seen := st.PolicyVersion
+	seen := max(st.PolicyVersion, refusedVersion)
 	if active != nil && active.File.PolicyVersion > seen {
 		seen = active.File.PolicyVersion
 	}
@@ -97,6 +133,7 @@ func loadPolicy(c *autoConfig, dry bool, rep *autoReport, st *autoState) *policy
 		newest := pickPolicyFiles(c.Requests, seen, dry, pr)
 		if newest != nil {
 			active = &activePolicy{File: *newest, AppliedAt: autoNow().UTC().Format(time.RFC3339)}
+			pr.sigStatus, _ = pr.checkSignature(newest)
 			if !dry {
 				if err := saveJSON(activePath, active); err != nil {
 					pr.errs = append(pr.errs, "policy not kept: "+err.Error())
@@ -110,6 +147,12 @@ func loadPolicy(c *autoConfig, dry bool, rep *autoReport, st *autoState) *policy
 	}
 	if active != nil {
 		pr.file, pr.appliedAt = &active.File, active.AppliedAt
+		if strings.HasPrefix(pr.sigStatus, unpinnedStatus) {
+			w := fmt.Sprintf("auto-download policy version %d applied without a signature check: %s; add the server's key (pmserver policy-key) to policy_public_keys",
+				active.File.PolicyVersion, pr.sigStatus)
+			fmt.Fprintln(os.Stderr, "WARN:", w)
+			rep.Warnings = append(rep.Warnings, w)
+		}
 	}
 	for _, e := range pr.errs {
 		rep.Warnings = append(rep.Warnings, "auto-download policy: "+e)
@@ -140,6 +183,9 @@ func pickPolicyFiles(dir string, cur int, dry bool, pr *policyRun) *acqpolicy.Fi
 			continue
 		}
 		f, err := readPolicyFile(p)
+		if err == nil {
+			_, err = pr.checkSignature(f)
+		}
 		if err != nil {
 			pr.errs = append(pr.errs, fmt.Sprintf("%s refused: %v", filepath.Base(p), err))
 			if !dry {
@@ -160,7 +206,7 @@ func pickPolicyFiles(dir string, cur int, dry bool, pr *policyRun) *acqpolicy.Fi
 	var newest *acqpolicy.File
 	for _, cd := range good {
 		switch {
-		case cd.f.PolicyVersion > cur && (newest == nil || cd.f.PolicyVersion > newest.PolicyVersion):
+		case (cd.f.PolicyVersion > cur || pr.acceptEqual && cd.f.PolicyVersion == cur) && (newest == nil || cd.f.PolicyVersion > newest.PolicyVersion):
 			newest = cd.f
 		case cd.f.PolicyVersion < cur:
 			autoWarn(fmt.Sprintf("auto-download policy: %s is version %d, older than the applied version %d; ignored", filepath.Base(cd.path), cd.f.PolicyVersion, cur))
@@ -433,7 +479,11 @@ func policySourceProblem(c *autoConfig, s acqpolicy.Source) string {
 		if f.url == "" {
 			continue
 		}
-		if err := c.checkPolicyURL(f.url); err != nil {
+		check := c.checkPolicyURL
+		if s.Type == acqpolicy.SourceVendorURL {
+			check = c.checkVendorURL
+		}
+		if err := check(f.url); err != nil {
 			return f.name + " " + hostOf(f.url) + ": " + strings.TrimPrefix(err.Error(), acquire.ErrNetworkRefused.Error()+": ")
 		}
 	}
@@ -597,24 +647,11 @@ func fetchVendor(r *requestRun, s acqpolicy.Source) (string, error) {
 		name = id + "." + s.Kind
 	}
 	name = unsafeIDChars.ReplaceAllString(name, "_")
-	// The URL comes from the policy: held to allowed_source_hosts, redirects too.
-	hc := r.c.netFor().strict.Client(r.hc)
-	sha, verified := s.ExpectedSHA256, "sha256(auto-download policy source "+s.ID+")"
-	var vs *manifest.VendorSignature
-	var err error
-	if sha == "" {
-		var info signerInfo
-		if sha, info, err = downloadAuthenticode(r.ctx, hc, s.URL, r.downloads, name, s.Signer); err != nil {
-			return "", err
-		}
-		v, perr := pinInstaller(r.ctx, r.c, r.pins, pinKeyVendor(s.ID), s.Version, "", info)
-		if perr != nil {
-			os.Remove(filepath.Join(r.downloads, name)) // never left where a later run could pick it up unchecked
-			return "", perr
-		}
-		vs = &v
-		verified = "authenticode(" + info.CN + ")"
-	} else if _, err = acquire.Download(r.ctx, hc, acquire.DownloadRequest{URL: s.URL, DestDir: r.downloads, FileName: name, SHA256: sha}); err != nil {
+	// The URL comes from the policy: held to allowed_source_hosts (never
+	// shared hosting), redirects too.
+	hc := r.c.netFor().vendor.Client(r.hc)
+	sha, verified, vs, err := downloadVendor(r, hc, s, name)
+	if err != nil {
 		return "", err
 	}
 	code := s.ProductCode
@@ -635,6 +672,69 @@ func fetchVendor(r *requestRun, s acqpolicy.Source) (string, error) {
 	r.st.Families[id] = "vendor:" + s.ID
 	return id, nil
 }
+
+// downloadVendor fetches and verifies a vendor-url download (finding S-4).
+// Every file must pass Authenticode and the signer pin (signerpin.go); a
+// policy expected_sha256 is checked as well, never instead. Where this host
+// cannot check Authenticode (MSI and MSU on a non-Windows acquisition
+// host), the source is downloaded only when its expected_sha256 equals the
+// local pin in acquire.json vendor_sha256_pins; otherwise it is refused
+// (reported "unsupported"). Returns the SHA-256, the "verified" label and
+// the vendor signature.
+func downloadVendor(r *requestRun, hc *http.Client, s acqpolicy.Source, name string) (string, string, *manifest.VendorSignature, error) {
+	if !authenticodeAvailable(name) {
+		pin := strings.ToLower(r.c.VendorSHA256Pins[s.ID])
+		if pin == "" || s.ExpectedSHA256 == "" || pin != s.ExpectedSHA256 {
+			return "", "", nil, unsupportedItem("Authenticode needs a Windows acquisition host",
+				fmt.Sprintf("%s: %s signatures cannot be checked on this acquisition host, and acquire.json vendor_sha256_pins does not confirm the policy's expected_sha256 for this source: use a Windows acquisition host, or pin the SHA-256 in acquire.json", s.ID, strings.ToUpper(s.Kind)))
+		}
+		if _, err := acquire.Download(r.ctx, hc, acquire.DownloadRequest{URL: s.URL, DestDir: r.downloads, FileName: name, SHA256: pin}); err != nil {
+			return "", "", nil, err
+		}
+		return pin, "sha256(acquire.json vendor_sha256_pins " + s.ID + "; Authenticode not available on this host)", nil, nil
+	}
+	want := parseSignerSpec(s.Signer)
+	var got signerInfo
+	sha, err := downloadVerified(r.ctx, hc, s.URL, r.downloads, name, func(p string) error {
+		if s.ExpectedSHA256 != "" {
+			if _, h, err := manifest.HashFile(p); err != nil || h != s.ExpectedSHA256 {
+				return fmt.Errorf("%w: sha256 %s does not match the policy's expected_sha256", errExeSignature, h)
+			}
+		}
+		info, err := signerOfFile(p)
+		if err != nil {
+			return fmt.Errorf("authenticode check failed: %w", err)
+		}
+		if s.Signer != "" && !want.matches(info.signerName) {
+			return fmt.Errorf("%w: authenticode check failed: signed by %s, want exactly %s", errExeSignature, info.signerName, want)
+		}
+		got = info
+		return nil
+	})
+	if err != nil {
+		return "", "", nil, err
+	}
+	v, err := pinInstaller(r.ctx, r.c, r.pins, pinKeyVendor(s.ID), s.Version, "", got)
+	if err != nil {
+		os.Remove(filepath.Join(r.downloads, name)) // never left where a later run could pick it up unchecked
+		return "", "", nil, err
+	}
+	verified := "authenticode(" + got.CN + ")"
+	if s.ExpectedSHA256 != "" {
+		verified += "+sha256(auto-download policy source " + s.ID + ")"
+	}
+	return sha, verified, &v, nil
+}
+
+// authenticodeAvailable: this host can check the Authenticode signature
+// of the file name (PE files everywhere, MSI / MSU on Windows only).
+func authenticodeAvailable(name string) bool {
+	return windowsAuthenticode() || strings.EqualFold(filepath.Ext(name), ".exe")
+}
+
+// windowsAuthenticode: MSI / MSU signatures can be checked here (a hook
+// for tests of the Linux acquisition host).
+var windowsAuthenticode = func() bool { return runtime.GOOS == "windows" || authenticodeAnywhere }
 
 // windowsResults copies the Microsoft feed outcome onto the policy's
 // Windows entries that are downloaded this run.
@@ -763,6 +863,9 @@ func policyReport(rep *autoReport, pr *policyRun, cfgPath string) {
 		}
 	}
 	rep.PolicyError = strings.Join(pr.errs, "; ")
+	if pr.file != nil {
+		rep.PolicySignature = pr.sigStatus
+	}
 	rep.RunRequest = pr.runID
 	if pr.file != nil {
 		rep.PolicyVersion, rep.PolicySHA256, rep.PolicyEditedBy, rep.PolicyAppliedAt = pr.file.PolicyVersion, pr.file.SHA256, pr.file.EditedBy, pr.appliedAt

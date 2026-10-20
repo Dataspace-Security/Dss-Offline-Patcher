@@ -21,7 +21,6 @@ import (
 	_ "time/tzdata" // maintenance windows and deadlines resolve zones on hosts without tzdata
 
 	"offpatch/internal/auditexport"
-	"offpatch/internal/backup"
 	"offpatch/internal/compliance"
 	"offpatch/internal/intake"
 	"offpatch/internal/manifest"
@@ -41,7 +40,7 @@ func main() {
 				os.Exit(1)
 			}
 			return
-		case "backup", "restore", "verify-backup":
+		case "backup", "restore", "verify-backup", "decrypt-backup":
 			if err := backupCmd(os.Args[1], os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, "error:", err)
 				os.Exit(1)
@@ -73,6 +72,18 @@ func main() {
 			return
 		case "init-pki":
 			if err := initPKI(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+				os.Exit(1)
+			}
+			return
+		case "policy-key":
+			if err := policyKeyCmd(os.Args[2:], os.Stdout); err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+				os.Exit(1)
+			}
+			return
+		case "backup-keygen":
+			if err := backupKeygenCmd(os.Args[2:], os.Stdout); err != nil {
 				fmt.Fprintln(os.Stderr, "error:", err)
 				os.Exit(1)
 			}
@@ -169,6 +180,7 @@ func run(cfgPath string, log *slog.Logger) error {
 			log.Warn("acquisition_requests_dir not writable: requests will not be queued directly (operators carry the downloaded file)", "dir", d, "err", err)
 		} else {
 			log.Info("acquisition requests are queued directly (co-located acquisition)", "dir", d)
+			h.QueueSignedPolicy(ctx) // signed copy of the policy in force (S-4), once per version and key
 		}
 	}
 
@@ -471,66 +483,6 @@ func verifyReport(args []string) error {
 	}
 	fmt.Printf("compliance package OK: report %s, period %s to %s, generated %s by %s, %d files, key %s\n",
 		m.ReportID, m.Period.From, m.Period.To, m.GeneratedAt, m.GeneratedBy.User, len(m.Files), m.PublicKeyFingerprint)
-	return nil
-}
-
-// backupCmd implements backup / restore / verify-backup.
-func backupCmd(cmd string, args []string) error {
-	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
-	cfgPath := fs.String("config", "pmserver.json", "server config")
-	dir := fs.String("dir", "", "backup directory")
-	noPKI := fs.Bool("no-pki", false, "backup: exclude the CA private key and server key")
-	force := fs.Bool("force", false, "restore: overwrite an existing database (stop the server first)")
-	fs.Parse(args)
-	if *dir == "" {
-		return fmt.Errorf("-dir is required")
-	}
-	ctx := context.Background()
-	if cmd == "verify-backup" {
-		m, err := backup.Verify(*dir)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("backup OK: %d files, created %s, audit seq %d\n", len(m.Files), m.CreatedAt, m.AuditSeq)
-		return nil
-	}
-	cfg, err := server.LoadConfig(*cfgPath)
-	if err != nil {
-		return err
-	}
-	l := backup.Layout{DataDir: cfg.DataDir, PKIDir: cfg.PKIDir, ConfigFile: *cfgPath}
-	if cmd == "restore" {
-		m, err := backup.Restore(ctx, *dir, l, *force)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("restored %d files into %s; audit chain verified to seq %d; approved content verified\n", len(m.Files), cfg.DataDir, m.AuditSeq)
-		// Restore evidence for the compliance report (PM-16), in the restored database.
-		if st, err := store.Open(filepath.Join(cfg.DataDir, "pm.db")); err == nil {
-			st.Audit(ctx, store.Ev{Actor: "system:backup", Action: "backup.restored", ObjectType: "backup", ObjectID: *dir,
-				Details: map[string]any{"files": len(m.Files), "backup_created_at": m.CreatedAt, "audit_seq": m.AuditSeq}})
-			st.Close()
-		}
-		return nil
-	}
-	st, err := store.Open(filepath.Join(cfg.DataDir, "pm.db"))
-	if err != nil {
-		return err
-	}
-	defer st.Close()
-	m, err := backup.Create(ctx, st, l, *dir, !*noPKI)
-	if err != nil {
-		return err
-	}
-	// Backup evidence for the compliance report (PM-12 / PM-16).
-	if err := st.Audit(ctx, store.Ev{Actor: "system:backup", Action: "backup.created", ObjectType: "backup", ObjectID: *dir,
-		Details: map[string]any{"files": len(m.Files), "audit_seq": m.AuditSeq, "include_pki": m.IncludePKI, "created_at": m.CreatedAt}}); err != nil {
-		return err
-	}
-	if !*noPKI && cfg.PKIDir != "" {
-		fmt.Println("WARNING: backup contains the CA private key — store it encrypted and access-controlled")
-	}
-	fmt.Printf("backup written to %s: %d files, audit seq %d\nverify with: pmserver verify-backup -dir %s\n", *dir, len(m.Files), m.AuditSeq, *dir)
 	return nil
 }
 

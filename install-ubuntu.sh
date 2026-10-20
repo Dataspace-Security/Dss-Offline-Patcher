@@ -1427,9 +1427,14 @@ if [ $IS_SERVER = 1 ] && [ $SERVER_CONFIGURED = 1 ] && [ -f "$SRV_DATA/pm.db" ] 
   else
     ensure_backup_dir
     pre="$BACKUP_DIR/pre-upgrade-$(date -u +%Y%m%dT%H%M%SZ)"
-    if ( cd / && runuser -u "$SVC_USER" -- "$PREFIX/bin/pmserver" backup -config "$ETC/pmserver.json" -dir "$pre" >/dev/null \
-         && runuser -u "$SVC_USER" -- "$PREFIX/bin/pmserver" verify-backup -dir "$pre" >/dev/null ); then
+    # Encrypted (S-6) when the running version can (it knows -recipients) and the backup key exists;
+    # a version from before encrypted backups writes it in plaintext (warned below).
+    pre_enc=() pre_help=$("$PREFIX/bin/pmserver" backup -h 2>&1 || true)
+    case "$pre_help" in *-recipients*) [ ! -f "$ETC/backup-recipients.txt" ] || pre_enc=(-recipients "$ETC/backup-recipients.txt") ;; esac
+    if ( cd / && runuser -u "$SVC_USER" -- "$PREFIX/bin/pmserver" backup -config "$ETC/pmserver.json" "${pre_enc[@]}" -dir "$pre" >/dev/null \
+         && runuser -u "$SVC_USER" -- "$PREFIX/bin/pmserver" verify-backup -config "$ETC/pmserver.json" -dir "$pre" >/dev/null ); then
       ok "verified backup of the running version → $pre"
+      [ ${#pre_enc[@]} -gt 0 ] || warn "this pre-upgrade backup is NOT encrypted (the running version predates encrypted backups): it holds the CA key and mfa.key; delete $pre once the upgrade is verified"
     else
       as_user "$SVC_USER" rm -rf -- "$pre"
       die "pre-upgrade backup failed (see above); nothing was changed. Fix it, or re-run with --skip-backup"
@@ -1677,12 +1682,89 @@ start_server() {
 
 same_fs() { [ "$(stat -c %d "$1")" = "$(stat -c %d "$2")" ]; }
 
+# Backup encryption (S-6): backups are encrypted (age) to the bank's backup key and backup.json is
+# signed with the audit-signing key. The installer creates the key pair once: the public key in
+# $BACKUP_RECIPIENTS (read by the backup service), the private key (identity) in $BACKUP_IDENTITY,
+# root-only (0400): the internet-facing server account cannot decrypt its own backups. The bank moves
+# the identity OFFLINE (safe, HSM, password manager) and deletes it here; it is needed only to restore.
+# Every installer run warns while it is still on this machine. A bank with its own age key writes its
+# public key to $BACKUP_RECIPIENTS before installing (no key pair is generated then).
+BACKUP_RECIPIENTS=$ETC/backup-recipients.txt
+BACKUP_IDENTITY=/root/offpatch-backup-identity.txt
+BACKUP_PLAIN_COUNT=0
+backup_keys() {
+  local m n=0
+  [ ! -L "$BACKUP_RECIPIENTS" ] || die "$BACKUP_RECIPIENTS is a symbolic link: refusing to continue (inspect it)"
+  if [ ! -f "$BACKUP_RECIPIENTS" ]; then
+    [ ! -e "$BACKUP_IDENTITY" ] || die "$BACKUP_IDENTITY exists but $BACKUP_RECIPIENTS does not: put the matching public key (its '# public key:' line) in $BACKUP_RECIPIENTS, or move the old identity away"
+    "$PREFIX/bin/pmserver" backup-keygen -out "$BACKUP_IDENTITY" -recipient-out "$BACKUP_RECIPIENTS" \
+      -comment "host $(hostname), created $(date -u +%Y-%m-%dT%H:%M:%SZ) by install-ubuntu.sh" >/dev/null \
+      || die "could not create the backup encryption key"
+    ok "backup encryption key created: backups are encrypted to the public key in $BACKUP_RECIPIENTS"
+  fi
+  chown root:"$SVC_USER" "$BACKUP_RECIPIENTS"; chmod 0640 "$BACKUP_RECIPIENTS"
+  if [ -f "$BACKUP_IDENTITY" ]; then
+    chown root:root "$BACKUP_IDENTITY"; chmod 0400 "$BACKUP_IDENTITY"
+    banner "The backup PRIVATE key is on this machine: $BACKUP_IDENTITY (root only)." \
+           "It decrypts every backup, including the CA key and mfa.key. Copy it OFFLINE now" \
+           "(bank safe / HSM / password manager, two copies), then delete it here:" \
+           "  sudo cat $BACKUP_IDENTITY     (store the whole file)" \
+           "  sudo shred -u $BACKUP_IDENTITY" \
+           "Restores need it: pmserver restore ... -identity <file> (runbook 05)."
+  fi
+  # Backups made before encryption stay as they are (never deleted here), with a warning.
+  while IFS= read -r m; do
+    [ -f "$(dirname "$m")/data.tar.age" ] || n=$((n + 1))
+  done < <(find -P "$BACKUP_DIR" -mindepth 2 -maxdepth 2 -type f -name backup.json 2>/dev/null)
+  BACKUP_PLAIN_COUNT=$n
+  [ "$n" = 0 ] || warn "$n earlier backup(s) in $BACKUP_DIR are NOT encrypted (made before encrypted backups): they hold the CA key and mfa.key in plaintext. Delete them once a new encrypted backup is verified (sudo systemctl start offpatch-backup.service)"
+}
+
+# Signed auto-download policies (S-4): pmserver signs every policy file it writes for pmctl with
+# $SRV_DATA/policy-signing.key (created by pmserver, owned by $SVC_USER, 0600); pmctl accepts only
+# files signed by a key pinned in acquire.json policy_public_keys. Role all: pinned here on every
+# run (upgrades become strict). Two machines: printed on the server, added on the acquisition host.
+policy_pub() { as_user "$SVC_USER" "$PREFIX/bin/pmserver" policy-key -config "$ETC/pmserver.json" 2>/dev/null; }
+pin_policy_key() {
+  local pub msg
+  if ! pub=$(policy_pub) || [ -z "$pub" ]; then
+    warn "could not read the auto-download policy signing key; pmctl accepts unsigned policies until $ETC/acquire.json has \"policy_public_keys\""
+    return 0
+  fi
+  if ! command -v python3 >/dev/null; then
+    warn "python3 not found: add \"policy_public_keys\": [\"$pub\"] to $ETC/acquire.json by hand"
+    return 0
+  fi
+  if msg=$(python3 - "$ETC/acquire.json" "$pub" <<'PY'
+import json, sys
+p, k = sys.argv[1], sys.argv[2]
+c = json.load(open(p))
+keys = c.get("policy_public_keys") or []
+if k not in keys:
+    c["policy_public_keys"] = keys + [k]
+    json.dump(c, open(p, "w"), indent=2)
+    print("auto-download policies are accepted only when signed by this server (policy_public_keys)")
+PY
+); then
+    if [ -n "$msg" ]; then ok "$ETC/acquire.json: $msg"; fi
+  else
+    warn "could not update $ETC/acquire.json; add \"policy_public_keys\": [\"$pub\"] by hand"
+  fi
+}
+policy_key_note() {
+  local pub
+  pub=$(policy_pub) || return 0
+  ok "auto-download policy signing key: on the acquisition host add to $ETC/acquire.json  \"policy_public_keys\": [\"$pub\"]"
+}
+
 install_backup() {
   ensure_backup_dir
+  backup_keys
   cat > "$PREFIX/bin/offpatch-backup" <<'EOF'
 #!/bin/sh
 # Scheduled offpatch server backup (written by install-ubuntu.sh; runs as the server user).
-# pmserver backup + verify-backup into a new timestamped directory, then keeps the newest @KEEP@.
+# pmserver backup (encrypted to @RECIPIENTS@, manifest signed) + verify-backup into a new
+# timestamped directory, then keeps the newest @KEEP@.
 set -eu
 DIR=@BACKUP_DIR@
 dest="$DIR/$(date -u +%Y%m%dT%H%M%SZ)"
@@ -1692,7 +1774,7 @@ if [ -n "$need" ] && [ -n "$avail" ] && [ "$avail" -lt "$need" ]; then
   echo "offpatch-backup: not enough space in $DIR (need ~${need} KiB, ${avail} KiB free)" >&2
   exit 1
 fi
-if ! @PREFIX@/bin/pmserver backup -config @CONFIG@ -dir "$dest" || ! @PREFIX@/bin/pmserver verify-backup -dir "$dest"; then
+if ! @PREFIX@/bin/pmserver backup -config @CONFIG@ -recipients @RECIPIENTS@ -dir "$dest" || ! @PREFIX@/bin/pmserver verify-backup -config @CONFIG@ -dir "$dest"; then
   echo "offpatch-backup: backup or verification FAILED; removing the incomplete $dest" >&2
   rm -rf -- "$dest"
   exit 1
@@ -1703,7 +1785,7 @@ find -P "$DIR" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*T*Z' | sort -r | tai
 done
 EOF
   sed -i -e "s|@BACKUP_DIR@|$BACKUP_DIR|g" -e "s|@SRV_DATA@|$SRV_DATA|g" -e "s|@PREFIX@|$PREFIX|g" \
-         -e "s|@CONFIG@|$ETC/pmserver.json|g" -e "s|@KEEP@|$BACKUP_KEEP|g" "$PREFIX/bin/offpatch-backup"
+         -e "s|@CONFIG@|$ETC/pmserver.json|g" -e "s|@KEEP@|$BACKUP_KEEP|g" -e "s|@RECIPIENTS@|$BACKUP_RECIPIENTS|g" "$PREFIX/bin/offpatch-backup"
   chmod 0755 "$PREFIX/bin/offpatch-backup"
   if [ $HAVE_SYSTEMD = 0 ]; then
     warn "no systemd: schedule daily backups from cron:  runuser -u $SVC_USER -- $PREFIX/bin/offpatch-backup"
@@ -1773,7 +1855,7 @@ EOF
   systemctl enable --now offpatch-backup.timer >/dev/null 2>&1
   ok "daily verified backup at 02:30 → $BACKUP_DIR (keeps $BACKUP_KEEP; failures logged as offpatch-backup errors)"
   if same_fs "$BACKUP_DIR" "$SRV_DATA"; then
-    warn "backups are on the same filesystem as the data: copy $BACKUP_DIR off the machine (encrypted; it holds the CA key), or use --backup-dir on other storage"
+    warn "backups are on the same filesystem as the data: copy $BACKUP_DIR off the machine (the backups are encrypted; one disk failure loses both), or use --backup-dir on other storage"
   fi
 }
 
@@ -2047,6 +2129,7 @@ PY
   ok "server running at $URL_PUBLIC"
   [ $PUBLIC_OK = 0 ] || check_public_https "$PORT"
   install_backup
+  [ "$ROLE" != server ] || policy_key_note
   # Console/agent port: only from --allow-from CIDRs, else from the local subnet(s) of a private
   # $IP. A public $IP never gets the subnet default (M-10: checked before anything changed).
   # The installer never enables ufw (that could cut off SSH); it prints the commands instead.
@@ -2227,6 +2310,14 @@ PY
         warn "could not update $ETC/acquire.json; check it by hand"
       fi
     fi
+  fi
+  # Signed auto-download policies (S-4): pin this server's policy signing key (role all), else say how.
+  if [ "$ROLE" = all ]; then
+    pin_policy_key
+  elif ! grep -q '"policy_public_keys"' "$ETC/acquire.json"; then
+    warn "auto-download policy files are not signature-checked here yet: on the management server run" \
+         "'sudo runuser -u offpatch -- $PREFIX/bin/pmserver policy-key -config $ETC/pmserver.json' and add" \
+         "\"policy_public_keys\": [\"<that key>\"] to $ETC/acquire.json"
   fi
   # role all: pmserver (group $XFER_GROUP) reads it too, as the starting point of the console's Auto-download policy. No secrets in it.
   if [ "$ROLE" = all ]; then chown root:"$XFER_GROUP" "$ETC/acquire.json"; else chown root:"$ACQ_USER" "$ETC/acquire.json"; fi; chmod 0640 "$ETC/acquire.json"
@@ -2457,7 +2548,9 @@ if [ $IS_SERVER = 1 ]; then
     echo "  Super admin:    existing accounts kept (an upgrade creates or re-enables no accounts)"
   fi
   echo "  Lost password:  sudo runuser -u $SVC_USER -- $PREFIX/bin/pmserver reset-admin -config $ETC/pmserver.json -email <email>"
-  echo "  Backups:        daily → $BACKUP_DIR (keeps $BACKUP_KEEP); copy them off the machine (they hold the CA key)"
+  echo "  Backups:        daily → $BACKUP_DIR (keeps $BACKUP_KEEP), encrypted to $BACKUP_RECIPIENTS; copy them off the machine"
+  [ ! -f "$BACKUP_IDENTITY" ] || echo "                  ${c_red}! the backup PRIVATE key is still here ($BACKUP_IDENTITY): store it offline, then delete it${c_off}"
+  [ "$BACKUP_PLAIN_COUNT" = 0 ] || echo "                  ${c_yellow}! $BACKUP_PLAIN_COUNT earlier backup(s) are NOT encrypted: delete them after the next verified backup${c_off}"
   if [ $INSECURE = 0 ] && [ $PUBLIC_OK = 0 ] && [ -z "$(state_get PUBLIC_NAMES)" ]; then
     echo "  TLS:            internal CA $ETC/pki/ca.pem — distribute it to the admins' browsers (Group Policy: Trusted Root"
     echo "                  Certification Authorities), or give the console a public certificate: re-run with"
