@@ -14,9 +14,13 @@ function Spinner() {
 
 /** Server: 401/400 "wrong or expired code"; 401 "sign-in expired; …"; 403 disabled; 429 rate limit. */
 function codeError(e: unknown): string {
-  if (e instanceof ApiError && e.status === 429) return "Too many attempts. Wait a few minutes and try again.";
+  if (e instanceof ApiError && e.status === 429) {
+    return /two-step sign-in is locked/i.test(e.message)
+      ? "Too many wrong codes: two-step sign-in is locked for a while (15 minutes, longer if it happens again). Try later or ask an administrator to unlock your account."
+      : "Too many attempts. Wait a few minutes and try again.";
+  }
   if (e instanceof ApiError && /wrong or expired code/i.test(e.message)) {
-    return "That code is not right. Use the newest code (each code works once); after 5 wrong tries the account is locked for 15 minutes.";
+    return "That code is not right. Use the newest code (each code works once). After 3 wrong codes you sign in again with your password; after 5 in a row two-step sign-in is locked for 15 minutes.";
   }
   return errMsg(e);
 }

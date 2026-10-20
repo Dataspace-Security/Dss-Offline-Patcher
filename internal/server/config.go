@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"offpatch/internal/intake"
@@ -124,7 +125,16 @@ type Config struct {
 	dir string // directory of the config file; relative paths resolve from here
 	// fromFile: loaded by LoadConfig (LogAuthMode logs only then).
 	fromFile bool
+	// mfaOptOut: the file says "require_mfa": false (super admins may then
+	// sign in without an authenticator; warned at startup).
+	mfaOptOut bool
 }
+
+// LocalMFARequired: local super admins need the authenticator step too
+// (bank roles always do). The default; only an explicit "require_mfa":
+// false turns it off. RequireMFA itself (explicit true) additionally
+// refuses SSO sign-ins without MFA from the IdP.
+func (c *Config) LocalMFARequired() bool { return c.RequireMFA || !c.mfaOptOut }
 
 // LogAuthMode logs, once at startup, how admins sign in: local users
 // (email + password, MFA for bank roles) and SSO when configured. Static
@@ -132,6 +142,9 @@ type Config struct {
 func (c *Config) LogAuthMode(log *slog.Logger) {
 	if log == nil || !c.fromFile {
 		return
+	}
+	if !c.LocalMFARequired() {
+		log.Warn(`"require_mfa": false: super admins may sign in with a password only (no authenticator code). Not recommended on a server reachable from outside; remove the setting to require MFA for every account`)
 	}
 	if c.OIDC != nil {
 		log.Info("admin sign-in: SSO and local users (email + password)", "require_mfa", c.RequireMFA)
@@ -155,6 +168,16 @@ func removedKeys(path string, b []byte) error {
 	return nil
 }
 
+// explicitFalse: the top-level key is present and false (absent = default).
+func explicitFalse(b []byte, key string) bool {
+	var top map[string]json.RawMessage
+	if json.Unmarshal(b, &top) != nil {
+		return false
+	}
+	v, ok := top[key]
+	return ok && strings.TrimSpace(string(v)) == "false"
+}
+
 func LoadConfig(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -170,6 +193,7 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: %w", err)
 	}
 	c.dir = filepath.Dir(path)
+	c.mfaOptOut = explicitFalse(b, "require_mfa")
 	if c.Listen == "" {
 		c.Listen = "127.0.0.1:8080"
 	}

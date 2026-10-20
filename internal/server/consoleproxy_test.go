@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -16,7 +17,7 @@ type preq struct {
 	method, path string
 	remote       string // default 127.0.0.1:40000 (the trusted proxy)
 	proto        string // X-Forwarded-Proto; default https, "-" = none
-	xff, realIP  string
+	xff, realIP  string // xff default 203.0.113.200 (unless realIP), "-" = none
 	fwdHost      string
 	body         any
 	cookie       *http.Cookie
@@ -43,8 +44,12 @@ func pdo(h http.Handler, q preq) *httptest.ResponseRecorder {
 	default:
 		r.Header.Set("X-Forwarded-Proto", q.proto)
 	}
-	if q.xff != "" {
+	switch {
+	case q.xff == "-": // no X-Forwarded-For
+	case q.xff != "":
 		r.Header.Set("X-Forwarded-For", q.xff)
+	case q.realIP == "":
+		r.Header.Set("X-Forwarded-For", "203.0.113.200") // a browser behind the proxy
 	}
 	if q.realIP != "" {
 		r.Header.Set("X-Real-IP", q.realIP)
@@ -107,31 +112,110 @@ func TestConsoleProxyRefusesAgentRoutes(t *testing.T) {
 }
 
 func TestConsoleProxyPlainHTTP(t *testing.T) {
-	s := newRolesServer(t, proxyCfg, true)
+	s := newRolesServer(t, proxyCfg+`"server_name": "patch.dataspacesecurity.com",`, true)
 	mkLocal(t, s, "uma@bank.example", "user", false)
 	h := s.ConsoleProxyHandler()
 	login := map[string]string{"email": "uma@bank.example", "password": testPW}
 	for _, proto := range []string{"-", "http"} {
-		w := pdo(h, preq{method: "POST", path: "/api/auth/login", proto: proto, body: login})
+		w := pdo(h, preq{method: "POST", path: "/api/auth/login", proto: proto, body: login, fwdHost: "evil.example"})
 		if w.Code != 403 || !strings.Contains(errBody(w), "HTTPS") || cookieNamed(w, sessionCookie) != nil || cookieNamed(w, mfaCookie) != nil {
 			t.Fatalf("sign-in over plain HTTP (proto %q): %d %s", proto, w.Code, w.Body)
+		}
+		if strings.Contains(w.Body.String(), "evil.example") {
+			t.Fatalf("unchecked host echoed: %s", w.Body)
 		}
 		if w.Header().Get("Strict-Transport-Security") != "" {
 			t.Fatalf("HSTS over plain HTTP")
 		}
 	}
-	for _, m := range []string{"GET", "HEAD"} {
-		w := pdo(h, preq{method: m, path: "/endpoints?x=1", proto: "http", fwdHost: "patch.dataspacesecurity.com"})
-		if w.Code != http.StatusPermanentRedirect || w.Header().Get("Location") != "https://patch.dataspacesecurity.com/endpoints?x=1" {
-			t.Fatalf("%s over plain HTTP: %d %v", m, w.Code, w.Header())
+	// Redirects only to server_name / public_tls names (any case, any port).
+	for _, c := range []struct{ method, host, loc string }{
+		{"GET", "patch.dataspacesecurity.com", "https://patch.dataspacesecurity.com/endpoints?x=1"},
+		{"HEAD", "PATCH.DataSpaceSecurity.com", "https://patch.dataspacesecurity.com/endpoints?x=1"},
+		{"GET", "patch.dataspacesecurity.com:80", "https://patch.dataspacesecurity.com/endpoints?x=1"},
+	} {
+		w := pdo(h, preq{method: c.method, path: "/endpoints?x=1", proto: "http", fwdHost: c.host})
+		if w.Code != http.StatusPermanentRedirect || w.Header().Get("Location") != c.loc {
+			t.Fatalf("%s %s over plain HTTP: %d %v", c.method, c.host, w.Code, w.Header())
 		}
 	}
-	// No X-Forwarded-Host: the Host header.
-	if w := pdo(h, preq{method: "GET", path: "/", proto: "-"}); w.Code != 308 || w.Header().Get("Location") != "https://patch.example.com/" {
-		t.Fatalf("redirect by Host: %d %v", w.Code, w.Header())
+	for _, host := range []string{"evil.example", "evil.example/x\r\n", "patch.dataspacesecurity.com.evil.example", ""} {
+		w := pdo(h, preq{method: "GET", path: "/", proto: "http", fwdHost: host}) // "": the Host header patch.example.com
+		if w.Code != 400 || w.Header().Get("Location") != "" || strings.Contains(w.Body.String(), "evil") {
+			t.Fatalf("redirect to %q: %d %v %s", host, w.Code, w.Header(), w.Body)
+		}
 	}
-	if w := pdo(h, preq{method: "GET", path: "/", proto: "http", fwdHost: "evil.example/x\r\n"}); w.Code != 400 {
-		t.Fatalf("bad forwarded host: %d %v", w.Code, w.Header())
+	// No names configured: nothing to redirect to.
+	s2 := newRolesServer(t, proxyCfg, true)
+	if w := pdo(s2.ConsoleProxyHandler(), preq{method: "GET", path: "/", proto: "-"}); w.Code != 400 {
+		t.Fatalf("redirect without server_name: %d %v", w.Code, w.Header())
+	}
+}
+
+// N-3, N-4: the proxy must name the client; the right-most proto counts.
+func TestConsoleProxyForwardedHeaders(t *testing.T) {
+	s := newRolesServer(t, proxyCfg, true)
+	h := s.ConsoleProxyHandler()
+	for _, c := range []struct {
+		xff, realIP string
+		code        int
+	}{
+		{"-", "", 400},          // neither header
+		{"garbage", "", 400},    // not an IP
+		{"-", "not-an-ip", 400}, // X-Real-IP not an IP
+		{"203.0.113.9", "", 200},
+		{"-", "203.0.113.9", 200},
+	} {
+		if w := pdo(h, preq{method: "GET", path: "/", xff: c.xff, realIP: c.realIP}); w.Code != c.code {
+			t.Errorf("xff %q real %q: %d %s (want %d)", c.xff, c.realIP, w.Code, w.Body, c.code)
+		}
+	}
+	for _, c := range []struct {
+		proto []string
+		https bool
+	}{
+		{[]string{"https"}, true},
+		{[]string{"http, https"}, true}, // the proxy appended https
+		{[]string{"https, http"}, false},
+		{[]string{"https", "http"}, false},
+		{[]string{"HTTPS"}, true},
+		{nil, false},
+	} {
+		r := httptest.NewRequest("GET", "/", nil)
+		for _, v := range c.proto {
+			r.Header.Add("X-Forwarded-Proto", v)
+		}
+		if got := forwardedHTTPS(r); got != c.https {
+			t.Errorf("X-Forwarded-Proto %q: %v", c.proto, got)
+		}
+	}
+}
+
+// N-2: every sign-in step through the proxy shares one limit, so rotating
+// X-Forwarded-For (a local process can) does not give unlimited guesses.
+func TestConsoleProxyGlobalAuthLimit(t *testing.T) {
+	s := newRolesServer(t, proxyCfg, true)
+	h := s.ConsoleProxyHandler()
+	bad := map[string]string{"email": "nobody@x.example", "password": "x"}
+	for i := 0; i < proxyAuthBurst; i++ {
+		xff := "198.51.100." + strconv.Itoa(i+1)
+		if w := pdo(h, preq{method: "POST", path: "/api/auth/login", xff: xff, body: bad}); w.Code != 401 {
+			t.Fatalf("attempt %d: %d %s", i, w.Code, w.Body)
+		}
+	}
+	w := pdo(h, preq{method: "POST", path: "/api/auth/login", xff: "192.0.2.250", body: bad})
+	if w.Code != 429 || w.Header().Get("Retry-After") == "" {
+		t.Fatalf("listener-wide limit: %d %v", w.Code, w.Header())
+	}
+	if w := pdo(h, preq{method: "POST", path: "/api/auth/mfa", xff: "192.0.2.251", body: map[string]string{"code": "1"}}); w.Code != 429 {
+		t.Fatalf("listener-wide limit (mfa): %d", w.Code)
+	}
+	// Other routes are not affected, nor is the main listener.
+	if w := pdo(h, preq{method: "GET", path: "/auth/config"}); w.Code != 200 {
+		t.Fatalf("console page: %d", w.Code)
+	}
+	if w := do(s.Handler(), req{method: "POST", path: "/api/auth/login", body: bad, csrf: true, ip: "192.0.2.252"}); w.Code != 401 {
+		t.Fatalf("main listener: %d", w.Code)
 	}
 }
 
@@ -230,17 +314,18 @@ func TestForwardedClientIP(t *testing.T) {
 		_, n, _ := net.ParseCIDR(c)
 		cp.nets = append(cp.nets, n)
 	}
-	peer := net.ParseIP("127.0.0.1")
-	for _, c := range []struct{ xff, real, want string }{
-		{"", "", "127.0.0.1"},
+	for _, c := range []struct{ xff, real, want string }{ // want "" = refused
+		{"", "", ""}, // no forwarded address: refused, not the proxy's own
 		{"203.0.113.5", "", "203.0.113.5"},
 		{"1.1.1.1, 203.0.113.5", "", "203.0.113.5"},
 		{"203.0.113.5, 10.0.0.4", "", "203.0.113.5"},          // a second trusted hop is skipped
 		{"203.0.113.5:4431", "", "203.0.113.5"},               // port
 		{"[2001:db8::7]:443", "", "2001:db8::7"},              // IPv6 with port
 		{"garbage, 203.0.113.5", "", "203.0.113.5"},           // right-most untrusted wins
-		{"203.0.113.5, garbage", "", "127.0.0.1"},             // unparseable hop: keep the proxy
+		{"203.0.113.5, garbage", "", ""},                      // the proxy's own entry is not an IP
+		{"203.0.113.5, garbage, 10.0.0.4", "", "10.0.0.4"},    // garbage behind a trusted hop: that hop
 		{"", "198.51.100.3", "198.51.100.3"},                  // X-Real-IP
+		{"", "nonsense", ""},                                  // X-Real-IP not an IP
 		{"10.0.0.1, 10.0.0.2", "", "10.0.0.1"},                // all trusted: the left-most
 		{"203.0.113.9", "198.51.100.3", "203.0.113.9"},        // X-Forwarded-For first
 		{"1.1.1.1,203.0.113.5 , 10.0.0.9", "", "203.0.113.5"}, // spacing
@@ -252,14 +337,15 @@ func TestForwardedClientIP(t *testing.T) {
 		if c.real != "" {
 			r.Header.Set("X-Real-IP", c.real)
 		}
-		if got := forwardedClientIP(r, cp, peer); got != c.want {
-			t.Errorf("xff %q real %q: %s, want %s", c.xff, c.real, got, c.want)
+		got, ok := forwardedClientIP(r, cp)
+		if got != c.want || ok != (c.want != "") {
+			t.Errorf("xff %q real %q: %q %v, want %q", c.xff, c.real, got, ok, c.want)
 		}
 	}
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Add("X-Forwarded-For", "1.1.1.1")
 	r.Header.Add("X-Forwarded-For", "203.0.113.8")
-	if got := forwardedClientIP(r, cp, peer); got != "203.0.113.8" {
+	if got, _ := forwardedClientIP(r, cp); got != "203.0.113.8" {
 		t.Errorf("repeated header: %s", got)
 	}
 }

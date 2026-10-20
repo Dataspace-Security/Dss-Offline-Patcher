@@ -194,20 +194,31 @@ is HTTP 403 and audited `access.denied`). The full matrix is in
   **authenticator app** (TOTP, RFC 6238, 30 s; any standard app). An Admin creates users on
   **Settings → Users** (email, name, role, temporary password, or let the server generate one: it is
   shown once).
-- **MFA is required for `viewer`, `user` and `admin`** and optional for `super_admin` (required for
-  every local user when `require_mfa` is set). At the first sign-in without an authenticator the user
+- **MFA is required for every local user, `super_admin` included** (by default). Only
+  `"require_mfa": false` in `pmserver.json` makes it optional for super admins (pmserver logs a
+  warning at every start; not recommended). At the first sign-in without an authenticator the user
   can only enrol: the console shows a QR code (and the secret for manual entry); the user confirms
   with a code and gets **10 recovery codes**, shown once. Each recovery code works once in place of an
   authenticator code; they are stored hashed only.
 - At first sign-in with a temporary password the user must choose their own (at least 12 characters,
   not the email) first, then enrol the authenticator. Until then nothing else works.
-- Each authenticator code works once. Five wrong passwords **or codes** in a row lock the account for
-  15 minutes; an Admin can unlock it with **Enable** or **Reset password**. Sign-in attempts are also
-  limited per client address. The error is always "wrong email or password" (or "wrong or expired
-  code"), so nobody can find out which emails exist.
+- **Sign-in protection.** Five wrong passwords in a row from one client address lock the account
+  **for that address** for 15 minutes (the user can still sign in from their own PC); 50 wrong
+  passwords within 15 minutes from any addresses lock the account everywhere for 15 minutes and raise
+  a critical alert `auth.account_locked`. Authenticator codes have their **own** counter, which a
+  correct password does not reset: five wrong codes in a row lock the code step for 15 minutes,
+  doubling at each further lockout (up to 24 hours), and raise a critical alert `auth.mfa_locked`
+  (someone probably knows the password: have it changed). Only a correct code resets it. One
+  password step allows at most 3 codes (then the password again); the step works once. An Admin
+  clears every lock with **Enable** (also **Reset MFA** for the code lock). Sign-in attempts are
+  also limited per client address, and at most 4 password checks run at a time (busy: 503, try
+  again). Failed sign-ins are audited at most once a minute per account and address
+  (`suppressed` counts the folded ones); locks are always audited. The error is always "wrong email
+  or password" (or "wrong or expired code"), so nobody can find out which emails exist.
 - **Reset MFA** (lost phone) removes the user's authenticator and recovery codes and signs them out;
   they enrol again at the next sign-in. Admins reset bank roles; only a super admin resets a super
-  admin. A super admin may switch its own MFA off (with a current code) unless `require_mfa` is set.
+  admin. A super admin may switch its own MFA off (with a current code) only on a server with
+  `"require_mfa": false`.
 - **Reset password** gives a new temporary password and signs the user out everywhere. **Change role**
   signs the user out (the new role applies at the next sign-in). **Delete** removes a local user's
   account, sessions and MFA; the audit history stays (`user.deleted`) and the email can be reused. SSO
@@ -218,17 +229,20 @@ is HTTP 403 and audited `access.denied`). The full matrix is in
   `pmserver backup`; losing it loses every enrolment (everyone must be reset).
 - The installer creates the **built-in super admin** (`--admin-email`, default
   `superadmin@dataspacesecurity.com`) with the vendor's **default password** (in the vendor
-  handbook; only its hash is in `pmserver`). Sign in and change it at once: until then the console
-  shows a change-password banner and pmserver logs a warning at every start. The super admin then
-  creates the bank's first Admin. `pmserver create-admin -password-random` creates it with a random
+  handbook; only its hash is in `pmserver`). The server forces a password change at the first
+  sign-in (nothing else works until then), then the authenticator set-up; pmserver logs a warning at
+  every start while the default is in use. An account created by an earlier version that still has
+  the default password gets the same forced change at the next start (audited
+  `user.password_change_forced`). The super admin then creates the bank's first Admin. `pmserver create-admin -password-random` creates it with a random
   password printed once instead.
 - **Nobody can sign in** (lost password or authenticator): on the server, as root,
   `runuser -u offpatch -- /opt/offpatch/bin/pmserver reset-admin -config /etc/offpatch/pmserver.json -email <email>`
   prints a new random password once, re-enables the account, clears the lockout and clears its MFA
   (audited `user.password_reset` by `system:cli`). `pmserver create-admin` creates the built-in super
   admin when none exists.
-- `require_mfa: true` makes the authenticator step required for every local user (super admins too)
-  and refuses SSO sessions without MFA from the IdP. Email + password sign-in stays available.
+- `require_mfa: true` additionally refuses SSO sessions without MFA from the IdP (local users need
+  the authenticator step anyway). `require_mfa: false` makes it optional for local super admins only.
+  Email + password sign-in stays available.
 
 Nobody can change the server configuration, trusted keys or audit settings from the console. Those
 live in `pmserver.json` and need OS access to the server plus a restart.
@@ -842,13 +856,22 @@ opens a second listener, `console_proxy`, on loopback for that proxy only:
 - **Only the proxy may connect.** Connections from outside `trusted_proxies` get 403.
 - **Forwarded headers, only there.** For requests from a trusted proxy on this listener the
   client address is the right-most address in `X-Forwarded-For` that is not a trusted proxy
-  (else `X-Real-IP`); it is used for the sign-in rate limit and in the logs. The scheme comes
-  from `X-Forwarded-Proto`. The main listener (8443) ignores all these headers, so they cannot be
-  spoofed there.
+  (else `X-Real-IP`); it is used for the sign-in rate limit and in the logs. A request with
+  neither header (or no valid address in it) is refused with **400** and a warning in the log,
+  so users never share the proxy's address as one rate-limit bucket. The scheme comes from the
+  right-most `X-Forwarded-Proto` value (the one the proxy wrote). The main listener (8443) ignores
+  all these headers, so they cannot be spoofed there.
+- **One sign-in limit for the whole listener.** Sign-in steps through it (`POST /api/auth/login`,
+  `/api/auth/mfa`, `/api/auth/password`, MFA confirm / disable) share a bucket of 30, then 1 per
+  second, on top of the per-client limits: any local process can send a made-up
+  `X-Forwarded-For`, so per-client limits alone do not stop guessing. Over the limit: **429**
+  with `Retry-After`.
 - **Never plain HTTP to the browser.** When `X-Forwarded-Proto` is not `https` (Temps also
   forwards its port 80 to the same upstream), `GET`/`HEAD` get **308** to
-  `https://<X-Forwarded-Host or Host><path>`, every other method **403**: no password, MFA code or
-  cookie is accepted over plain HTTP. Over HTTPS, responses carry
+  `https://<name><path>` when the `X-Forwarded-Host` (else `Host`) is `server_name` or one of
+  `public_tls.names` (any case, port ignored), otherwise **400** (no open redirect: set
+  `server_name` to the console's public name). Every other method gets **403**: no password, MFA
+  code or cookie is accepted over plain HTTP. Over HTTPS, responses carry
   `Strict-Transport-Security: max-age=31536000`, session cookies keep `Secure`, `HttpOnly`,
   `SameSite=Strict`, and the CSRF rule (`X-Offpatch-CSRF: 1`) is unchanged.
 
@@ -1053,7 +1076,9 @@ Notes:
 | Every call returns 403 `mfa_enrollment_required` | First sign-in of a bank user without an authenticator | Enrol the authenticator app (the console shows the QR code). |
 | Code refused: "wrong or expired code" | Wrong code, a code already used, the phone clock is off, or the account is locked | Wait for the next code; check the phone's time; use a recovery code; or ask an admin to **Reset MFA**. |
 | Every call returns 403 `password_change_required` | Signed in with a temporary password | Change the password (the console shows the form). |
-| Sign-in says "wrong email or password" with the right password | Account locked after 5 wrong passwords (15 min), or a typo in the email | Wait, or ask an admin to **Enable** / **Reset password**. |
+| Sign-in says "wrong email or password" with the right password | Account locked for this address after 5 wrong passwords (or everywhere after 50 from many addresses; 15 min), or a typo in the email | Wait, or ask an admin to **Enable** / **Reset password**. |
+| "Too many wrong codes: two-step sign-in is locked" | 5 wrong authenticator codes in a row (15 min, doubling each time); alert `auth.mfa_locked` | Wait, or ask an admin to **Enable** the user after checking with them; if they did not cause it, have the password changed. |
+| 400 "the reverse proxy did not name the client address" (console via proxy) | The proxy sends neither `X-Forwarded-For` nor `X-Real-IP` | Configure the proxy to send `X-Forwarded-For` (see 5.6). |
 
 ---
 

@@ -54,7 +54,12 @@ type Server struct {
 
 	enrollLimit *ipLimiter
 	loginLimit  *ipLimiter // email + password sign-in, per client IP
-	repKey      reportKey  // audit-signing key, for compliance packages
+	// proxyAuthLimit: one bucket for every sign-in step arriving through
+	// the console_proxy listener (forwarded client IPs can be forged by a
+	// local process); see consoleproxy.go.
+	proxyAuthLimit *ipLimiter
+	preAuth        preAuthStore // MFA pre-auth nonces (single use, mfa.go)
+	repKey         reportKey    // audit-signing key, for compliance packages
 }
 
 func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger) (*Server, error) {
@@ -64,6 +69,7 @@ func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger
 	s.progress = newProgressMap()
 	s.enrollLimit = newIPLimiter(enrollBurst, enrollEvery)
 	s.loginLimit = newIPLimiter(loginBurst, loginEvery)
+	s.proxyAuthLimit = newIPLimiter(proxyAuthBurst, proxyAuthEvery)
 	store.WarmPasswordCheck()
 	dl := map[string]time.Duration{}
 	for k, v := range cfg.PatchDeadlines {
@@ -74,7 +80,7 @@ func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger
 	if cfg.DeploymentApprovals != nil {
 		st.Policy.DeploymentApprovals = *cfg.DeploymentApprovals
 	}
-	st.Policy.RequireMFA = cfg.RequireMFA
+	st.Policy.RequireMFA = cfg.LocalMFARequired()
 	st.AcqStaleAfter = cfg.AcquisitionStaleAfter.Duration
 	if cfg.MFAKeyFile != "" {
 		key, err := loadMFAKey(cfg.MFAKeyFile)
@@ -411,6 +417,11 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, store.ErrForbidden):
 		writeErr(w, http.StatusForbidden, err.Error())
+	case errors.Is(err, store.ErrBusy):
+		w.Header().Set("Retry-After", "5")
+		writeErr(w, http.StatusServiceUnavailable, err.Error())
+	case errors.Is(err, store.ErrMFALocked):
+		writeErr(w, http.StatusTooManyRequests, err.Error())
 	default:
 		s.log.Error("internal error", "err", err)
 		writeErr(w, http.StatusInternalServerError, "internal error")

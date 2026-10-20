@@ -8,6 +8,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Console behind a reverse proxy (docs/07-admin-guide.md "Console behind a
@@ -22,8 +23,11 @@ import (
 //     listener directly (TLS + mTLS); it is unchanged.
 //   - it accepts connections only from trusted_proxies, and only from them
 //     honours X-Forwarded-For / X-Real-IP (client IP for rate limits and
-//     logs) and X-Forwarded-Proto. The main listener never reads those
-//     headers (no spoofing).
+//     logs) and X-Forwarded-Proto (right-most value). A request without a
+//     valid forwarded client address is refused (400). The main listener
+//     never reads those headers (no spoofing).
+//   - sign-in steps through it share one listener-wide limit on top of the
+//     per-client ones (a local process could forge X-Forwarded-For).
 //   - it serves nothing over plain HTTP: X-Forwarded-Proto must be "https"
 //     (GET/HEAD are redirected to https://, everything else gets 403), so
 //     credentials and cookies never travel unencrypted, and session cookies
@@ -150,13 +154,16 @@ func peerIP(remoteAddr string) net.IP {
 
 // forwardedClientIP: the right-most address in X-Forwarded-For that is not a
 // trusted proxy (entries further left could be written by the client). With
-// no X-Forwarded-For, X-Real-IP; with neither, the proxy's own address.
-func forwardedClientIP(r *http.Request, cp *ConsoleProxyConfig, peer net.IP) string {
+// no X-Forwarded-For, X-Real-IP. ok false when the proxy named no valid
+// client address (no header, or the right-most entry is not an IP): the
+// request is refused rather than counted under the proxy's own address
+// (one shared rate-limit bucket for every user).
+func forwardedClientIP(r *http.Request, cp *ConsoleProxyConfig) (string, bool) {
 	var hops []string
 	for _, v := range r.Header.Values("X-Forwarded-For") {
 		hops = append(hops, strings.Split(v, ",")...)
 	}
-	client := peer
+	var client net.IP
 	for i := len(hops) - 1; i >= 0; i-- {
 		ip := parseHop(hops[i])
 		if ip == nil {
@@ -168,21 +175,79 @@ func forwardedClientIP(r *http.Request, cp *ConsoleProxyConfig, peer net.IP) str
 		}
 	}
 	if len(hops) == 0 {
-		if ip := parseHop(r.Header.Get("X-Real-IP")); ip != nil {
-			client = ip
-		}
+		client = parseHop(r.Header.Get("X-Real-IP"))
 	}
-	return client.String()
+	if client == nil {
+		return "", false
+	}
+	return client.String(), true
 }
 
 // forwardedHTTPS: the reverse proxy says the browser used HTTPS. With a
-// chain of proxies the first value is the browser's.
+// chain of proxies each one appends; the right-most value is the one our
+// trusted proxy wrote (values further left may come from the client).
 func forwardedHTTPS(r *http.Request) bool {
-	v := r.Header.Get("X-Forwarded-Proto")
-	if i := strings.IndexByte(v, ','); i >= 0 {
-		v = v[:i]
+	vals := r.Header.Values("X-Forwarded-Proto")
+	if len(vals) == 0 {
+		return false
+	}
+	v := vals[len(vals)-1]
+	if i := strings.LastIndexByte(v, ','); i >= 0 {
+		v = v[i+1:]
 	}
 	return strings.EqualFold(strings.TrimSpace(v), "https")
+}
+
+// proxyAuthPaths: the sign-in steps that get the listener-wide limit.
+var proxyAuthPaths = map[string]bool{"/api/auth/login": true, "/api/auth/mfa": true, "/api/auth/password": true,
+	"/api/auth/mfa/disable": true, "/api/auth/mfa/enroll/confirm": true}
+
+const (
+	// proxyAuthBurst sign-in steps through the console proxy in total (all
+	// clients together), then one more every proxyAuthEvery. On top of the
+	// per-client limits: a local process can forge X-Forwarded-For.
+	proxyAuthBurst = 30
+	proxyAuthEvery = time.Second
+)
+
+// proxyAuthLimited applies the listener-wide sign-in limit (429).
+func (s *Server) proxyAuthLimited(w http.ResponseWriter, r *http.Request, client string) bool {
+	if r.Method != http.MethodPost || !proxyAuthPaths[path.Clean("/"+r.URL.Path)] {
+		return false
+	}
+	if ok, wait := s.proxyAuthLimit.allow("console_proxy"); !ok {
+		s.log.Warn("console proxy: sign-in limit for all clients reached", "ip", client, "path", r.URL.Path)
+		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+		writeErr(w, http.StatusTooManyRequests, "too many sign-in attempts right now; retry in a moment")
+		return true
+	}
+	return false
+}
+
+// redirectHost: the configured public name the browser used (server_name or
+// public_tls.names, case-insensitive, port ignored), "" when it is not one.
+func (s *Server) redirectHost(host string) string {
+	if !hostRe.MatchString(host) {
+		return ""
+	}
+	h := host
+	if hh, _, err := net.SplitHostPort(host); err == nil {
+		h = hh
+	}
+	h = normHost(h)
+	names := []string{}
+	if s.cfg.ServerName != "" {
+		names = append(names, s.cfg.ServerName)
+	}
+	if s.cfg.PublicTLS != nil {
+		names = append(names, s.cfg.PublicTLS.Names...)
+	}
+	for _, n := range names {
+		if strings.EqualFold(n, h) {
+			return n
+		}
+	}
+	return ""
 }
 
 // forwardedHost: the name the browser used (X-Forwarded-Host, else Host).
@@ -231,29 +296,45 @@ func (s *Server) ConsoleProxyHandler() http.Handler {
 			writeErr(w, code, msg)
 			return
 		}
-		info := &proxied{ClientIP: forwardedClientIP(r, cp, peer), HTTPS: forwardedHTTPS(r)}
+		client, ok := forwardedClientIP(r, cp)
+		if !ok {
+			s.log.Warn("console proxy: the reverse proxy sent no valid X-Forwarded-For / X-Real-IP; request refused (configure the proxy to send the client address)",
+				"remote", r.RemoteAddr, "path", r.URL.Path)
+			writeErr(w, http.StatusBadRequest, "the reverse proxy did not name the client address (X-Forwarded-For or X-Real-IP)")
+			return
+		}
+		info := &proxied{ClientIP: client, HTTPS: forwardedHTTPS(r)}
 		if !info.HTTPS {
 			s.refusePlainHTTP(w, r, info.ClientIP)
 			return
 		}
 		w.Header().Set("Strict-Transport-Security", hstsValue)
+		if s.proxyAuthLimited(w, r, client) {
+			return
+		}
 		inner.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), keyProxied, info)))
 	}))
 }
 
 // refusePlainHTTP: the browser reached the reverse proxy over plain HTTP
 // (X-Forwarded-Proto http or missing). GET/HEAD go to the same URL on
-// https://; anything else (a sign-in, a change) is refused so no password or
-// cookie is ever accepted over plain HTTP.
+// https:// of a configured public name (server_name / public_tls.names;
+// any other Host gets 400, no open redirect); anything else (a sign-in, a
+// change) is refused so no password or cookie is ever accepted over plain
+// HTTP.
 func (s *Server) refusePlainHTTP(w http.ResponseWriter, r *http.Request, client string) {
-	host := forwardedHost(r)
+	host := s.redirectHost(forwardedHost(r))
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		s.log.Warn("console proxy: request over plain HTTP refused", "ip", client, "method", r.Method, "path", r.URL.Path)
-		writeErr(w, http.StatusForbidden, "the console only accepts HTTPS: open https://"+host+" (the reverse proxy did not send X-Forwarded-Proto: https; never sign in over plain HTTP)")
+		open := "the console's https:// address"
+		if host != "" {
+			open = "https://" + host
+		}
+		writeErr(w, http.StatusForbidden, "the console only accepts HTTPS: open "+open+" (the reverse proxy did not send X-Forwarded-Proto: https; never sign in over plain HTTP)")
 		return
 	}
-	if !hostRe.MatchString(host) {
-		writeErr(w, http.StatusBadRequest, "invalid Host header")
+	if host == "" {
+		writeErr(w, http.StatusBadRequest, "invalid Host header: not one of this server's names (server_name / public_tls.names)")
 		return
 	}
 	target := "https://" + host + r.URL.EscapedPath()

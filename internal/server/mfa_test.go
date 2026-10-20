@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -47,8 +48,10 @@ func TestMFASignInAPI(t *testing.T) {
 	if w.Code != 200 || res["mfa_required"] != true || cookieNamed(w, sessionCookie) != nil || pre == nil || !pre.HttpOnly || pre.Path != "/api/auth/mfa" {
 		t.Fatalf("password step: %d %s %+v", w.Code, w.Body, pre)
 	}
+	tries := 0
 	mfa := func(body map[string]string, c *http.Cookie) *httptest.ResponseRecorder {
-		return do(h, req{method: "POST", path: "/api/auth/mfa", body: body, cookie: c, csrf: true, ip: "203.0.113.52"})
+		tries++ // a fresh address each time: the per-address limit is tested elsewhere
+		return do(h, req{method: "POST", path: "/api/auth/mfa", body: body, cookie: c, csrf: true, ip: fmt.Sprintf("198.18.0.%d", tries)})
 	}
 	if w := mfa(map[string]string{"code": "000000"}, nil); w.Code != 401 || !strings.Contains(errBody(w), "sign-in expired") {
 		t.Fatalf("no pre-auth cookie: %d %s", w.Code, w.Body)
@@ -69,14 +72,66 @@ func TestMFASignInAPI(t *testing.T) {
 	if w := do(h, req{method: "GET", path: "/api/summary", cookie: cookieNamed(w, sessionCookie)}); w.Code != 200 {
 		t.Fatalf("after MFA: %d", w.Code)
 	}
-	if w := mfa(map[string]string{"code": code}, pre); w.Code != 401 {
-		t.Fatalf("replayed code: %d", w.Code)
+	// The pre-auth cookie is single use: spent by the sign-in.
+	if w := mfa(map[string]string{"code": code}, pre); w.Code != 401 || !strings.Contains(errBody(w), "sign-in expired") {
+		t.Fatalf("pre-auth cookie replayed: %d %s", w.Code, w.Body)
 	}
+	password := func(ip string) *http.Cookie {
+		w := do(h, req{method: "POST", path: "/api/auth/login", body: map[string]string{"email": "vera@bank.example", "password": testPW}, csrf: true, ip: ip})
+		if c := cookieNamed(w, mfaCookie); w.Code == 200 && c != nil {
+			return c
+		}
+		t.Fatalf("password step: %d %s", w.Code, w.Body)
+		return nil
+	}
+	pre = password("203.0.113.55")
 	if w := mfa(map[string]string{"recovery_code": codes[0]}, pre); w.Code != 200 {
 		t.Fatalf("recovery code: %d %s", w.Code, w.Body)
 	}
-	if w := mfa(map[string]string{"recovery_code": codes[0]}, pre); w.Code != 401 {
-		t.Fatalf("recovery code reused: %d", w.Code)
+	pre = password("203.0.113.56")
+	if w := mfa(map[string]string{"recovery_code": codes[0]}, pre); w.Code != 401 || errBody(w) != "wrong or expired code" {
+		t.Fatalf("recovery code reused: %d %s", w.Code, w.Body)
+	}
+	// At most mfaPreAuthTries codes per password step.
+	bad := "000000"
+	if bad == totp.Code(sec, time.Now()) || bad == totp.Code(sec, time.Now().Add(30*time.Second)) {
+		bad = "999999"
+	}
+	if w := mfa(map[string]string{"code": bad}, pre); w.Code != 401 || errBody(w) != "wrong or expired code" {
+		t.Fatalf("second try: %d %s", w.Code, w.Body)
+	}
+	if w := mfa(map[string]string{"code": bad}, pre); w.Code != 401 || !strings.Contains(errBody(w), "sign-in expired after 3 wrong codes") {
+		t.Fatalf("third try: %d %s", w.Code, w.Body)
+	}
+	if w := mfa(map[string]string{"recovery_code": codes[1]}, pre); w.Code != 401 || !strings.Contains(errBody(w), "sign-in expired") {
+		t.Fatalf("right code after the tries ran out: %d %s", w.Code, w.Body)
+	}
+	// Two more wrong codes (5 in a row, across password steps): the
+	// authenticator step locks (429) and an alert is raised, even though
+	// the password keeps being right.
+	pre = password("203.0.113.57")
+	mfa(map[string]string{"code": bad}, pre)
+	if w := mfa(map[string]string{"code": bad}, pre); w.Code != 429 {
+		t.Fatalf("MFA lockout: %d %s", w.Code, w.Body)
+	}
+	pre = password("203.0.113.58")
+	if w := mfa(map[string]string{"recovery_code": codes[1]}, pre); w.Code != 429 {
+		t.Fatalf("right code while MFA is locked: %d %s", w.Code, w.Body)
+	}
+	alerts, _ := s.store.ListAlerts(t.Context(), true)
+	alerted := false
+	for _, a := range alerts {
+		alerted = alerted || (a.Kind == "auth.mfa_locked" && a.ObjectID == "vera@bank.example" && a.Severity == "critical")
+	}
+	if !alerted {
+		t.Fatalf("no MFA lockout alert: %+v", alerts)
+	}
+	if w := do(h, req{method: "POST", path: "/api/users/vera@bank.example/enable", body: map[string]string{"reason": "verified by phone"}, cookie: adm, csrf: true}); w.Code != 200 {
+		t.Fatalf("unlock: %d %s", w.Code, w.Body)
+	}
+	pre = password("203.0.113.59")
+	if w := mfa(map[string]string{"recovery_code": codes[1]}, pre); w.Code != 200 {
+		t.Fatalf("after unlock: %d %s", w.Code, w.Body)
 	}
 	// Users list shows enrolment; admin resets it; the user enrols again.
 	var us []store.User
@@ -108,14 +163,22 @@ func TestMFASignInAPI(t *testing.T) {
 	if w := do(h, req{method: "GET", path: "/api/me", cookie: vck}); w.Code != 401 {
 		t.Fatalf("deleted user's session: %d", w.Code)
 	}
-	// Super admin: MFA optional, may switch it off for themselves only.
+	// Super admin: MFA required by default (login enrols), cannot switch it off.
 	mkLocal(t, s, "vendor@dataspacesecurity.test", "super_admin", false)
 	sup := login(t, h, "vendor@dataspacesecurity.test", testPW)
-	enrolHTTP(t, h, "vendor@dataspacesecurity.test", sup, "203.0.113.54")
 	if w := do(h, req{method: "POST", path: "/api/auth/mfa/disable", body: map[string]string{"code": "1"}, cookie: adm, csrf: true}); w.Code != 403 {
 		t.Fatalf("admin disables MFA: %d", w.Code)
 	}
-	if w := do(h, req{method: "POST", path: "/api/auth/mfa/disable", body: map[string]string{"code": totp.Code(testSecrets["vendor@dataspacesecurity.test"], time.Now().Add(30*time.Second))}, cookie: sup, csrf: true}); w.Code != 200 {
+	if w := do(h, req{method: "POST", path: "/api/auth/mfa/disable", body: map[string]string{"code": totp.Code(testSecrets["vendor@dataspacesecurity.test"], time.Now().Add(30*time.Second))}, cookie: sup, csrf: true}); w.Code != 409 {
+		t.Fatalf("super admin disables required MFA: %d %s", w.Code, w.Body)
+	}
+	// With "require_mfa": false it is optional: they may switch it off.
+	s2 := newRolesServer(t, `"require_mfa": false,`, true)
+	h2 := s2.Handler()
+	mkLocal(t, s2, "vendor@dataspacesecurity.test", "super_admin", false)
+	sup = login(t, h2, "vendor@dataspacesecurity.test", testPW)
+	enrolHTTP(t, h2, "vendor@dataspacesecurity.test", sup, "203.0.113.54")
+	if w := do(h2, req{method: "POST", path: "/api/auth/mfa/disable", body: map[string]string{"code": totp.Code(testSecrets["vendor@dataspacesecurity.test"], time.Now().Add(30*time.Second))}, cookie: sup, csrf: true}); w.Code != 200 {
 		t.Fatalf("super admin disables own MFA: %d %s", w.Code, w.Body)
 	}
 }
