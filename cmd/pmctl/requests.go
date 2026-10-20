@@ -31,6 +31,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -40,6 +41,7 @@ import (
 	"offpatch/internal/acqrequest"
 	"offpatch/internal/acqstatus"
 	"offpatch/internal/acquire"
+	"offpatch/internal/manifest"
 )
 
 // readMSICode reads ProductCode from a downloaded .msi when the winget
@@ -73,6 +75,7 @@ type requestRun struct {
 	added     func(id string)
 	outcomes  map[string]itemOutcome // package id → result of this run's attempt
 	cat       *acquire.Catalog
+	pins      *signerPins // installer signer pins (signerpin.go)
 	ms        *acquire.MSRC
 }
 
@@ -231,7 +234,7 @@ func wingetPackageID(id, version, arch string) string {
 }
 
 func (r *requestRun) fetchWinget(a acqrequest.App, arch string) error {
-	m, murl, err := acquire.FetchWingetManifest(r.ctx, r.hc, r.c.WingetManifestsURL, a.WingetID, a.Version)
+	m, murl, err := acquire.FetchWingetManifest(r.ctx, r.c.sourceClient(r.hc, acqpolicy.UpstreamWingetManifests), r.c.WingetManifestsURL, a.WingetID, a.Version)
 	if errors.Is(err, acquire.ErrWingetNotFound) {
 		return unsupportedItem(fmt.Sprintf("winget no longer lists version %s", a.Version),
 			fmt.Sprintf("%s %s is not in the winget repository (newer version published, or package renamed)", a.WingetID, a.Version))
@@ -269,6 +272,11 @@ func (r *requestRun) fetchWinget(a acqrequest.App, arch string) error {
 				fmt.Sprintf("%s %s: could not read ProductCode from the MSI: %v", a.WingetID, m.Version, err))
 		}
 	}
+	vs, err := r.pinWingetMSI(a, m, in, dl.Path)
+	if err != nil {
+		os.Remove(dl.Path)
+		return err
+	}
 	name := msiDisplayName(in, a, m)
 	if name == "" {
 		autoWarn(fmt.Sprintf("%s %s: no usable Apps & features name in the manifest or inventory; endpoints will not be offered it as an update automatically", a.WingetID, m.Version))
@@ -287,8 +295,32 @@ func (r *requestRun) fetchWinget(a acqrequest.App, arch string) error {
 	_, err = acquire.FetchURL(r.ctx, acquire.FetchURLOptions{URL: in.URL, SHA256: in.SHA256, FileName: file, PackageID: wingetPackageID(a.WingetID, a.Version, arch),
 		Title: title + " " + ver, Vendor: wingetPublisher(in, m), Kind: "msi", ProductCode: code, PackageName: name, OS: "windows",
 		Version: ver, Severity: "important", ReleaseDate: rel, Arch: arch, OutDir: r.downloads, SpecPath: r.spec, HTTP: r.hc,
-		Verified: "sha256(winget manifest " + murl + ")"})
+		Verified: "sha256(winget manifest " + murl + ")", VendorSignature: vs})
 	return err
+}
+
+// pinWingetMSI: on a Windows acquisition host, a winget MSI with a valid
+// Authenticode signature gets the revocation check and signer pin of
+// signerpin.go (elsewhere MSIs cannot be verified: vendor_signature stays
+// not_checked, the manifest SHA-256 is the check). An unsigned or invalid
+// MSI is left to pmctl build, which records and refuses it as before.
+func (r *requestRun) pinWingetMSI(a acqrequest.App, m *acquire.WingetManifest, in acquire.WingetInstaller, path string) (*manifest.VendorSignature, error) {
+	if runtime.GOOS != "windows" && !authenticodeAnywhere {
+		return nil, nil
+	}
+	sig, err := authenticode(path)
+	if err != nil || !strings.EqualFold(sig.Status, "Valid") {
+		return nil, nil
+	}
+	info := infoFromCert(sig.Leaf, sig.Issuer, sig.Subject)
+	if info.CN == "" {
+		return nil, nil
+	}
+	vs, err := pinInstaller(r.ctx, r.c, r.pins, pinKeyWinget(a.WingetID), m.Version, wingetPublisher(in, m), info)
+	if err != nil {
+		return nil, err
+	}
+	return &vs, nil
 }
 
 // msiDisplayName picks the package_name endpoints will be matched on: the
@@ -346,7 +378,8 @@ func (r *requestRun) fetchKB(k acqrequest.KB) error {
 	}
 	if r.cat == nil {
 		r.cat, r.ms = acquire.NewCatalog(), acquire.NewMSRC()
-		r.cat.HTTP, r.ms.HTTP = r.hc, r.hc
+		msHC := r.c.msClient(r.hc)
+		r.cat.HTTP, r.ms.HTTP = msHC, msHC
 		if r.c.CatalogURL != "" {
 			r.cat.BaseURL = r.c.CatalogURL
 		}

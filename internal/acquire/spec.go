@@ -41,7 +41,9 @@ type SpecEntry struct {
 	// verifies the payload's Authenticode signer against Exe.Signer again.
 	Exe       *manifest.ExeInstall `json:"exe,omitempty"`
 	SourceURL string               `json:"source_url"`
-	Path      string               `json:"path"`
+	// VendorSignature: verified at fetch time (pmctl auto); build keeps it.
+	VendorSignature *manifest.VendorSignature `json:"vendor_signature,omitempty"`
+	Path            string                    `json:"path"`
 	// Acquired records provenance for the operator; `pmctl build` ignores it.
 	Acquired *Provenance `json:"acquired,omitempty"`
 }

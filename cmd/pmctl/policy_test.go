@@ -51,7 +51,8 @@ func writePolicy(t *testing.T, dir string, version int, p acqpolicy.Policy) stri
 
 func TestApplyPolicyMerge(t *testing.T) {
 	autoWarn = func(string) {}
-	c := &autoConfig{Intel: &intelOpts{}, Apps: []autoApp{{Name: "acme-agent", WingetID: "Acme.Agent"}, {Name: "other"}}}
+	c := &autoConfig{Intel: &intelOpts{}, Apps: []autoApp{{Name: "acme-agent", WingetID: "Acme.Agent"}, {Name: "other"}},
+		AllowedSourceHosts: []string{"default", "catalog.mirror.example", "*.bank.example", "vendor.example"}}
 	c.Microsoft = &struct {
 		Months      int          `json:"months"`
 		MinSeverity string       `json:"min_severity"`
@@ -122,7 +123,7 @@ func TestApplyPolicyMerge(t *testing.T) {
 // a damaged file is refused and the previous version stays; a "run now"
 // request turns a requests-only run into a full run.
 func TestAutoPolicyApplied(t *testing.T) {
-	e := newAutoEnv(t, `"requests": "requests",`)
+	e := newAutoEnv(t, `"requests": "requests", "allowed_source_hosts": ["default", "127.0.0.1"],`)
 	wingetFixtures(t, e.srv, "g/Google/Chrome/155.0.8059.85/Google.Chrome.installer.yaml")
 	tool := []byte("vendor tool 4.1 msi")
 	sum := sha256.Sum256(tool)

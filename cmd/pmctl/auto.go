@@ -91,6 +91,26 @@ type autoConfig struct {
 	AuthenticodeRoots string   `json:"authenticode_roots"`
 	ExeSigners        []string `json:"exe_signers"`
 
+	// ExeSignerPins: per package (winget id, or "vendor:<source id>") the
+	// exact signer CN (and O) its installers must carry; overrides the
+	// signer pmctl pinned on first use (signerpin.go).
+	ExeSignerPins map[string]signerPinConfig `json:"exe_signer_pins"`
+	// RequireRevocationCheck: refuse installers whose signing certificate's
+	// CRL cannot be checked (default: record revocation "unknown").
+	RequireRevocationCheck bool `json:"require_revocation_check"`
+
+	// AllowedSourceHosts: the only hosts an auto-download policy may point
+	// downloads at (winget index / manifests, catalog, MSRC, mirrors,
+	// vendor-url), also for redirects. Exact names or "*.domain"; "default"
+	// stands for the built-in official hosts (acquire.DefaultSourceHosts),
+	// which also apply when this is not set. The policy cannot extend it.
+	AllowedSourceHosts []string `json:"allowed_source_hosts"`
+	// AllowedPrivateHosts: host names that may resolve to private/loopback
+	// addresses (an internal mirror). Hosts in this file's own URLs
+	// (catalog_url, msrc_url, winget_manifests_url, intel.winget_url, apps)
+	// are allowed too; everything else is refused at dial time (SSRF).
+	AllowedPrivateHosts []string `json:"allowed_private_hosts"`
+
 	// Advanced: alternative endpoints (tests, or an internal mirror).
 	CatalogURL         string `json:"catalog_url"`
 	MSRCURL            string `json:"msrc_url"`
@@ -98,6 +118,8 @@ type autoConfig struct {
 
 	// keepLastN: from the auto-download policy (limits.keep_last_n_versions).
 	keepLastN int
+	// net: the network guards (netpolicy.go), set by setupNet.
+	net *netPolicy
 }
 
 type autoMSProd struct {
@@ -202,6 +224,9 @@ type autoState struct {
 	// Families: package id → policy app ("winget:<id>/<arch>") or vendor
 	// source ("vendor:<id>"), for limits.keep_last_n_versions.
 	Families map[string]string `json:"families,omitempty"`
+	// PolicyVersion: the newest auto-download policy_version accepted
+	// (policy.go refuses older files and jumps beyond maxPolicyJump).
+	PolicyVersion int `json:"policy_version,omitempty"`
 }
 
 type autoDone struct {
@@ -488,6 +513,9 @@ func runAutoRequests(ctx context.Context, cfgPath string, dry bool, requestsDir 
 	if err := setExeTrust(c.AuthenticodeRoots, c.ExeSigners); err != nil {
 		return rep, err
 	}
+	if err := setupNet(c); err != nil {
+		return rep, err
+	}
 	if onlyRequests && c.Requests == "" {
 		return rep, fmt.Errorf("-only-requests: no requests directory (set \"requests\" in %s or pass -requests)", cfgPath)
 	}
@@ -519,14 +547,18 @@ func runAutoRequests(ctx context.Context, cfgPath string, dry bool, requestsDir 
 	spec := filepath.Join(runDir, "spec.json")
 
 	// ---- auto-download policy from the console, merged over acquire.json ----
-	pol := loadPolicy(c, dry, &rep)
+	pol := loadPolicy(c, dry, &rep, &st)
 	applyPolicy(c, pol)
 	c.keepLastN = pol.keepLastN
 	if pol.runID != "" && onlyRequests {
 		onlyRequests = false
 		rep.Warnings = append(rep.Warnings, "full run requested from the console ("+pol.runID+" by "+pol.runBy+")")
 	}
-	hc := withBudget(autoHTTP(), pol.maxBytes)
+	hc := withBudget(c.guarded(autoHTTP()), pol.maxBytes)
+	pins, err := loadSignerPins(filepath.Join(c.WorkDir, signerPinsFile))
+	if err != nil {
+		return rep, err
+	}
 	fail := func(id string, err error) {
 		rep.Failures[id] = err.Error()
 		st.Failed[id] = err.Error()
@@ -544,7 +576,7 @@ func runAutoRequests(ctx context.Context, cfgPath string, dry bool, requestsDir 
 
 	// ---- Microsoft security updates ----
 	if m := c.Microsoft; !onlyRequests && m != nil && len(m.Products) > 0 {
-		fetchMicrosoft(&msRun{ctx: ctx, c: c, hc: hc, downloads: downloads, spec: spec, st: st, dry: dry, rep: &rep, fail: fail, added: added})
+		fetchMicrosoft(&msRun{ctx: ctx, c: c, hc: c.msClient(hc), downloads: downloads, spec: spec, st: st, dry: dry, rep: &rep, fail: fail, added: added})
 	}
 	windowsResults(pol, rep.Feeds)
 
@@ -573,7 +605,7 @@ func runAutoRequests(ctx context.Context, cfgPath string, dry bool, requestsDir 
 
 	// ---- policy winget apps and vendor downloads ----
 	rr := &requestRun{ctx: ctx, c: c, hc: hc, downloads: downloads, spec: spec, st: st, dry: dry, rep: &rep,
-		fail: fail, added: added, outcomes: map[string]itemOutcome{}}
+		fail: fail, added: added, outcomes: map[string]itemOutcome{}, pins: pins}
 	if !onlyRequests {
 		fetchPolicyApps(rr, pol)
 		fetchVendorSources(rr, pol)
@@ -594,6 +626,11 @@ func runAutoRequests(ctx context.Context, cfgPath string, dry bool, requestsDir 
 		// State first: whatever happens below, delivered packages stay done.
 		if serr := saveJSON(statePath, st); serr != nil && err == nil {
 			err = fmt.Errorf("state not saved: %w", serr)
+		}
+		if !dry {
+			if serr := pins.save(); serr != nil {
+				rep.Warnings = append(rep.Warnings, "installer signer pins not saved: "+serr.Error())
+			}
 		}
 		if err != nil {
 			rep.Error = err.Error()
@@ -816,7 +853,7 @@ func fetchAppInner(ctx context.Context, hc *http.Client, a autoApp, downloads, s
 			return "", ver, err
 		}
 	default:
-		if sha, err = downloadAuthenticode(ctx, hc, dl, downloads, name, a.AuthenticodeSigner); err != nil {
+		if sha, _, err = downloadAuthenticode(ctx, hc, dl, downloads, name, a.AuthenticodeSigner); err != nil {
 			return "", ver, err
 		}
 	}
@@ -872,18 +909,28 @@ func fetchAppInner(ctx context.Context, hc *http.Client, a autoApp, downloads, s
 }
 
 // downloadAuthenticode accepts a Windows installer only if its Authenticode
-// signature is Valid and from the expected signer (Windows host only).
-func downloadAuthenticode(ctx context.Context, hc *http.Client, rawURL, downloads, name, signer string) (string, error) {
-	if runtime.GOOS != "windows" {
-		return "", errors.New("authenticode_signer verification needs a Windows acquisition host; configure a sha256 checksum source instead")
+// signature is Valid and from exactly the expected signer: signer is a CN
+// ("Google LLC") or a subject DN whose CN and O must both match
+// ("CN=Google LLC, O=Google LLC"); never a substring (finding M-5). MSI and
+// MSU files need a Windows acquisition host; EXE files verify anywhere.
+func downloadAuthenticode(ctx context.Context, hc *http.Client, rawURL, downloads, name, signer string) (string, signerInfo, error) {
+	if runtime.GOOS != "windows" && !authenticodeAnywhere && !strings.EqualFold(filepath.Ext(name), ".exe") {
+		return "", signerInfo{}, errors.New("authenticode_signer verification needs a Windows acquisition host; configure a sha256 checksum source instead")
 	}
-	return downloadVerified(ctx, hc, rawURL, downloads, name, func(p string) error {
-		status, who, err := authenticode(p)
-		if err != nil || !strings.EqualFold(status, "Valid") || !strings.Contains(strings.ToLower(who), strings.ToLower(signer)) {
-			return fmt.Errorf("authenticode check failed (status %q, signer %q, want signer containing %q): %v", status, who, signer, err)
+	want := parseSignerSpec(signer)
+	var got signerInfo
+	sha, err := downloadVerified(ctx, hc, rawURL, downloads, name, func(p string) error {
+		info, err := signerOfFile(p)
+		if err != nil {
+			return fmt.Errorf("authenticode check failed: %w", err)
 		}
+		if !want.matches(info.signerName) {
+			return fmt.Errorf("%w: authenticode check failed: signed by %s, want exactly %s", errExeSignature, info.signerName, want)
+		}
+		got = info
 		return nil
 	})
+	return sha, got, err
 }
 
 // downloadVerified fetches a file with no published checksum into a holding
@@ -997,10 +1044,35 @@ func evalPkgSignature(out string, runErr error, signer string) error {
 			break
 		}
 	}
-	if leaf == "" || !strings.Contains(strings.ToLower(leaf), strings.ToLower(signer)) {
-		return fmt.Errorf("package signed by %q, want %q", leaf, signer)
+	if leaf == "" || !pkgSignerMatches(leaf, signer) {
+		return fmt.Errorf("package signed by %q, want exactly %q", leaf, signer)
 	}
 	return nil
+}
+
+// pkgSignerMatches compares the leaf line pkgutil prints ("Developer ID
+// Installer: Google LLC (EQHXZ8M8AV)") with pkg_signer as whole values, never
+// as a substring (finding M-5): pkg_signer may be the full line, the name
+// with the Team ID ("Google LLC (EQHXZ8M8AV)"), or the name alone.
+func pkgSignerMatches(leaf, signer string) bool {
+	leaf, signer = cleanName(leaf), cleanName(signer)
+	if signer == "" {
+		return false
+	}
+	nameTeam := leaf
+	if _, rest, ok := strings.Cut(leaf, ": "); ok {
+		nameTeam = rest
+	}
+	name := nameTeam
+	if i := strings.LastIndex(nameTeam, " ("); i > 0 && strings.HasSuffix(nameTeam, ")") {
+		name = nameTeam[:i]
+	}
+	for _, v := range []string{leaf, nameTeam, name} {
+		if strings.EqualFold(v, signer) {
+			return true
+		}
+	}
+	return false
 }
 
 // sendStatus signs a status report for this run and sends it through the

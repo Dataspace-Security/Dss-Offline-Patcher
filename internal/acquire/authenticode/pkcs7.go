@@ -328,7 +328,20 @@ func pool(certs []*x509.Certificate, except *x509.Certificate) *x509.CertPool {
 
 // chain verifies cert up to roots for usage at time t.
 func chain(cert *x509.Certificate, certs []*x509.Certificate, roots *x509.CertPool, usage x509.ExtKeyUsage, t time.Time) error {
-	_, err := cert.Verify(x509.VerifyOptions{Roots: roots, Intermediates: pool(certs, cert), CurrentTime: t,
-		KeyUsages: []x509.ExtKeyUsage{usage}})
+	_, err := verifyChain(cert, certs, roots, usage, t)
 	return err
+}
+
+// verifyChain is chain returning the certificate that issued cert (the
+// next element of the first verified chain).
+func verifyChain(cert *x509.Certificate, certs []*x509.Certificate, roots *x509.CertPool, usage x509.ExtKeyUsage, t time.Time) (*x509.Certificate, error) {
+	chains, err := cert.Verify(x509.VerifyOptions{Roots: roots, Intermediates: pool(certs, cert), CurrentTime: t,
+		KeyUsages: []x509.ExtKeyUsage{usage}})
+	if err != nil {
+		return nil, err
+	}
+	if len(chains) > 0 && len(chains[0]) > 1 {
+		return chains[0][1], nil
+	}
+	return nil, nil
 }

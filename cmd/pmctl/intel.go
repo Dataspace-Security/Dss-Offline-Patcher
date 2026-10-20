@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"offpatch/internal/acqpolicy"
 	"offpatch/internal/acquire"
 	"offpatch/internal/intel"
 )
@@ -35,8 +36,11 @@ type intelOpts struct {
 }
 
 // addLibrary fills d.Resolved for ids (needs the app index for versions).
-func addLibrary(ctx context.Context, d *intel.Doc, o intelOpts, manifestsURL string, configured []string, requested map[string]string,
+func addLibrary(ctx context.Context, hc *http.Client, d *intel.Doc, o intelOpts, manifestsURL string, configured []string, requested map[string]string,
 	cache map[string]intel.Resolved) libraryResult {
+	if hc == nil {
+		hc = libraryHTTP()
+	}
 	if o.NoLibrary || len(d.Apps) == 0 {
 		return libraryResult{}
 	}
@@ -49,7 +53,7 @@ func addLibrary(ctx context.Context, d *intel.Doc, o intelOpts, manifestsURL str
 		max = libraryMaxLookups
 	}
 	ids := libraryIDs(append(slices.Clone(o.Library), configured...), requested, common)
-	res := resolveLibrary(ctx, libraryHTTP(), manifestsURL, d.Apps, ids, cache, max, autoNow())
+	res := resolveLibrary(ctx, hc, manifestsURL, d.Apps, ids, cache, max, autoNow())
 	d.Resolved = res.resolved
 	return res
 }
@@ -59,12 +63,17 @@ var libraryHTTP = func() *http.Client { return autoHTTP() }
 
 // buildIntel collects the document. Partial failures become warnings; it
 // fails only when there is nothing at all to send.
-func buildIntel(ctx context.Context, o intelOpts, source, workDir, catalogURL string) (intel.Doc, error) {
+// catHC / wingetHC: clients for the catalog and the winget index (nil =
+// the defaults).
+func buildIntel(ctx context.Context, o intelOpts, source, workDir, catalogURL string, catHC, wingetHC *http.Client) (intel.Doc, error) {
 	d := intel.Doc{Source: source, GeneratedAt: autoNow().UTC().Format(time.RFC3339)}
 	if !o.NoWindows {
 		cat := acquire.NewCatalog()
 		if catalogURL != "" {
 			cat.BaseURL = catalogURL
+		}
+		if catHC != nil {
+			cat.HTTP = catHC
 		}
 		products := o.Windows
 		if len(products) == 0 {
@@ -75,7 +84,7 @@ func buildIntel(ctx context.Context, o intelOpts, source, workDir, catalogURL st
 		d.Warnings = append(d.Warnings, warns...)
 	}
 	if !o.NoApps {
-		apps, src, err := acquire.WingetApps(ctx, nil, o.WingetURL, filepath.Join(workDir, "intel-work"))
+		apps, src, err := acquire.WingetApps(ctx, wingetHC, o.WingetURL, filepath.Join(workDir, "intel-work"))
 		if err != nil {
 			d.Warnings = append(d.Warnings, err.Error())
 		} else {
@@ -117,12 +126,17 @@ func sendIntel(ctx context.Context, c *autoConfig, st *autoState) (intel.Doc, li
 	if src == "" {
 		src = "acq-zone-1"
 	}
-	d, err := buildIntel(ctx, *c.Intel, src, c.WorkDir, c.CatalogURL)
+	// The SSRF guard always; allowed_source_hosts where the auto-download
+	// policy set the address (netpolicy.go).
+	base := c.guarded(acquire.DefaultHTTPClient())
+	d, err := buildIntel(ctx, *c.Intel, src, c.WorkDir, c.CatalogURL, c.msClient(base),
+		c.sourceClient(base, acqpolicy.UpstreamWingetIndex))
 	if err != nil {
 		return d, libraryResult{}, err
 	}
 	backfillRequested(*st, c.Requests)
-	lib := addLibrary(ctx, &d, *c.Intel, c.WingetManifestsURL, configuredLibraryIDs(c), st.Requested, st.Library)
+	libHC := c.sourceClient(c.guarded(libraryHTTP()), acqpolicy.UpstreamWingetManifests)
+	lib := addLibrary(ctx, libHC, &d, *c.Intel, c.WingetManifestsURL, configuredLibraryIDs(c), st.Requested, st.Library)
 	if lib.ran {
 		st.Library = lib.cache
 	}
@@ -172,7 +186,7 @@ func intelCmd(args []string) error {
 			o.Library = append(o.Library, id)
 		}
 	}
-	d, err := buildIntel(ctx, o, *source, *out, "")
+	d, err := buildIntel(ctx, o, *source, *out, "", nil, nil)
 	for _, w := range d.Warnings {
 		fmt.Fprintln(os.Stderr, "warning:", w)
 	}
@@ -180,7 +194,7 @@ func intelCmd(args []string) error {
 		return err
 	}
 	// No state here: every Library entry is looked up (within the budget).
-	lib := addLibrary(ctx, &d, o, *manifestsURL, nil, nil, nil)
+	lib := addLibrary(ctx, nil, &d, o, *manifestsURL, nil, nil, nil)
 	for _, w := range lib.warnings {
 		fmt.Fprintln(os.Stderr, "warning:", w)
 	}

@@ -27,6 +27,8 @@ const usage = `pmctl — offpatch acquisition-zone tool
   pmctl send    -bundle <bundle.pmb> -to <drop dir>   transfer via one-way drop-directory adapter
   pmctl auto    -config acquire.json [-dry-run]
                                                    unattended: check MSRC + vendor feeds, download, verify, build bundle(s), send
+  pmctl trust-signer -config acquire.json <winget id | vendor:<source id>> | -list
+                                                   approve a changed installer signer that pmctl auto refused (signer pins)
   pmctl trust   -root root.key -seq N -key new.pub=<source> [-retire old.pub] [-revoke <key_id>:compromised] -out keys-N.trust.json
                                                    root-signed key rotation / revocation (generate the root with keygen; keep it offline)
 
@@ -77,6 +79,8 @@ func main() {
 		err = msrcCmd(os.Args[2:])
 	case "intel":
 		err = intelCmd(os.Args[2:])
+	case "trust-signer":
+		err = trustSignerCmd(os.Args[2:])
 	default:
 		fmt.Print(usage)
 		os.Exit(2)
@@ -357,17 +361,17 @@ func vendorSignature(path string) manifest.VendorSignature {
 	if runtime.GOOS != "windows" {
 		return vs
 	}
-	status, signer, err := authenticode(path)
+	sig, err := authenticode(path)
 	if err != nil {
 		return vs
 	}
-	switch strings.ToLower(status) {
+	switch strings.ToLower(sig.Status) {
 	case "valid":
 		vs.Status = "valid"
 	default:
 		vs.Status = "invalid"
 	}
-	vs.Signer = signer
+	vs.Signer = sig.Subject
 	return vs
 }
 

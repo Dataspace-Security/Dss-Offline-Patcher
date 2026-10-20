@@ -55,20 +55,32 @@ var errExeSignature = errors.New("Authenticode")
 
 // verifyExeSigner returns the verified signer CommonName of an EXE installer.
 func verifyExeSigner(path string) (string, error) {
-	res, err := exeVerify(path)
+	res, err := verifyExeResult(path)
 	if err != nil {
-		return "", fmt.Errorf("%w: %w", errExeSignature, err)
-	}
-	if len(exeTrust.signers) > 0 {
-		ok := false
-		for _, s := range exeTrust.signers {
-			ok = ok || strings.EqualFold(s, res.Signer)
-		}
-		if !ok {
-			return "", fmt.Errorf("%w: signer %q is not one of exe_signers %q", errExeSignature, res.Signer, exeTrust.signers)
-		}
+		return "", err
 	}
 	return res.Signer, nil
+}
+
+// verifyExeResult verifies an EXE installer and applies exe_signers: each
+// entry is an exact CN ("Google LLC") or a subject DN whose CN and O must
+// both match ("CN=Google LLC, O=Google LLC"); never a substring.
+func verifyExeResult(path string) (*peauth.Result, error) {
+	res, err := exeVerify(path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errExeSignature, err)
+	}
+	if len(exeTrust.signers) > 0 {
+		got := signerName{CN: res.Signer, O: res.Organization}
+		ok := false
+		for _, s := range exeTrust.signers {
+			ok = ok || parseSignerSpec(s).matches(got)
+		}
+		if !ok {
+			return nil, fmt.Errorf("%w: signer %q is not one of exe_signers %q", errExeSignature, res.Signer, exeTrust.signers)
+		}
+	}
+	return res, nil
 }
 
 // checkExeSignature: an EXE package goes into a bundle only with a valid
@@ -85,5 +97,11 @@ func checkExeSignature(p manifest.Package, path string) (manifest.VendorSignatur
 		}
 		return manifest.VendorSignature{}, fmt.Errorf("%w: payload signed by %q, manifest names %q", errExeSignature, signer, want)
 	}
-	return manifest.VendorSignature{Status: "valid", Signer: signer, CheckedAt: time.Now().UTC().Format(time.RFC3339)}, nil
+	// Keep the details recorded at fetch time (O, winget publisher, pin,
+	// revocation; signerpin.go) when they describe this signer.
+	detail := signer
+	if d := p.VendorSignature.Signer; strings.HasPrefix(d, signer+" (") {
+		detail = d
+	}
+	return manifest.VendorSignature{Status: "valid", Signer: detail, CheckedAt: time.Now().UTC().Format(time.RFC3339)}, nil
 }

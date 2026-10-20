@@ -38,6 +38,7 @@ import (
 	"offpatch/internal/acqrequest"
 	"offpatch/internal/acqstatus"
 	"offpatch/internal/acquire"
+	"offpatch/internal/manifest"
 )
 
 // activePolicy is work_dir/policy.json: the policy in force.
@@ -69,7 +70,7 @@ func (pr *policyRun) result(r acqstatus.SourceResult) { pr.results = append(pr.r
 
 // loadPolicy reads the active policy, takes over newer policy files and
 // collects run requests from the requests folder.
-func loadPolicy(c *autoConfig, dry bool, rep *autoReport) *policyRun {
+func loadPolicy(c *autoConfig, dry bool, rep *autoReport, st *autoState) *policyRun {
 	pr := &policyRun{}
 	activePath := filepath.Join(c.WorkDir, activePolicyFile)
 	var active *activePolicy
@@ -86,8 +87,14 @@ func loadPolicy(c *autoConfig, dry bool, rep *autoReport) *policyRun {
 		pr.errs = append(pr.errs, "active policy: "+err.Error())
 	}
 
+	// The last accepted policy_version (state.json, and the active policy):
+	// older files are ignored, files too far ahead refused.
+	seen := st.PolicyVersion
+	if active != nil && active.File.PolicyVersion > seen {
+		seen = active.File.PolicyVersion
+	}
 	if c.Requests != "" {
-		newest := pickPolicyFiles(c.Requests, active, dry, pr)
+		newest := pickPolicyFiles(c.Requests, seen, dry, pr)
 		if newest != nil {
 			active = &activePolicy{File: *newest, AppliedAt: autoNow().UTC().Format(time.RFC3339)}
 			if !dry {
@@ -98,6 +105,9 @@ func loadPolicy(c *autoConfig, dry bool, rep *autoReport) *policyRun {
 		}
 		pickRunRequests(c.Requests, dry, pr)
 	}
+	if !dry && active != nil && active.File.PolicyVersion > st.PolicyVersion {
+		st.PolicyVersion = active.File.PolicyVersion
+	}
 	if active != nil {
 		pr.file, pr.appliedAt = &active.File, active.AppliedAt
 	}
@@ -107,10 +117,17 @@ func loadPolicy(c *autoConfig, dry bool, rep *autoReport) *policyRun {
 	return pr
 }
 
+// maxPolicyJump: a policy file may be at most this many versions past the
+// last accepted one. The server counts one version per save, so a larger
+// jump is not a console edit; accepting it would block every later
+// legitimate policy (finding H-6). The first policy a downloader sees is
+// accepted at any version (nothing to compare with).
+const maxPolicyJump = 100
+
 // pickPolicyFiles validates every policy-*.json in dir and returns the
-// newest one that is newer than active (nil if none). Files are archived
-// (done/ or rejected/) unless dry.
-func pickPolicyFiles(dir string, active *activePolicy, dry bool, pr *policyRun) *acqpolicy.File {
+// newest one that is newer than the last accepted version cur (nil if
+// none). Files are archived (done/ or rejected/) unless dry.
+func pickPolicyFiles(dir string, cur int, dry bool, pr *policyRun) *acqpolicy.File {
 	paths, _ := filepath.Glob(filepath.Join(dir, acqpolicy.FilePrefix+"*.json"))
 	sort.Strings(paths)
 	type cand struct {
@@ -130,11 +147,15 @@ func pickPolicyFiles(dir string, active *activePolicy, dry bool, pr *policyRun) 
 			}
 			continue
 		}
+		if cur > 0 && f.PolicyVersion > cur+maxPolicyJump {
+			pr.errs = append(pr.errs, fmt.Sprintf("%s refused: policy_version %d is more than %d past the last accepted version %d (the console adds one per save); the policy in force stays",
+				filepath.Base(p), f.PolicyVersion, maxPolicyJump, cur))
+			if !dry {
+				moveInto(p, filepath.Join(dir, "rejected"))
+			}
+			continue
+		}
 		good = append(good, cand{p, f})
-	}
-	cur := 0
-	if active != nil {
-		cur = active.File.PolicyVersion
 	}
 	var newest *acqpolicy.File
 	for _, cd := range good {
@@ -227,10 +248,20 @@ func applyPolicy(c *autoConfig, pr *policyRun) {
 		}
 		return disabled[typ]
 	}
+	n := c.netFor()
 	for _, s := range p.Sources {
 		r := acqstatus.SourceResult{Kind: "source", ID: s.ID, Type: s.Type, Result: "applied"}
 		if !s.Enabled {
 			r.Result, r.Detail = "disabled", "switched off"
+			pr.result(r)
+			continue
+		}
+		// Every address the policy sets must be on acquire.json's
+		// allowed_source_hosts (netpolicy.go); otherwise the source is
+		// refused and the built-in / acquire.json addresses stay.
+		if bad := policySourceProblem(c, s); bad != "" {
+			r.Result, r.Detail = "failed", "refused: "+bad
+			pr.errs = append(pr.errs, "source "+s.ID+" refused: "+bad)
 			pr.result(r)
 			continue
 		}
@@ -240,22 +271,26 @@ func applyPolicy(c *autoConfig, pr *policyRun) {
 			if s.URL != "" {
 				if c.Intel != nil {
 					c.Intel.WingetURL = s.URL
+					n.fromPolicy[acqpolicy.UpstreamWingetIndex] = true
 				}
 				r.Detail = "index " + hostOf(s.URL)
 			}
 			if s.ManifestsURL != "" {
 				c.WingetManifestsURL = s.ManifestsURL
+				n.fromPolicy[acqpolicy.UpstreamWingetManifests] = true
 				r.Detail += ", manifests " + hostOf(s.ManifestsURL)
 			}
 		case acqpolicy.SourceCatalog:
 			r.Detail = "default address"
 			if s.URL != "" {
 				c.CatalogURL, r.Detail = s.URL, hostOf(s.URL)
+				n.fromPolicy[acqpolicy.UpstreamCatalog] = true
 			}
 		case acqpolicy.SourceMSRC:
 			r.Detail = "default address"
 			if s.URL != "" {
 				c.MSRCURL, r.Detail = s.URL, hostOf(s.URL)
+				n.fromPolicy[acqpolicy.UpstreamMSRC] = true
 			}
 		case acqpolicy.SourceVendorURL:
 			pr.vendors = append(pr.vendors, s)
@@ -273,6 +308,7 @@ func applyPolicy(c *autoConfig, pr *policyRun) {
 			case acqpolicy.UpstreamMSRC:
 				c.MSRCURL = s.URL
 			}
+			n.fromPolicy[s.Replaces] = true
 			r.Detail = s.Replaces + " from " + hostOf(s.URL)
 		}
 		pr.result(r)
@@ -388,6 +424,20 @@ func applyPolicy(c *autoConfig, pr *policyRun) {
 			}
 		}
 	}
+}
+
+// policySourceProblem: why acquire.json does not let the policy use the
+// addresses of s ("" = it may).
+func policySourceProblem(c *autoConfig, s acqpolicy.Source) string {
+	for _, f := range []struct{ name, url string }{{"url", s.URL}, {"manifests_url", s.ManifestsURL}} {
+		if f.url == "" {
+			continue
+		}
+		if err := c.checkPolicyURL(f.url); err != nil {
+			return f.name + " " + hostOf(f.url) + ": " + strings.TrimPrefix(err.Error(), acquire.ErrNetworkRefused.Error()+": ")
+		}
+	}
+	return ""
 }
 
 func hostOf(raw string) string {
@@ -547,14 +597,24 @@ func fetchVendor(r *requestRun, s acqpolicy.Source) (string, error) {
 		name = id + "." + s.Kind
 	}
 	name = unsafeIDChars.ReplaceAllString(name, "_")
+	// The URL comes from the policy: held to allowed_source_hosts, redirects too.
+	hc := r.c.netFor().strict.Client(r.hc)
 	sha, verified := s.ExpectedSHA256, "sha256(auto-download policy source "+s.ID+")"
+	var vs *manifest.VendorSignature
 	var err error
 	if sha == "" {
-		if sha, err = downloadAuthenticode(r.ctx, r.hc, s.URL, r.downloads, name, s.Signer); err != nil {
+		var info signerInfo
+		if sha, info, err = downloadAuthenticode(r.ctx, hc, s.URL, r.downloads, name, s.Signer); err != nil {
 			return "", err
 		}
-		verified = "authenticode(" + s.Signer + ")"
-	} else if _, err = acquire.Download(r.ctx, r.hc, acquire.DownloadRequest{URL: s.URL, DestDir: r.downloads, FileName: name, SHA256: sha}); err != nil {
+		v, perr := pinInstaller(r.ctx, r.c, r.pins, pinKeyVendor(s.ID), s.Version, "", info)
+		if perr != nil {
+			os.Remove(filepath.Join(r.downloads, name)) // never left where a later run could pick it up unchecked
+			return "", perr
+		}
+		vs = &v
+		verified = "authenticode(" + info.CN + ")"
+	} else if _, err = acquire.Download(r.ctx, hc, acquire.DownloadRequest{URL: s.URL, DestDir: r.downloads, FileName: name, SHA256: sha}); err != nil {
 		return "", err
 	}
 	code := s.ProductCode
@@ -569,7 +629,7 @@ func fetchVendor(r *requestRun, s acqpolicy.Source) (string, error) {
 	}
 	if _, err := acquire.FetchURL(r.ctx, acquire.FetchURLOptions{URL: s.URL, SHA256: sha, FileName: name, PackageID: id, Title: s.Name + " " + s.Version,
 		Vendor: vendor, Kind: s.Kind, KB: s.KB, ProductCode: code, OS: "windows", Version: s.Version, Severity: "important", Arch: s.Arch,
-		OutDir: r.downloads, SpecPath: r.spec, HTTP: r.hc, Verified: verified}); err != nil {
+		OutDir: r.downloads, SpecPath: r.spec, HTTP: hc, Verified: verified, VendorSignature: vs}); err != nil {
 		return "", err
 	}
 	r.st.Families[id] = "vendor:" + s.ID

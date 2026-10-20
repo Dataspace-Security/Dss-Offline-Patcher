@@ -1,9 +1,13 @@
 package main
 
 import (
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -16,20 +20,93 @@ import (
 // A variable so tests with synthetic payloads can stub it.
 var authenticode = authenticodePS
 
-func authenticodePS(path string) (status, signer string, err error) {
-	script := `$s = Get-AuthenticodeSignature -LiteralPath $env:PM_FILE; ` +
-		`[pscustomobject]@{Status=[string]$s.Status; Signer=[string]$s.SignerCertificate.Subject} | ConvertTo-Json -Compress`
+// psSignature is what Windows reports for a file's Authenticode signature:
+// Status ("Valid", "NotSigned", ...), the signer's subject DN and, when
+// Windows found them, the signer certificate and its issuer (for the pin
+// and the CRL check, signerpin.go).
+type psSignature struct {
+	Status, Subject string
+	Leaf, Issuer    *x509.Certificate
+}
+
+func authenticodePS(path string) (psSignature, error) {
+	// The chain is built offline (RevocationMode NoCheck) only to find the
+	// issuer; pmctl checks the CRL itself.
+	script := `$s = Get-AuthenticodeSignature -LiteralPath $env:PM_FILE; $c = $s.SignerCertificate; $l = ''; $i = ''; ` +
+		`if ($c) { $l = [Convert]::ToBase64String($c.RawData); ` +
+		`$ch = New-Object System.Security.Cryptography.X509Certificates.X509Chain; $ch.ChainPolicy.RevocationMode = 'NoCheck'; [void]$ch.Build($c); ` +
+		`if ($ch.ChainElements.Count -gt 1) { $i = [Convert]::ToBase64String($ch.ChainElements[1].Certificate.RawData) } }; ` +
+		`[pscustomobject]@{Status=[string]$s.Status; Signer=[string]$c.Subject; Leaf=$l; Issuer=$i} | ConvertTo-Json -Compress`
 	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
 	cmd.Env = append(cmd.Environ(), "PM_FILE="+path)
 	out, err := cmd.Output()
 	if err != nil {
-		return "", "", err
+		return psSignature{}, err
 	}
-	var r struct{ Status, Signer string }
+	var r struct{ Status, Signer, Leaf, Issuer string }
 	if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &r); err != nil {
-		return "", "", err
+		return psSignature{}, err
 	}
-	return r.Status, r.Signer, nil
+	sig := psSignature{Status: r.Status, Subject: r.Signer}
+	sig.Leaf, sig.Issuer = parseB64Cert(r.Leaf), parseB64Cert(r.Issuer)
+	return sig, nil
+}
+
+func parseB64Cert(s string) *x509.Certificate {
+	if s == "" {
+		return nil
+	}
+	der, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return nil
+	}
+	c, err := x509.ParseCertificate(der)
+	if err != nil {
+		return nil
+	}
+	return c
+}
+
+// signerOfFile verifies a downloaded installer's Authenticode signature and
+// returns its signer: PE files (EXE) in pure Go on any host, other files
+// (MSI, MSU) through Windows on a Windows acquisition host.
+func signerOfFile(path string) (signerInfo, error) {
+	if isPE(path) {
+		res, err := verifyExeResult(path)
+		if err != nil {
+			return signerInfo{}, err
+		}
+		return infoFromResult(res), nil
+	}
+	if runtime.GOOS != "windows" && !authenticodeAnywhere {
+		return signerInfo{}, errors.New("Authenticode verification of MSI/MSU files needs a Windows acquisition host; configure a sha256 checksum source instead")
+	}
+	sig, err := authenticode(path)
+	if err != nil {
+		return signerInfo{}, fmt.Errorf("%w: %w", errExeSignature, err)
+	}
+	if !strings.EqualFold(sig.Status, "Valid") {
+		return signerInfo{}, fmt.Errorf("%w: status %q (signer %q)", errExeSignature, sig.Status, sig.Subject)
+	}
+	info := infoFromCert(sig.Leaf, sig.Issuer, sig.Subject)
+	if info.CN == "" {
+		return signerInfo{}, fmt.Errorf("%w: signer %q has no CommonName", errExeSignature, sig.Subject)
+	}
+	return info, nil
+}
+
+// authenticodeAnywhere lets tests run the Windows path (stubbed) on any OS.
+var authenticodeAnywhere = false
+
+func isPE(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var b [2]byte
+	_, err = io.ReadFull(f, b[:])
+	return err == nil && b[0] == 'M' && b[1] == 'Z'
 }
 
 // msiProductCode reads ProductCode from an .msi with the pure-Go reader

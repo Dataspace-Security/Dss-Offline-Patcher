@@ -7,6 +7,6 @@ import "testing"
 func stubAuthenticode(t *testing.T) {
 	t.Helper()
 	orig := authenticode
-	authenticode = func(string) (string, string, error) { return "Valid", "CN=test vendor", nil }
+	authenticode = func(string) (psSignature, error) { return psSignature{Status: "Valid", Subject: "CN=test vendor"}, nil }
 	t.Cleanup(func() { authenticode = orig })
 }
