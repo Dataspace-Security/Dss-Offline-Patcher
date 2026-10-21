@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"offpatch/internal/intel"
+	"offpatch/internal/manifest"
 )
 
 // The Library: installer and description details of winget packages, looked
@@ -145,10 +146,19 @@ func ResolveWinget(ctx context.Context, hc *http.Client, base, id, version strin
 		if hex64Re.MatchString(in.SHA256) {
 			ri.SHA256 = in.SHA256
 		}
-		if in.IsEXE() {
+		if in.InstallerType == "zip" {
+			// The installer inside: its type and (one) path in the zip.
+			ri.NestedType = libToken(in.NestedInstallerType)
+			if len(in.NestedInstallerFiles) == 1 {
+				if p, err := CleanZipPath(in.NestedInstallerFiles[0]); err == nil && len(p) <= maxLibraryName {
+					ri.NestedPath = p
+				}
+			}
+		}
+		if t, _ := intel.InstallType(ri); manifest.IsExeInstallerType(t) {
 			// Plain "exe" needs the manifest's silent switch (the others have
 			// documented defaults); the flag is only sent where it matters.
-			ri.Silent = in.InstallerType == "exe" && in.Switches.Silent != ""
+			ri.Silent = t == "exe" && in.Switches.Silent != ""
 		}
 		if msiTypes[ri.Type] {
 			if ri.SHA256 == "" {
@@ -177,6 +187,14 @@ func ResolveWinget(ctx context.Context, hc *http.Client, base, id, version strin
 		return intel.Resolved{}, ctx.Err()
 	}
 	return r, nil
+}
+
+// libToken keeps a short [a-z0-9] token (an installer type), else "".
+func libToken(s string) string {
+	if len(s) > 20 || strings.ContainsFunc(s, func(r rune) bool { return (r < 'a' || r > 'z') && (r < '0' || r > '9') }) {
+		return ""
+	}
+	return s
 }
 
 // libURL keeps only https URLs of reasonable length.

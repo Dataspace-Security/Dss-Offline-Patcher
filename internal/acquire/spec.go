@@ -51,12 +51,17 @@ type SpecEntry struct {
 // Provenance records how and when a file was acquired and verified.
 type Provenance struct {
 	At              string `json:"at"`
-	Method          string `json:"method"` // "catalog" | "url"
+	Method          string `json:"method"` // "catalog" | "url" | "zip"
 	CatalogUpdateID string `json:"catalog_update_id,omitempty"`
 	SHA1            string `json:"sha1,omitempty"`
 	SHA256          string `json:"sha256"`
 	Size            int64  `json:"size"`
 	Verified        string `json:"verified"` // what was checked, e.g. "sha1(catalog)"
+	// Method "zip": the file was extracted from the zip at the entry's
+	// source_url; the zip's SHA-256 and size, and the file's path in it.
+	ZipSHA256 string `json:"zip_sha256,omitempty"`
+	ZipSize   int64  `json:"zip_size,omitempty"`
+	ZipPath   string `json:"zip_path,omitempty"`
 }
 
 // ValidateEntry runs the manifest schema rules (manifest.ValidateSchema) on
