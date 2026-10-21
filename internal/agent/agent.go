@@ -762,14 +762,19 @@ func (a *Agent) process(ctx context.Context, as store.Assignment, f Facts, inv [
 			return
 		}
 	}
+	// A Windows app (MSI, EXE, portable, MSIX) counts as present only when
+	// every copy of it is current (appUpToDate), as on the server.
+	if appUpToDate(pkg, inv) {
+		a.report(ctx, as, "installed", 0, "already present in local inventory")
+		return
+	}
+	if d := msixProvisionedOnly(pkg, inv); d != "" {
+		a.report(ctx, as, "installed", 0, d)
+		return
+	}
 	for _, it := range inv {
-		// An MSI product code alone is not enough: some MSIs (Chrome's) keep it
-		// across versions, so an older version under the same code is an update.
 		if (pkg.KB != "" && it.Kind == "kb" && strings.EqualFold(it.ID, pkg.KB)) ||
-			(pkg.ProductCode != "" && it.Kind == "product" && strings.EqualFold(it.ID, pkg.ProductCode) &&
-				(pkg.Version == "" || it.Version == "" || store.VersionAtLeast(it.Version, pkg.Version))) ||
-			(pkg.PackageName != "" && (it.Kind == "pkg" || (it.Kind == "app" && pkg.Kind == "pkg")) && it.ID == pkg.PackageName && store.VersionAtLeast(it.Version, pkg.Version)) ||
-			(pkg.Kind == manifest.KindExe && exeUpToDate(pkg, it)) || formatUpToDate(pkg, it) {
+			(pkg.PackageName != "" && (it.Kind == "pkg" || (it.Kind == "app" && pkg.Kind == "pkg")) && it.ID == pkg.PackageName && store.VersionAtLeast(it.Version, pkg.Version)) {
 			a.report(ctx, as, "installed", 0, "already present in local inventory")
 			return
 		}
@@ -822,7 +827,7 @@ func (a *Agent) process(ctx context.Context, as store.Assignment, f Facts, inv [
 		return a.plat.Install(ictx, pkg, file)
 	}()
 	a.invAt = time.Time{} // refresh inventory at the next check-in
-	a.recheckSoon = a.recheckSoon || res.State != "deferred"
+	a.recheckSoon = a.recheckSoon || refreshesInventory(res)
 	log.Info("install finished", "state", res.State, "exit", res.ExitCode, "detail", res.Detail)
 	rctx, cancel := context.WithTimeout(ictx, reportTimeout)
 	defer cancel()
@@ -838,6 +843,22 @@ func (a *Agent) process(ctx context.Context, as store.Assignment, f Facts, inv [
 // how many users are signed in (an installer can run in their sessions).
 type userSessions interface {
 	SignedInUsers() (int, error)
+}
+
+// refreshesInventory: an installer (or uninstaller) result that changed,
+// or may have changed, what is installed, so a fresh inventory soon is
+// worth a quick check-in: installed, pending reboot, or a definite failure.
+// A deferred or "retry later: installer busy" result changed nothing; an
+// early recheck would only repeat it and spend the server's busy grace
+// (installerBusyGrace consecutive busy results) in a few minutes.
+func refreshesInventory(r Result) bool {
+	switch r.State {
+	case "deferred":
+		return false
+	case "failed":
+		return !strings.HasPrefix(r.Detail, retryLater)
+	}
+	return true
 }
 
 // afterInstallWait shortens the wait before the next check-in after a
@@ -891,7 +912,7 @@ func (a *Agent) rollback(ctx context.Context, as store.Assignment, pkg manifest.
 		return u.Uninstall(ictx, pkg)
 	}()
 	a.invAt = time.Time{}
-	a.recheckSoon = true
+	a.recheckSoon = a.recheckSoon || refreshesInventory(res)
 	log.Info("uninstall finished", "state", res.State, "exit", res.ExitCode, "detail", res.Detail)
 	rctx, cancel := context.WithTimeout(ictx, reportTimeout)
 	defer cancel()

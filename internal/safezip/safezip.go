@@ -73,7 +73,9 @@ func unsafeErr(f string, a ...any) error {
 // forward slashes and refuses anything that could leave the extraction
 // directory or mean something special on Windows: an empty name, an
 // absolute path, a drive letter or other colon, a "." or ".." element,
-// control characters, or an element ending in a dot or space.
+// control characters, an element ending in a dot or space, or a Windows
+// reserved device name (CON, NUL, COM1, LPT1, ...) with or without an
+// extension, in any element.
 func CleanPath(p string) (string, error) {
 	p = strings.ReplaceAll(p, `\`, "/")
 	p = strings.TrimSuffix(p, "/")
@@ -93,9 +95,30 @@ func CleanPath(p string) (string, error) {
 			return "", fmt.Errorf("path %q has an empty, . or .. element", p)
 		case strings.HasSuffix(el, ".") || strings.HasSuffix(el, " "):
 			return "", fmt.Errorf("path %q has an element ending in a dot or space", p)
+		case reservedName(el):
+			return "", fmt.Errorf("path %q has a Windows reserved device name (%s)", p, el)
 		}
 	}
 	return p, nil
+}
+
+// reservedDevices are the Windows device names a file name must not be,
+// with or without an extension ("nul.txt" and "NUL .txt" open the device).
+var reservedDevices = func() map[string]bool {
+	m := map[string]bool{"con": true, "prn": true, "aux": true, "nul": true, "conin$": true, "conout$": true}
+	for _, d := range []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³"} {
+		m["com"+d] = true
+		m["lpt"+d] = true
+	}
+	return m
+}()
+
+// reservedName reports whether path element el names a Windows device:
+// the part before the first dot, without trailing spaces, compared
+// without case.
+func reservedName(el string) bool {
+	base, _, _ := strings.Cut(el, ".")
+	return reservedDevices[strings.ToLower(strings.TrimRight(base, " "))]
 }
 
 // Entry is one checked file of an archive (directories are not listed).

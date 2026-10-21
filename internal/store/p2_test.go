@@ -241,7 +241,8 @@ func TestVerifyByUBR(t *testing.T) {
 }
 
 // E: through check-in, with the evidence kept on the target and in the
-// evidence report; F: a per-user install counts like a machine-wide one.
+// evidence report; F: a per-user install shows the app is installed (the
+// package is needed) but never verifies the per-machine package.
 func TestUBRCheckinEvidenceAndUserScope(t *testing.T) {
 	ctx := context.Background()
 	s := openTest(t)
@@ -274,7 +275,8 @@ func TestUBRCheckinEvidenceAndUserScope(t *testing.T) {
 	if tg := dd.Targets[0]; tg.State != "verified" || tg.Evidence != "os_version build 19045.9711" || !strings.Contains(tg.Detail, "[os_version build 19045.9711]") {
 		t.Fatalf("UBR target: %+v", tg)
 	}
-	// Per-user Acme 3.0 verifies the msi like a machine-wide install.
+	// Per-user Acme 3.0 does not verify the per-machine msi; a machine-wide
+	// 3.0 does.
 	d2, err := createApproved(s, ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: []Ring{{Name: "all", Groups: []string{"all"}}}, MaxFailurePct: 100})
 	if err != nil {
 		t.Fatal(err)
@@ -286,6 +288,13 @@ func TestUBRCheckinEvidenceAndUserScope(t *testing.T) {
 	if _, err := s.Checkin(ctx, "e-1", CheckinRequest{Hostname: "host-e-1", OSVersion: "Windows 10 Pro 22H2 (19045.9711)", Build: 19045, Arch: "x64", Inventory: userNew}); err != nil {
 		t.Fatal(err)
 	}
+	if st, _ := targetRow(t, s, d2.DeploymentID, "e-1"); st == "verified" {
+		t.Fatal("a per-user copy verified the per-machine msi")
+	}
+	machineNew := append(userNew, InventoryItem{Kind: "product", ID: "{A}", Name: "Acme App", Version: "3.0.0"})
+	if _, err := s.Checkin(ctx, "e-1", CheckinRequest{Hostname: "host-e-1", OSVersion: "Windows 10 Pro 22H2 (19045.9711)", Build: 19045, Arch: "x64", Inventory: machineNew}); err != nil {
+		t.Fatal(err)
+	}
 	rows, err := s.TargetEvidenceReport(ctx, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -294,7 +303,7 @@ func TestUBRCheckinEvidenceAndUserScope(t *testing.T) {
 	for _, r := range rows {
 		got[r.PackageID] = r
 	}
-	if r := got["Acme-3.0"]; r.State != "verified" || r.Evidence != `product Acme "Acme App" 3.0.0 (user)` || r.VerifiedAt == "" || r.Hostname != "host-e-1" {
+	if r := got["Acme-3.0"]; r.State != "verified" || r.Evidence != `product {A} "Acme App" 3.0.0` || r.VerifiedAt == "" || r.Hostname != "host-e-1" {
 		t.Errorf("acme evidence: %+v", r)
 	}
 	if r := got["KB5099999-x64"]; r.ApprovedBy != "user:alice" || r.DeploymentID != d.DeploymentID || r.Title == "" {

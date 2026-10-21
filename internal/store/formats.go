@@ -72,9 +72,10 @@ func portableWantVersion(p Package) string {
 	return p.Version
 }
 
-// msixMatch: it is the appx package family of MSIX package p.
+// msixMatch: it is the appx package family of MSIX package p (a
+// machine-wide package: never a per-user entry).
 func msixMatch(p Package, it InventoryItem) bool {
-	return p.Kind == manifest.KindMsix && p.Msix != nil && it.Kind == "appx" && strings.EqualFold(it.ID, p.Msix.PackageFamilyName)
+	return p.Kind == manifest.KindMsix && p.Msix != nil && it.Kind == "appx" && it.Scope != "user" && strings.EqualFold(it.ID, p.Msix.PackageFamilyName)
 }
 
 // msixWantVersion: the identity version the endpoint reports once installed.

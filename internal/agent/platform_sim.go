@@ -180,6 +180,9 @@ func (s *Sim) Install(ctx context.Context, p manifest.Package, file string) Resu
 		}
 		st.Products = append(st.Products, it)
 	} else {
+		// An MSI upgrade replaces the product's entry (one per product code),
+		// as Windows Installer does.
+		st.Products = slices.DeleteFunc(st.Products, func(it store.InventoryItem) bool { return msiCopy(p, it) })
 		st.Products = append(st.Products, store.InventoryItem{Kind: "product", ID: p.ProductCode, Name: p.Title, Version: p.Version})
 	}
 	res := Result{State: "installed", ExitCode: 0, Detail: "simulated install succeeded"}

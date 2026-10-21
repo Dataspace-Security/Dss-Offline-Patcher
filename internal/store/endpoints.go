@@ -30,6 +30,11 @@ type InventoryItem struct {
 	// 32-bit app whose name mentions no architecture ("7-Zip 24.08") from
 	// a 64-bit package (itemArchCompatible).
 	View string `json:"view,omitempty"`
+	// Provisioned: for an appx package family, the version provisioned for
+	// the machine's users when it is higher than Version, the version the
+	// users have now (they get the provisioned one at their next sign-in).
+	// Only Version proves an MSIX package installed.
+	Provisioned string `json:"provisioned,omitempty"`
 }
 
 type Endpoint struct {

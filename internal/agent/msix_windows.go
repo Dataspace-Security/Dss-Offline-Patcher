@@ -18,7 +18,8 @@ import (
 // of the machine (agents 0.10.0+): the payload (already SHA-256 verified)
 // is copied into a private run folder and re-hashed, its signature must be
 // Valid (Get-AuthenticodeSignature; Windows also refuses an untrusted
-// package itself) and by msix.signer when the manifest names one, then
+// package itself) and by msix.signer when the manifest names one, else by
+// the manifest's msix.publisher (msixSignature), then
 // Add-AppxProvisionedPackage -Online -SkipLicense provisions it. Users get
 // the new version at their next sign-in; signed-in users keep running the
 // old one until then (Add-AppxPackage per user is not used).
@@ -42,7 +43,7 @@ func (w *Windows) installMsix(ctx context.Context, p manifest.Package, file stri
 	defer cancel()
 	out, err := powershellEnv(sctx, msixSigScript, "PM_PKG="+pkg)
 	if err == nil {
-		err = msixSignature(out, p.Msix.Signer)
+		err = msixSignature(out, p.Msix.Signer, p.Msix.Publisher)
 	}
 	if err != nil {
 		return sigFailure(err)

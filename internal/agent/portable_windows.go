@@ -24,7 +24,7 @@ import (
 // permissions), and an Apps & features entry is written under
 // HKLM\...\Uninstall\<portable.arp_key> so inventory, verification and the
 // console see the version. The entry's UninstallString runs
-// "pmagent.exe portable-remove <key>", which removes exactly what the
+// "pmagent.exe" portable-remove "<key>", which removes exactly what the
 // agent wrote. A Start-menu shortcut (all users) points at the program
 // when the manifest names one. Nothing from the package is ever run.
 
@@ -61,26 +61,37 @@ func (w *Windows) installPortable(ctx context.Context, p manifest.Package, file 
 			link = l
 		}
 	}
-	if err := writePortableARP(p, dir, link); err != nil {
+	if err := writePortableARP(registry.LOCAL_MACHINE, p, dir, link); err != nil {
 		return Result{State: "failed", ExitCode: -1, Detail: "the app was copied to " + dir + " but its Apps & features entry could not be written: " + err.Error()}
 	}
 	return Result{State: "installed", Detail: "portable app copied to " + dir}
 }
 
-// writePortableARP writes the app's Apps & features entry (64-bit view).
-// SystemComponent is not set: the entry is visible like any app.
-func writePortableARP(p manifest.Package, dir, link string) error {
+// writePortableARP writes the app's Apps & features entry (64-bit view)
+// under root (HKLM; tests use HKCU). SystemComponent is not set: the entry
+// is visible like any app. An existing entry the agent did not write (no
+// portableMarker) belongs to some other installer and is never
+// overwritten.
+func writePortableARP(root registry.Key, p manifest.Package, dir, link string) error {
 	po := p.Portable
-	k, _, err := registry.CreateKey(registry.LOCAL_MACHINE, uninstallKeys[0]+`\`+po.ARPKey, registry.ALL_ACCESS|registry.WOW64_64KEY)
+	if !validARPKey(po.ARPKey) {
+		return fmt.Errorf("invalid Apps & features key %q", po.ARPKey)
+	}
+	k, existed, err := registry.CreateKey(root, uninstallKeys[0]+`\`+po.ARPKey, registry.ALL_ACCESS|registry.WOW64_64KEY)
 	if err != nil {
 		return err
 	}
 	defer k.Close()
+	if existed {
+		if mark, _, err := k.GetIntegerValue(portableMarker); err != nil || mark != 1 {
+			return fmt.Errorf("an Apps & features entry %s exists that the DSS Patcher agent did not write; not overwriting it", po.ARPKey)
+		}
+	}
 	self, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	remove := `"` + self + `" portable-remove ` + po.ARPKey
+	remove := portableRemoveCommand(self, po.ARPKey)
 	for name, v := range map[string]string{"DisplayName": po.DisplayName, "DisplayVersion": formatWantVersion(p), "Publisher": po.Publisher,
 		"InstallLocation": dir, "DisplayIcon": filepath.Join(dir, filepath.FromSlash(po.Command)), "UninstallString": remove,
 		"QuietUninstallString": remove, portableFolderValue: po.Folder, portableLinkValue: link,

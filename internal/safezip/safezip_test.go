@@ -32,12 +32,16 @@ func mkZip(t *testing.T, files [][2]string) string {
 func sum(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
 
 func TestCleanPath(t *testing.T) {
-	for in, want := range map[string]string{`a\b.exe`: "a/b.exe", "dir/": "dir", "a/b c/d.msi": "a/b c/d.msi"} {
+	for in, want := range map[string]string{`a\b.exe`: "a/b.exe", "dir/": "dir", "a/b c/d.msi": "a/b c/d.msi",
+		"console.exe": "console.exe", "com10.txt": "com10.txt", "lpt/nullable.dll": "lpt/nullable.dll", "auxiliary/x": "auxiliary/x"} {
 		if got, err := CleanPath(in); err != nil || got != want {
 			t.Errorf("%q: %q %v", in, got, err)
 		}
 	}
-	for _, bad := range []string{"", "/a", "C:x", "a/../b", "./a", "a//b", "a./b", "a /b", "a\x01b"} {
+	for _, bad := range []string{"", "/a", "C:x", "a/../b", "./a", "a//b", "a./b", "a /b", "a\x01b",
+		// Windows reserved device names, in any element, with or without an extension.
+		"con", "CON.txt", "app/nul", "app/Nul.dll", "PRN/a", "aux.h", "com1", "COM9.log", "lpt1.txt", "a/LPT9/b",
+		"nul .txt", "com¹.txt", "conout$"} {
 		if _, err := CleanPath(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}

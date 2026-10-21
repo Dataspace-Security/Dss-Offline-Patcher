@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,9 +49,10 @@ func portableMatch(p manifest.Package, it store.InventoryItem) bool {
 	return strings.EqualFold(it.ID, p.Portable.ARPKey) || arpNameMatch(p.Portable.DisplayName, it.Name, it.View)
 }
 
-// msixMatch: it is the appx package family of p.
+// msixMatch: it is the appx package family of p (a machine-wide package:
+// never a per-user entry).
 func msixMatch(p manifest.Package, it store.InventoryItem) bool {
-	return p.Kind == manifest.KindMsix && p.Msix != nil && it.Kind == "appx" && strings.EqualFold(it.ID, p.Msix.PackageFamilyName)
+	return p.Kind == manifest.KindMsix && p.Msix != nil && it.Kind == "appx" && it.Scope != "user" && strings.EqualFold(it.ID, p.Msix.PackageFamilyName)
 }
 
 // formatWantVersion is the version a portable or MSIX package installs.
@@ -73,6 +76,79 @@ func formatAppMatch(p manifest.Package, it store.InventoryItem) bool {
 func formatUpToDate(p manifest.Package, it store.InventoryItem) bool {
 	want := formatWantVersion(p)
 	return formatAppMatch(p, it) && want != "" && it.Version != "" && store.VersionAtLeast(it.Version, want)
+}
+
+// msiCopy: it is the machine-wide entry of MSI package p's product code.
+// A per-user entry never proves a per-machine MSI.
+func msiCopy(p manifest.Package, it store.InventoryItem) bool {
+	return p.ProductCode != "" && it.Kind == "product" && it.Scope != "user" && strings.EqualFold(it.ID, p.ProductCode)
+}
+
+// appCopies are the inventory entries of the app Windows package p (MSI by
+// product code, EXE, portable, MSIX) installs or updates: machine-wide
+// entries for a machine-wide package, per-user entries for a per-user
+// installer. An app can have several (both registry views, a copy left by
+// another installer, several user profiles).
+func appCopies(p manifest.Package, inv []store.InventoryItem) []store.InventoryItem {
+	var out []store.InventoryItem
+	for _, it := range inv {
+		if msiCopy(p, it) || (p.Kind == manifest.KindExe && exeAppMatch(p, it)) || formatAppMatch(p, it) {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+// copyUpToDate: one copy of p's app is at (at least) p's version.
+func copyUpToDate(p manifest.Package, it store.InventoryItem) bool {
+	switch {
+	case msiCopy(p, it):
+		// Some MSIs keep their product code across versions (Chrome's): an
+		// older version under the same code is an update.
+		return p.Version == "" || it.Version == "" || store.VersionAtLeast(it.Version, p.Version)
+	case p.Kind == manifest.KindExe:
+		return exeUpToDate(p, it)
+	}
+	return formatUpToDate(p, it)
+}
+
+// appUpToDate: inventory proves Windows app package p installed: some copy
+// of its app is at p's version or later and no copy with a known version
+// is older (a copy without a version proves nothing either way). One
+// up-to-date copy (say, the one the portable path wrote) must not hide an
+// older, vulnerable MSI/EXE copy of the same app; the server decides the
+// same way (internal/store appPresentOn).
+func appUpToDate(p manifest.Package, inv []store.InventoryItem) bool {
+	proved := false
+	for _, it := range appCopies(p, inv) {
+		switch {
+		case copyUpToDate(p, it):
+			proved = true
+		case it.Version != "":
+			return false
+		}
+	}
+	return proved
+}
+
+// msixProvisionedOnly: the MSIX package is provisioned at (at least) its
+// version, but users still run an older one until their next sign-in. The
+// detail says so ("" when that is not the case).
+func msixProvisionedOnly(p manifest.Package, inv []store.InventoryItem) string {
+	want := formatWantVersion(p)
+	if p.Kind != manifest.KindMsix || want == "" {
+		return ""
+	}
+	for _, it := range inv {
+		if msixMatch(p, it) && it.Provisioned != "" && store.VersionAtLeast(it.Provisioned, want) && !formatUpToDate(p, it) {
+			have := it.Version
+			if have == "" {
+				have = "unknown version"
+			}
+			return fmt.Sprintf("MSIX %s already provisioned; users get it at their next sign-in (installed for users: %s)", it.Provisioned, have)
+		}
+	}
+	return ""
 }
 
 // installSize is the disk space an install needs besides the cached
@@ -131,7 +207,9 @@ func portableDir(p manifest.Package, parent string) string {
 // installPortableFiles stages the verified files of portable package p
 // (payload: the zip of an archive package, else the single program) next
 // to the app's folder, checks the main program's signature, and swaps the
-// folder in unless a program runs from it. It returns the folder.
+// folder in. A program running from the folder is checked first (nothing
+// is extracted or verified then: retry later) and again just before the
+// swap. It returns the folder.
 func installPortableFiles(p manifest.Package, payload string, env portableEnv) (string, *Result) {
 	fail := func(f string, a ...any) (string, *Result) {
 		return "", &Result{State: "failed", ExitCode: -1, Detail: fmt.Sprintf(f, a...)}
@@ -144,16 +222,26 @@ func installPortableFiles(p manifest.Package, payload string, env portableEnv) (
 		return fail("could not create %s: %v", env.parent, err)
 	}
 	dir := portableDir(p, env.parent)
-	// Leftovers of an install the agent did not finish (killed mid-swap).
-	for _, pat := range []string{"." + po.Folder + ".new-*", po.Folder + ".old-*"} {
-		if old, _ := filepath.Glob(filepath.Join(env.parent, pat)); len(old) > 0 {
-			for _, o := range old {
-				os.RemoveAll(o)
+	// A running app is not replaced: say so before any work is done.
+	if prog := env.running(dir); prog != "" {
+		return "", &Result{State: "failed", ExitCode: -1, Detail: appRunning + ": " + prog + ")"}
+	}
+	// Leftovers of an install of this app the agent did not finish (killed
+	// mid-swap): only names the agent itself makes (portableLeftover), never
+	// another app's folder.
+	if ents, err := os.ReadDir(env.parent); err == nil {
+		for _, e := range ents {
+			if portableLeftover(e.Name(), po.Folder) {
+				os.RemoveAll(filepath.Join(env.parent, e.Name()))
 			}
 		}
 	}
-	stage, err := os.MkdirTemp(env.parent, "."+po.Folder+".new-")
+	sfx, err := portableSuffix()
 	if err != nil {
+		return fail("could not stage the app: %v", err)
+	}
+	stage := filepath.Join(env.parent, "."+po.Folder+".new-"+sfx)
+	if err := os.Mkdir(stage, 0o755); err != nil {
 		return fail("could not stage the app: %v", err)
 	}
 	keep := false
@@ -189,7 +277,7 @@ func installPortableFiles(p manifest.Package, payload string, env portableEnv) (
 	}
 	var old string
 	if _, err := os.Stat(dir); err == nil {
-		old = dir + ".old-" + filepath.Base(stage)[len(po.Folder)+6:]
+		old = dir + ".old-" + sfx
 		if err := os.Rename(dir, old); err != nil {
 			// A file in use (an open document, a service): try again later.
 			return "", &Result{State: "failed", ExitCode: -1, Detail: appRunning + ": files in " + dir + " are in use: " + err.Error() + ")"}
@@ -206,6 +294,36 @@ func installPortableFiles(p manifest.Package, payload string, env portableEnv) (
 		os.RemoveAll(old)
 	}
 	return dir, nil
+}
+
+// portableSuffixLen is the length of the random suffix of the staging
+// (".<folder>.new-<suffix>") and old ("<folder>.old-<suffix>") folders.
+const portableSuffixLen = 16
+
+// portableSuffix is a random lower-case hex suffix of portableSuffixLen.
+func portableSuffix() (string, error) {
+	b := make([]byte, portableSuffixLen/2)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// portableLeftover reports whether name (in the portable parent folder) is
+// a staging or old folder of the app in folder: exactly
+// ".<folder>.new-<suffix>" or "<folder>.old-<suffix>" with a suffix as
+// portableSuffix makes. Another app's folder ("<folder>.old-tools", or a
+// folder whose name merely starts the same) never matches.
+func portableLeftover(name, folder string) bool {
+	for _, pre := range []string{"." + folder + ".new-", folder + ".old-"} {
+		if len(name) != len(pre)+portableSuffixLen || !strings.EqualFold(name[:len(pre)], pre) {
+			continue
+		}
+		if strings.Trim(name[len(pre):], "0123456789abcdef") == "" {
+			return true
+		}
+	}
+	return false
 }
 
 // copyPlain copies src to a new file dst.
@@ -253,6 +371,28 @@ var arpKeyRe = regexp.MustCompile(`^[A-Za-z0-9{}][A-Za-z0-9{}._ +()-]{0,127}$`)
 
 // validARPKey: a single Uninstall key name (no path separators).
 func validARPKey(k string) bool { return arpKeyRe.MatchString(k) }
+
+// portableRemoveCommand is the UninstallString of a portable app's Apps &
+// features entry: the agent's own program with portable-remove and the
+// key, both quoted (a key may contain spaces: "Rufus Portable").
+func portableRemoveCommand(self, key string) string {
+	return `"` + self + `" portable-remove "` + key + `"`
+}
+
+// PortableRemoveKey is the Apps & features key named by the arguments of
+// pmagent portable-remove: one (quoted) argument, or, for an entry an
+// older agent wrote without quotes, a key with spaces split into several
+// arguments (joined again with single spaces). The key must be valid.
+func PortableRemoveKey(args []string) (string, error) {
+	if len(args) == 0 {
+		return "", errors.New("portable-remove needs the Apps & features key")
+	}
+	k := strings.Join(args, " ")
+	if !validARPKey(k) {
+		return "", fmt.Errorf("invalid Apps & features key %q", k)
+	}
+	return k, nil
+}
 
 // ---- per-user installers ----
 
@@ -317,15 +457,21 @@ func listOrNone(s []string) string {
 }
 
 // userHasVersion: the user's own inventory (their HKU Uninstall entries)
-// shows the per-user app at the package's version or later.
+// shows the per-user app, and every entry of it is at the package's
+// version or later (an old second copy still needs the installer).
 func userHasVersion(p manifest.Package, items []store.InventoryItem) bool {
+	found := false
 	for _, it := range items {
 		it.Scope = "user"
-		if exeUpToDate(p, it) {
-			return true
+		if !exeAppMatch(p, it) {
+			continue
 		}
+		if !exeUpToDate(p, it) {
+			return false
+		}
+		found = true
 	}
-	return false
+	return found
 }
 
 // ---- MSIX ----
@@ -342,8 +488,12 @@ const msixProvisionScript = `$ErrorActionPreference = 'Stop'; ` +
 	`Add-AppxProvisionedPackage -Online -PackagePath $env:PM_PKG -SkipLicense | Out-Null; 'ok'`
 
 // msixSignature checks the PowerShell signature result: Valid, and by the
-// manifest's signer when it names one.
-func msixSignature(out []byte, signer string) error {
+// manifest's signer when it names one. Without a signer (a package pmctl
+// acquired on Linux, where it cannot verify signatures) the signature
+// subject must be the package's own publisher (msix.publisher, the
+// AppxManifest Publisher DN): the same DN, or the same CN (the same O when
+// the publisher DN has no CN). With neither, the package is refused.
+func msixSignature(out []byte, signer, publisher string) error {
 	var r struct{ Status, Subject string }
 	if err := json.Unmarshal(out, &r); err != nil {
 		return fmt.Errorf("signature status unreadable: %v", err)
@@ -351,13 +501,51 @@ func msixSignature(out []byte, signer string) error {
 	if !strings.EqualFold(r.Status, "Valid") {
 		return fmt.Errorf("package signature status %s", r.Status)
 	}
-	if signer == "" {
+	if signer != "" {
+		if cn := subjectCN(r.Subject); !signerMatches(signer, cn, subjectField(r.Subject, "O")) {
+			return fmt.Errorf("signed by %q, expected %q", cn, signer)
+		}
 		return nil
 	}
-	if cn := subjectCN(r.Subject); !signerMatches(signer, cn, subjectField(r.Subject, "O")) {
-		return fmt.Errorf("signed by %q, expected %q", cn, signer)
+	if strings.TrimSpace(publisher) == "" {
+		return errors.New("the manifest names neither a signer nor a publisher for this MSIX package")
+	}
+	if !publisherMatches(publisher, r.Subject) {
+		return fmt.Errorf("signed by %q, expected the package publisher %q", r.Subject, publisher)
 	}
 	return nil
+}
+
+// publisherMatches: certificate subject is the MSIX publisher DN: the
+// same RDNs (any order, case and repeated spaces ignored), or the same CN,
+// or, when the publisher has no CN, the same O. No substring matches.
+func publisherMatches(publisher, subject string) bool {
+	if normDN(publisher) != "" && normDN(publisher) == normDN(subject) {
+		return true
+	}
+	if cn := subjectCN(publisher); normSigner(cn) != "" {
+		return normSigner(cn) == normSigner(subjectCN(subject))
+	}
+	o := subjectField(publisher, "O")
+	return normSigner(o) != "" && normSigner(o) == normSigner(subjectField(subject, "O"))
+}
+
+// normDN is a DN in a comparable form: its RDNs as key=value with the key
+// upper-case, the value without quotes and in normSigner form, sorted.
+func normDN(dn string) string {
+	var parts []string
+	for _, rdn := range splitRDN(dn) {
+		k, v, ok := strings.Cut(rdn, "=")
+		if !ok {
+			if strings.TrimSpace(rdn) != "" {
+				return "" // not a DN
+			}
+			continue
+		}
+		parts = append(parts, strings.ToUpper(strings.TrimSpace(k))+"="+normSigner(strings.Trim(strings.TrimSpace(v), `"`)))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
 }
 
 // subjectCN and subjectField read an RDN of an X.500 subject string.
@@ -451,7 +639,11 @@ func parseProvisioned(out []byte) []store.InventoryItem {
 }
 
 // mergeAppx merges installed (per user) and provisioned appx items: one
-// item per package family, at the highest version.
+// item per package family. Its Version is the LOWER of the two: a
+// provisioned package reaches existing users only at their next sign-in,
+// and until then they run the old build, so only the lower version is
+// proven. A provisioned version above the users' is kept in Provisioned,
+// so the console can say "provisioned 1.22, users get it at next sign-in".
 func mergeAppx(installed, provisioned []store.InventoryItem) []store.InventoryItem {
 	out := append([]store.InventoryItem{}, installed...)
 	idx := map[string]int{}
@@ -460,14 +652,23 @@ func mergeAppx(installed, provisioned []store.InventoryItem) []store.InventoryIt
 	}
 	for _, it := range provisioned {
 		k := strings.ToLower(it.ID)
-		if i, ok := idx[k]; ok {
-			if it.Version != "" && store.VersionAtLeast(it.Version, out[i].Version) && it.Version != out[i].Version {
-				out[i].Version = it.Version
-			}
+		i, ok := idx[k]
+		if !ok {
+			idx[k] = len(out)
+			out = append(out, it)
 			continue
 		}
-		idx[k] = len(out)
-		out = append(out, it)
+		cur := out[i]
+		switch {
+		case it.Version == "" || it.Version == cur.Version:
+		case cur.Version == "":
+			cur.Version = it.Version
+		case store.VersionAtLeast(it.Version, cur.Version):
+			cur.Provisioned = it.Version // users get it at their next sign-in
+		default:
+			cur.Version = it.Version // new users would get the older provisioned build
+		}
+		out[i] = cur
 	}
 	return out
 }

@@ -210,17 +210,30 @@ func TestFormatMatching(t *testing.T) {
 
 func TestMsixHelpers(t *testing.T) {
 	sig := []byte(`{"status":"Valid","subject":"CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"}`)
-	if err := msixSignature(sig, "Microsoft Corporation"); err != nil {
+	const msPub = "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+	if err := msixSignature(sig, "Microsoft Corporation", msPub); err != nil {
 		t.Errorf("valid: %v", err)
 	}
-	if err := msixSignature(sig, ""); err != nil {
-		t.Errorf("valid without pin: %v", err)
-	}
-	if err := msixSignature(sig, "Microsoft"); err == nil {
+	if err := msixSignature(sig, "Microsoft", msPub); err == nil {
 		t.Error("substring signer accepted")
 	}
-	if err := msixSignature([]byte(`{"status":"NotSigned","subject":""}`), ""); err == nil {
+	if err := msixSignature([]byte(`{"status":"NotSigned","subject":""}`), "", msPub); err == nil {
 		t.Error("unsigned package accepted")
+	}
+	// Without a signer (acquired on Linux) the subject must be the
+	// manifest's publisher: the same DN (any RDN order/case/spacing) or CN.
+	for _, pub := range []string{msPub, "c=US, s=Washington, l=Redmond, o=Microsoft  Corporation, cn=microsoft corporation", "CN=Microsoft Corporation"} {
+		if err := msixSignature(sig, "", pub); err != nil {
+			t.Errorf("publisher %q: %v", pub, err)
+		}
+	}
+	for _, pub := range []string{"", "  ", "CN=Contoso Ltd, O=Contoso Ltd, C=US", "CN=Microsoft", "O=Contoso"} {
+		if err := msixSignature(sig, "", pub); err == nil {
+			t.Errorf("publisher %q: other signer accepted", pub)
+		}
+	}
+	if err := msixSignature([]byte(`{"status":"Valid","subject":"O=Microsoft Corporation, C=US"}`), "", "O=Microsoft Corporation"); err != nil {
+		t.Errorf("O-only publisher: %v", err)
 	}
 	if r := classifyMsix([]byte("ok\r\n"), nil); r.State != "installed" {
 		t.Errorf("ok: %+v", r)
@@ -237,8 +250,173 @@ func TestMsixHelpers(t *testing.T) {
 	}
 	installed := []store.InventoryItem{{Kind: "appx", ID: "Microsoft.WindowsTerminal_8wekyb3d8bbwe", Version: "1.20.11781.0"}, {Kind: "appx", ID: "Other_x", Version: "1.0"}}
 	merged := mergeAppx(installed, prov)
-	if len(merged) != 2 || merged[0].Version != "1.21.2361.0" || installed[0].Version != "1.20.11781.0" {
+	// Users keep the old build until their next sign-in: the lower version
+	// is the proof, the provisioned one is reported beside it.
+	if len(merged) != 2 || merged[0].Version != "1.20.11781.0" || merged[0].Provisioned != "1.21.2361.0" || installed[0].Version != "1.20.11781.0" {
 		t.Fatalf("merged: %+v (installed %+v)", merged, installed)
+	}
+	// A provisioned build older than the users' is what new users get.
+	older := mergeAppx([]store.InventoryItem{{Kind: "appx", ID: "Microsoft.WindowsTerminal_8wekyb3d8bbwe", Version: "1.22.0.0"}}, prov)
+	if older[0].Version != "1.21.2361.0" || older[0].Provisioned != "" {
+		t.Fatalf("older provisioned: %+v", older)
+	}
+	m := manifest.Package{Kind: manifest.KindMsix, Msix: &manifest.Msix{PackageFamilyName: "Microsoft.WindowsTerminal_8wekyb3d8bbwe", Version: "1.21.2361.0"}}
+	if appUpToDate(m, merged) {
+		t.Error("provisioned-only MSIX verified")
+	}
+	if d := msixProvisionedOnly(m, merged); !strings.Contains(d, "provisioned") || !strings.Contains(d, "next sign-in") || !strings.Contains(d, "1.20.11781.0") {
+		t.Errorf("provisioned detail: %q", d)
+	}
+	if msixProvisionedOnly(m, []store.InventoryItem{{Kind: "appx", ID: m.Msix.PackageFamilyName, Version: "1.21.2361.0"}}) != "" {
+		t.Error("installed MSIX reported as provisioned only")
+	}
+}
+
+// Only results that change what is installed bring the next check-in
+// forward: a busy ("retry later") or deferred result must not, or the
+// server's installer-busy grace is spent in a few minutes.
+func TestRefreshesInventory(t *testing.T) {
+	busy := []Result{
+		classifyMsix(nil, errors.New("0x80073D02")),
+		aggregateUserRuns([]userRun{{User: `PC\ann`, Result: Result{State: "failed", Detail: retryLater + " (in use)"}}}),
+		{State: "failed", ExitCode: -1, Detail: appRunning + ": C:\\x\\a.exe)"},
+		{State: "deferred", Detail: waitingForUser},
+	}
+	for _, r := range busy {
+		a := &Agent{}
+		a.recheckSoon = a.recheckSoon || refreshesInventory(r)
+		if a.recheckSoon || a.afterInstallWait(5*time.Minute) != 5*time.Minute {
+			t.Errorf("%+v: recheck soon", r)
+		}
+	}
+	for _, r := range []Result{{State: "installed"}, {State: "pending_reboot"}, {State: "failed", ExitCode: 1603, Detail: "fatal error"}} {
+		if !refreshesInventory(r) {
+			t.Errorf("%+v: no recheck", r)
+		}
+	}
+}
+
+// Machine-wide packages are never proven by a per-user entry, and every
+// copy of the app must be current: an up-to-date second copy does not
+// hide an older one.
+func TestAppUpToDateAllCopies(t *testing.T) {
+	msi := manifest.Package{Kind: "msi", ProductCode: "{11111111-2222-3333-4444-555555555555}", Version: "2.0"}
+	cur := store.InventoryItem{Kind: "product", ID: msi.ProductCode, Name: "App", Version: "2.0"}
+	user := cur
+	user.Scope = "user"
+	if appUpToDate(msi, []store.InventoryItem{user}) || !appUpToDate(msi, []store.InventoryItem{cur}) {
+		t.Error("msi scope")
+	}
+	p, _ := portablePkg(t, t.TempDir(), false)
+	newCopy := store.InventoryItem{Kind: "product", ID: p.Portable.ARPKey, Name: "Rufus", Version: "4.6"}
+	oldCopy := store.InventoryItem{Kind: "product", ID: "Rufus", Name: "Rufus", Version: "4.1", View: "64"}
+	if !appUpToDate(p, []store.InventoryItem{newCopy}) || appUpToDate(p, []store.InventoryItem{newCopy, oldCopy}) {
+		t.Error("portable: old copy hidden by the new one")
+	}
+	exe := manifest.Package{Kind: manifest.KindExe, Version: "24.08", Exe: &manifest.ExeInstall{Detect: manifest.ExeDetect{DisplayName: "7-Zip", DisplayVersion: "24.08"}}}
+	a := store.InventoryItem{Kind: "product", ID: "7-Zip", Name: "7-Zip 24.08 (x64)", Version: "24.08", View: "64"}
+	b := store.InventoryItem{Kind: "product", ID: "{23170F69-40C1-2701-1900-000001000000}", Name: "7-Zip 19.00 (x64 edition)", Version: "19.00.00.0", View: "64"}
+	if !appUpToDate(exe, []store.InventoryItem{a}) || appUpToDate(exe, []store.InventoryItem{a, b}) {
+		t.Error("exe: old MSI copy hidden by the new EXE copy")
+	}
+	noVer := store.InventoryItem{Kind: "product", ID: "7-Zip-old", Name: "7-Zip", View: "64"}
+	if !appUpToDate(exe, []store.InventoryItem{a, noVer}) || appUpToDate(exe, []store.InventoryItem{noVer}) {
+		t.Error("exe: a copy without a version proves nothing either way")
+	}
+	ua := a
+	ua.Scope = "user"
+	if appUpToDate(exe, []store.InventoryItem{ua}) {
+		t.Error("exe: per-user entry proved a machine-wide package")
+	}
+	m := manifest.Package{Kind: manifest.KindMsix, Msix: &manifest.Msix{PackageFamilyName: "A_x", Version: "1.0"}}
+	if appUpToDate(m, []store.InventoryItem{{Kind: "appx", ID: "A_x", Version: "1.0", Scope: "user"}}) {
+		t.Error("msix: per-user entry proved the package")
+	}
+}
+
+// A per-user app counts as current for a user only when every entry of it
+// in their hive is.
+func TestUserHasVersionAllEntries(t *testing.T) {
+	u := manifest.Package{Kind: manifest.KindExe, Version: "2.1.0", Exe: &manifest.ExeInstall{Scope: manifest.ExeScopeUser, Detect: manifest.ExeDetect{DisplayName: "balenaEtcher", DisplayVersion: "2.1.0"}}}
+	cur := store.InventoryItem{Kind: "product", ID: "a", Name: "balenaEtcher", Version: "2.1.0"}
+	old := store.InventoryItem{Kind: "product", ID: "b", Name: "balenaEtcher", Version: "1.18.0"}
+	if !userHasVersion(u, []store.InventoryItem{cur}) || userHasVersion(u, []store.InventoryItem{cur, old}) || userHasVersion(u, nil) {
+		t.Error("userHasVersion")
+	}
+	// Merged inventory: two users with the same key report the lowest; two
+	// keys are both listed, and the old one keeps the package needed.
+	merged := mergeUserInventory(nil, []store.InventoryItem{cur, {Kind: "product", ID: "a", Name: "balenaEtcher", Version: "1.0"}})
+	if len(merged) != 1 || merged[0].Version != "1.0" || merged[0].Scope != "user" {
+		t.Fatalf("merged: %+v", merged)
+	}
+	if appUpToDate(u, mergeUserInventory(nil, []store.InventoryItem{cur, old})) {
+		t.Error("one user's current copy hid another user's old one")
+	}
+}
+
+// The portable app's Apps & features UninstallString quotes the key, and
+// pmagent portable-remove reads it back (also from an older unquoted entry
+// whose key has spaces).
+func TestPortableRemoveCommand(t *testing.T) {
+	cmd := portableRemoveCommand(`C:\Program Files\DSS Patcher\pmagent.exe`, "Rufus Portable (x64)")
+	args := splitCommandLine(cmd)
+	if len(args) != 3 || args[0] != `C:\Program Files\DSS Patcher\pmagent.exe` || args[1] != "portable-remove" {
+		t.Fatalf("split %q: %q", cmd, args)
+	}
+	if k, err := PortableRemoveKey(args[2:]); err != nil || k != "Rufus Portable (x64)" {
+		t.Fatalf("key %q %v", k, err)
+	}
+	if k, err := PortableRemoveKey([]string{"Rufus", "Portable"}); err != nil || k != "Rufus Portable" {
+		t.Fatalf("legacy key %q %v", k, err)
+	}
+	for _, bad := range [][]string{nil, {`..\Other`}, {""}, {"a\\b"}} {
+		if _, err := PortableRemoveKey(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+// Leftover cleanup removes only the staging/old folders the agent makes
+// for this app, never another app's folder.
+func TestPortableLeftover(t *testing.T) {
+	for name, want := range map[string]bool{
+		".Rufus.new-0123456789abcdef": true, "Rufus.old-0123456789abcdef": true, "rufus.OLD-0123456789abcdef": true,
+		"Rufus.old-tools": false, "Rufus.old-0123456789abcdeg": false, "Rufus.old-0123456789abcdef0": false,
+		".Rufus.new-": false, "Rufus": false, "Rufus.Tools.old-0123456789abcdef": false, "Other.old-0123456789abcdef": false,
+	} {
+		if portableLeftover(name, "Rufus") != want {
+			t.Errorf("%s: want %v", name, want)
+		}
+	}
+	parent := filepath.Join(t.TempDir(), manifest.PortableParent)
+	for _, d := range []string{"Akeo.Rufus.old-tools", "Akeo.Rufus.old-0123456789abcdef", ".Akeo.Rufus.new-fedcba9876543210", "Akeo.RufusX"} {
+		os.MkdirAll(filepath.Join(parent, d), 0o755)
+	}
+	p, payload := portablePkg(t, t.TempDir(), false)
+	env := portableEnv{parent: parent, running: func(string) string { return "" }, verify: func(string, string) error { return nil }}
+	if _, res := installPortableFiles(p, payload, env); res != nil {
+		t.Fatal(res)
+	}
+	for d, want := range map[string]bool{"Akeo.Rufus.old-tools": true, "Akeo.Rufus.old-0123456789abcdef": false, ".Akeo.Rufus.new-fedcba9876543210": false, "Akeo.RufusX": true} {
+		if _, err := os.Stat(filepath.Join(parent, d)); (err == nil) != want {
+			t.Errorf("%s: exists=%v", d, err == nil)
+		}
+	}
+}
+
+// A running app is reported before anything is extracted or verified.
+func TestPortableRunningCheckedFirst(t *testing.T) {
+	p, payload := portablePkg(t, t.TempDir(), true)
+	parent := filepath.Join(t.TempDir(), manifest.PortableParent)
+	verified := false
+	env := portableEnv{parent: parent, running: func(dir string) string { return filepath.Join(dir, "rufus.exe") },
+		verify: func(string, string) error { verified = true; return nil }}
+	if _, res := installPortableFiles(p, payload, env); res == nil || !strings.HasPrefix(res.Detail, appRunning) {
+		t.Fatalf("running: %+v", res)
+	}
+	ents, _ := os.ReadDir(parent)
+	if verified || len(ents) != 0 {
+		t.Errorf("work done for a running app: verified=%v, %v", verified, ents)
 	}
 }
 

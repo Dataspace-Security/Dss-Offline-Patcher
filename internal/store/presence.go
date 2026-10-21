@@ -74,17 +74,145 @@ func classify(p Package, e Endpoint, os OSFacts, inv []InventoryItem, sup map[st
 	}
 	// An app package: the app is installed but not at this version (or its
 	// version is unknown, which proves nothing either way: the installer
-	// runs, as the agent does too).
+	// runs, as the agent does too). Have is the oldest copy: the one the
+	// update is for; with several copies the reason names it.
 	v := Verdict{Presence: PresenceNeeded, Why: "update available"}
-	for _, it := range inv {
-		if appItemMatch(p, it) && it.Version != "" && (v.Have == "" || VersionAtLeast(it.Version, v.Have)) {
-			v.Have = it.Version
-		}
-	}
-	if v.Have == "" {
+	low, n := oldestCopy(p, inv)
+	switch {
+	case low == nil:
 		v.Why = "installed version unknown"
+	case n > 1:
+		v.Have = low.Version
+		v.Why = "update available (outdated copy: " + evidenceLine(*low) + ")"
+	default:
+		v.Have = low.Version
+	}
+	if d := msixWaitingForSignIn(p, inv); d != "" {
+		v.Why = d
 	}
 	return v
+}
+
+// windowsAppKind: Windows app packages, decided from every copy of the app.
+func windowsAppKind(kind string) bool {
+	return kind == "msi" || kind == manifest.KindExe || kind == manifest.KindPortable || kind == manifest.KindMsix
+}
+
+// msiCodeMatch: it is the machine-wide entry of MSI package p's product code.
+func msiCodeMatch(p Package, it InventoryItem) bool {
+	return p.Kind == "msi" && p.ProductCode != "" && it.Kind == "product" && it.Scope != "user" && strings.EqualFold(it.ID, p.ProductCode)
+}
+
+// presenceCopy: it is a copy of the app Windows package p installs that
+// decides whether p is present: machine-wide entries for a machine-wide
+// package (MSI, machine EXE, portable, MSIX), per-user entries for a
+// per-user installer. A per-user copy of an app never proves a per-machine
+// package. MSI copies are found by product code, or by name when the
+// package has a version to compare.
+func presenceCopy(p Package, it InventoryItem) bool {
+	switch p.Kind {
+	case "msi":
+		if it.Scope == "user" {
+			return false
+		}
+		return msiCodeMatch(p, it) || (p.Version != "" && p.PackageName != "" && msiAppMatch(Package{Kind: "msi", PackageName: p.PackageName}, it))
+	case manifest.KindExe:
+		return exeAppMatch(p, it)
+	case manifest.KindPortable, manifest.KindMsix:
+		return formatAppMatch(p, it)
+	}
+	return false
+}
+
+// copyCurrent: copy it of p's app is at p's version or later. An MSI
+// product code at an unknown version counts (as before); otherwise an
+// entry without a version proves nothing.
+func copyCurrent(p Package, it InventoryItem) bool {
+	switch p.Kind {
+	case "msi":
+		if msiCodeMatch(p, it) && (p.Version == "" || it.Version == "" || VersionAtLeast(it.Version, p.Version)) {
+			return true
+		}
+		return p.Version != "" && it.Version != "" && VersionAtLeast(it.Version, p.Version)
+	case manifest.KindExe:
+		return exePresent(p, it)
+	}
+	return formatPresent(p, it)
+}
+
+// appPresentOn: Windows app package p is present when some copy of its app
+// proves the version and no copy with a known version is older. A second,
+// up-to-date copy (say one the portable path wrote) must not hide an older,
+// vulnerable MSI/EXE copy of the same app. The agent decides the same way
+// (internal/agent appUpToDate).
+func appPresentOn(inv []InventoryItem, p Package) (bool, string, string) {
+	var proof *InventoryItem
+	for i, it := range inv {
+		if !presenceCopy(p, it) {
+			continue
+		}
+		if copyCurrent(p, it) {
+			if proof == nil {
+				proof = &inv[i]
+			}
+			continue
+		}
+		if it.Version != "" {
+			return false, "", "" // an older copy: the package is still needed
+		}
+	}
+	if proof == nil {
+		return false, "", ""
+	}
+	why := "inventory shows " + firstNonEmpty(proof.Name, proof.ID) + " " + proof.Version
+	if msiCodeMatch(p, *proof) && (proof.Version == "" || p.Version == "") {
+		why = "inventory shows product " + p.ProductCode
+	}
+	return true, why, evidenceLine(*proof)
+}
+
+// oldestCopy is the copy of p's app with the lowest known version and how
+// many copies with a version there are: the copies that decide presence
+// (presenceCopy), else any entry of the app (a per-user copy of a
+// per-machine app). nil when no copy has a version.
+func oldestCopy(p Package, inv []InventoryItem) (*InventoryItem, int) {
+	for _, match := range []func(Package, InventoryItem) bool{presenceCopy, appItemMatch} {
+		var low *InventoryItem
+		n := 0
+		for i, it := range inv {
+			if !match(p, it) || it.Version == "" {
+				continue
+			}
+			n++
+			if low == nil || !VersionAtLeast(it.Version, low.Version) {
+				low = &inv[i]
+			}
+		}
+		if low != nil {
+			return low, n
+		}
+	}
+	return nil, 0
+}
+
+// msixWaitingForSignIn: MSIX package p is provisioned at its version but
+// users still run an older one until their next sign-in (inventory
+// Provisioned); the reason says so ("" otherwise).
+func msixWaitingForSignIn(p Package, inv []InventoryItem) string {
+	want := formatWantVersion(p)
+	if p.Kind != manifest.KindMsix || want == "" {
+		return ""
+	}
+	for _, it := range inv {
+		if msixMatch(p, it) && it.Provisioned != "" && VersionAtLeast(it.Provisioned, want) && !formatPresent(p, it) {
+			have := it.Version
+			if have == "" {
+				have = "an unknown version"
+			}
+			return "provisioned " + it.Provisioned + "; waiting for users to sign in (users get it at their next sign-in; they have " + have + ")"
+		}
+	}
+	return ""
 }
 
 // Classify is classify for an endpoint loaded with its inventory (as by
@@ -171,7 +299,8 @@ func itemArchCompatible(it InventoryItem, name string) bool {
 
 // msiAppMatch: inventory item it is the app MSI package p installs or
 // upgrades, by product code or by display name (same architecture).
-// Per-user installs count like machine-wide ones.
+// Per-user installs show the app is installed (the package is offered),
+// but never prove the per-machine package present (presenceCopy).
 func msiAppMatch(p Package, it InventoryItem) bool {
 	if p.Kind != "msi" || it.Kind != "product" {
 		return false
@@ -341,10 +470,14 @@ func missingProof(p Package, os OSFacts, inv []InventoryItem) string {
 		return "agent version not reported"
 	}
 	want := appWantVersion(p)
-	var best *InventoryItem
-	for i, it := range inv {
-		if appItemMatch(p, it) && (best == nil || VersionAtLeast(it.Version, best.Version)) {
-			best = &inv[i]
+	// The oldest copy is the one that keeps the package unverified.
+	best, n := oldestCopy(p, inv)
+	if best == nil {
+		for i, it := range inv {
+			if appItemMatch(p, it) {
+				best = &inv[i]
+				break
+			}
 		}
 	}
 	if best == nil {
@@ -375,5 +508,15 @@ func missingProof(p Package, os OSFacts, inv []InventoryItem) string {
 	if v == "" {
 		v = "without a version"
 	}
-	return fmt.Sprintf("inventory shows %s %s, expected %s or later", best.Name, v, want)
+	s := fmt.Sprintf("inventory shows %s %s, expected %s or later", firstNonEmpty(best.Name, best.ID), v, want)
+	switch {
+	case best.Scope == "user" && !perUserExe(p):
+		s += " (a per-user copy; it does not prove the per-machine package)"
+	case n > 1:
+		s += fmt.Sprintf(" (the outdated copy of %d: %s)", n, evidenceLine(*best))
+	}
+	if d := msixWaitingForSignIn(p, inv); d != "" {
+		s += "; " + d
+	}
+	return s
 }

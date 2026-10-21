@@ -10,8 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"offpatch/internal/manifest"
 )
 
 type Ring struct {
@@ -694,10 +692,15 @@ func evidenceLine(it InventoryItem) string {
 // that revision or later, even if Windows does not list the KB: LCUs often
 // vanish from the QFE list after a reboot or once a later one replaces
 // them, and checkpoint updates baked into install media never appear.
-// Per-user installs (Scope "user") count like machine-wide ones, except
-// for EXE packages (exeAppMatch). Application names must agree on the
-// architecture they mention (archCompatible).
+// Windows app packages (MSI, EXE, portable, MSIX) are decided from every
+// copy of their app (appPresentOn): a per-user entry never proves a
+// machine-wide package, and an older copy keeps the package needed.
+// Application names must agree on the architecture they mention
+// (archCompatible).
 func presentOn(inv []InventoryItem, os OSFacts, p Package, sup map[string]bool) (bool, string, string) {
+	if windowsAppKind(p.Kind) {
+		return appPresentOn(inv, p)
+	}
 	for _, it := range inv {
 		switch {
 		case p.Kind == "agent" && it.Kind == "agent" && VersionAtLeast(it.Version, p.Version):
@@ -706,12 +709,6 @@ func presentOn(inv []InventoryItem, os OSFacts, p Package, sup map[string]bool) 
 			return true, "inventory shows app " + it.Name + " " + it.Version, evidenceLine(it)
 		case (p.Kind == "deb" || p.Kind == "rpm" || p.Kind == "pkg") && it.Kind == "pkg" && it.ID == p.PackageName && VersionAtLeast(it.Version, p.Version):
 			return true, "inventory shows " + p.PackageName + " " + it.Version, evidenceLine(it)
-		case p.Kind == "msi" && p.PackageName != "" && msiAppMatch(Package{Kind: "msi", PackageName: p.PackageName}, it) && p.Version != "" && it.Version != "" && VersionAtLeast(it.Version, p.Version):
-			return true, "inventory shows " + it.Name + " " + it.Version, evidenceLine(it)
-		case p.Kind == manifest.KindExe && exePresent(p, it):
-			return true, "inventory shows " + it.Name + " " + it.Version, evidenceLine(it)
-		case (p.Kind == manifest.KindPortable || p.Kind == manifest.KindMsix) && formatPresent(p, it):
-			return true, "inventory shows " + firstNonEmpty(it.Name, it.ID) + " " + it.Version, evidenceLine(it)
 		case it.Kind == "kb" && p.KB != "" && strings.EqualFold(it.ID, p.KB):
 			return true, "inventory shows " + p.KB, evidenceLine(it)
 		case it.Kind == "kb" && sup[strings.ToUpper(it.ID)]:
