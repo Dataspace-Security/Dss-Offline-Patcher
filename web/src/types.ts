@@ -39,8 +39,6 @@ export type ExeInstall = {
 };
 export type Approval = { by: string; reason: string; at: string };
 export type Package = {
-  /** Why my approval would be refused (accounts not independent); absent when it would not. */
-  approval_block?: string;
   package_id: string; bundle_id: string; title: string; vendor: string;
   kind: PackageKind; version: string; kb: string; product_code: string;
   severity: "critical" | "important" | "moderate" | "low"; release_date: string;
@@ -108,8 +106,6 @@ export type NewDeployment = {
   auto_advance?: boolean;
 };
 export type Deployment = NewDeployment & {
-  /** Why my approval would be refused (accounts not independent); absent when it would not. */
-  approval_block?: string;
   deployment_id: string; state: DeploymentState; current_ring: number; state_reason: string;
   created_by: string; created_at: string; updated_at: string;
   counts: Partial<Record<TargetState, number>>;

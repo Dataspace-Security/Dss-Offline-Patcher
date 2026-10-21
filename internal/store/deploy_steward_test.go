@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 )
@@ -36,145 +35,34 @@ func newPending(t *testing.T, s *Store, creator string) Deployment {
 	return d
 }
 
-// One admin creates two accounts and approves their own deployment with
-// them: refused, whenever it happens.
-func TestApprovalStewardIsCreator(t *testing.T) {
+// Two approvals from any two people other than the creator, whoever set up
+// their accounts (owner decision: no credential-steward rule). Approvals
+// from accounts set up in the last FreshCredentials raise an alert.
+func TestApprovalAnySetter(t *testing.T) {
 	s, ctx := approvalFixture(t)
 	mkUser(t, s, bySuper, "adam@bank.example", RoleAdmin)
-	at(s, -90*24*time.Hour, func() { mkUser(t, s, byAdmin, "x1@bank.example", RoleUser) })
-	d := newPending(t, s, byAdmin.Actor)
-	_, err := s.ApproveDeployment(ctx, "user:x1@bank.example", RoleUser, d.DeploymentID, "ok")
-	if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "set up your account's credentials") {
-		t.Fatalf("approval from an account the creator set up (90 days ago): %v", err)
+	for _, u := range []string{"otto", "x1", "x2"} {
+		mkUser(t, s, byAdmin, u+"@bank.example", RoleUser)
 	}
-	if auditCount(t, s, "deployment.approval_refused", d.DeploymentID) != 1 {
-		t.Fatal("refusal not audited")
-	}
-	// A password reset by the creator makes them the steward again.
-	mkUser(t, s, bySuper, "carol@bank.example", RoleUser)
-	if err := s.ResetLocalPassword(ctx, byAdmin, "carol@bank.example", "temporary password 9", "forgot"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.ApproveDeployment(ctx, "user:carol@bank.example", RoleUser, d.DeploymentID, "ok"); !errors.Is(err, ErrConflict) {
-		t.Fatalf("approval after the creator reset the password: %v", err)
-	}
-	// ... and so does an MFA reset or a role change.
-	mkUser(t, s, bySuper, "dave@bank.example", RoleUser)
-	mkUser(t, s, bySuper, "erin@bank.example", RoleViewer)
-	if err := s.ResetMFA(ctx, byAdmin, "dave@bank.example", "new phone"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SetLocalUserRole(ctx, byAdmin, "erin@bank.example", RoleUser, "joins ops"); err != nil {
-		t.Fatal(err)
-	}
-	for _, who := range []string{"dave", "erin"} {
-		if _, err := s.ApproveDeployment(ctx, "user:"+who+"@bank.example", RoleUser, d.DeploymentID, "ok"); !errors.Is(err, ErrConflict) {
-			t.Fatalf("%s: approval after the creator set the credentials: %v", who, err)
-		}
-	}
-	if got, _ := s.GetDeployment(ctx, d.DeploymentID); len(got.Approvals) != 0 || got.State != "pending_approval" {
-		t.Fatalf("refused approvals recorded: %+v", got.Deployment)
-	}
-}
-
-// The super admin (vendor) creates two bank users and approves with both:
-// two accounts one person set up count as one person, at any age (S-2).
-func TestApprovalSameSteward(t *testing.T) {
-	s, ctx := approvalFixture(t)
-	mkUser(t, s, bySuper, "x1@bank.example", RoleUser)
-	mkUser(t, s, bySuper, "x2@bank.example", RoleUser)
 	d := newPending(t, s, "user:otto@bank.example")
+	if _, err := s.ApproveDeployment(ctx, "user:otto@bank.example", RoleUser, d.DeploymentID, "mine"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("creator approves: %v", err)
+	}
 	if _, err := s.ApproveDeployment(ctx, "user:x1@bank.example", RoleUser, d.DeploymentID, "ok"); err != nil {
 		t.Fatal(err)
 	}
-	if n := openAlertsOf(t, s, "approval_fresh_account", d.DeploymentID); n != 1 {
-		t.Fatalf("approval by a fresh account: %d alerts", n)
+	if _, err := s.ApproveDeployment(ctx, "user:x1@bank.example", RoleUser, d.DeploymentID, "again"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("same person twice: %v", err)
 	}
-	as, _ := s.ListAlerts(ctx, true)
-	for _, a := range as {
-		if a.Kind == "approval_fresh_account" && a.Severity != "critical" {
-			t.Fatalf("fresh-account alert severity %s", a.Severity)
-		}
-	}
-	// The console is told before anyone clicks Approve.
-	cur, _ := s.GetDeployment(ctx, d.DeploymentID)
-	if why := s.DeploymentApprovalBlock(ctx, cur.Deployment, "user:x2@bank.example"); !strings.Contains(why, "set up both accounts") {
-		t.Fatalf("approval block for x2: %q", why)
-	}
-	if why := s.DeploymentApprovalBlock(ctx, cur.Deployment, "user:approver-a"); why != "" {
-		t.Fatalf("approval block for an independent approver: %q", why)
-	}
-	_, err := s.ApproveDeployment(ctx, "user:x2@bank.example", RoleUser, d.DeploymentID, "ok")
-	if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "set up both accounts") {
-		t.Fatalf("second account of the same steward: %v", err)
-	}
-	// A real colleague (not provisioned by the same person) completes it.
-	got, err := s.ApproveDeployment(ctx, "user:approver-a", RoleUser, d.DeploymentID, "ok")
+	got, err := s.ApproveDeployment(ctx, "user:x2@bank.example", RoleUser, d.DeploymentID, "ok")
 	if err != nil || got.State != "active" {
-		t.Fatalf("colleague approves: %v %s", err, got.State)
+		t.Fatalf("second approver set up by the same admin: %v %s", err, got.State)
 	}
-	// Waiting does not make them two people.
-	if _, err := s.DeploymentAction(ctx, "user:otto@bank.example", d.DeploymentID, "cancel", "redo"); err != nil {
-		t.Fatal(err)
+	if n := openAlertsOf(t, s, "approval_fresh_account", d.DeploymentID); n != 2 {
+		t.Fatalf("fresh-account alerts: %d", n)
 	}
-	at(s, FreshCredentials+time.Hour, func() {
-		d2 := newPending(t, s, "user:otto@bank.example")
-		if _, err := s.ApproveDeployment(ctx, "user:x1@bank.example", RoleUser, d2.DeploymentID, "ok"); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := s.ApproveDeployment(ctx, "user:x2@bank.example", RoleUser, d2.DeploymentID, "ok"); !errors.Is(err, ErrConflict) {
-			t.Fatalf("x2 after %v: %v", FreshCredentials, err)
-		}
-		if n := openAlertsOf(t, s, "approval_fresh_account", d2.DeploymentID); n != 0 {
-			t.Fatalf("accounts set up long ago raised %d alerts", n)
-		}
-	})
-}
-
-// One admin who created every bank account (creator and approvers alike)
-// cannot complete a deployment through them, however long ago (S-2); nor
-// can that admin approve a deployment of an account they set up. Accounts
-// set up by different people are independent.
-func TestApprovalAccountsOfOneAdmin(t *testing.T) {
-	s, ctx := approvalFixture(t)
-	byBea := Manager{Actor: "user:bea@bank.example", Role: RoleAdmin}
-	at(s, -120*24*time.Hour, func() {
-		mkUser(t, s, bySuper, "adam@bank.example", RoleAdmin)
-		mkUser(t, s, bySuper, "bea@bank.example", RoleAdmin)
-		for _, u := range []string{"otto", "bob"} {
-			mkUser(t, s, byAdmin, u+"@bank.example", RoleUser)
-		}
-		mkUser(t, s, byBea, "carol@bank.example", RoleUser)
-		mkUser(t, s, bySuper, "dina@bank.example", RoleUser)
-	})
-	d := newPending(t, s, "user:otto@bank.example")
-	if _, err := s.ApproveDeployment(ctx, "user:bob@bank.example", RoleUser, d.DeploymentID, "CAB-1"); !errors.Is(err, ErrConflict) {
-		t.Fatalf("bob (same steward as otto): %v", err)
-	}
-	if _, err := s.ApproveDeployment(ctx, byAdmin.Actor, RoleAdmin, d.DeploymentID, "CAB-1"); !errors.Is(err, ErrConflict) {
-		t.Fatalf("adam (set up otto): %v", err)
-	}
-	for _, u := range []string{"carol", "dina"} {
-		if _, err := s.ApproveDeployment(ctx, "user:"+u+"@bank.example", RoleUser, d.DeploymentID, "CAB-1"); err != nil {
-			t.Fatalf("%s approves: %v", u, err)
-		}
-	}
-	got, _ := s.GetDeployment(ctx, d.DeploymentID)
-	if got.State != "active" || openAlertsOf(t, s, "approval_fresh_account", d.DeploymentID) != 0 {
-		t.Fatalf("independent approvals: %s, alerts %d", got.State, openAlertsOf(t, s, "approval_fresh_account", d.DeploymentID))
-	}
-}
-
-// Package approvals follow the same independence rule (S-3).
-func TestPackageApprovalIndependence(t *testing.T) {
-	s, ctx := approvalFixture(t)
-	mkUser(t, s, bySuper, "x1@bank.example", RoleUser)
-	mkUser(t, s, bySuper, "x2@bank.example", RoleUser)
-	if err := independentOfApprovers(ctx, s.db, "user:x2@bank.example", []Approval{{By: "user:x1@bank.example"}}); !errors.Is(err, ErrConflict) {
-		t.Fatalf("same steward: %v", err)
-	}
-	if err := independentOfApprovers(ctx, s.db, "user:approver-a", []Approval{{By: "user:x1@bank.example"}}); err != nil {
-		t.Fatalf("independent: %v", err)
+	if auditCount(t, s, "deployment.approval_refused", d.DeploymentID) != 0 {
+		t.Fatal("approval refused")
 	}
 }
 

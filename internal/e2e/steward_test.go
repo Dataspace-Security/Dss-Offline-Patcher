@@ -12,7 +12,7 @@ import (
 
 // One person cannot pass the two-person rule through user management, and
 // an approved deployment cannot be widened by editing endpoint groups.
-func TestApprovalCredentialStewardsAndFixedScope(t *testing.T) {
+func TestApprovalFreshAccountsAndFixedScope(t *testing.T) {
 	e := newEnv(t)
 	e.intakeApproved(map[string]manifest.Package{"KB5009311-x64": msuPkg("KB5009311-x64", "KB5009311")}, 1)
 	a1 := e.enroll("pc-1", []string{"pilot"}, agent.SimConfig{})
@@ -36,8 +36,12 @@ func TestApprovalCredentialStewardsAndFixedScope(t *testing.T) {
 	if c, b := call(t, y1, "POST", path, reason, true); c != 200 {
 		t.Fatalf("y1 approves: %d %s", c, b)
 	}
-	if c, b := call(t, y2, "POST", path, reason, true); c != 409 || !strings.Contains(string(b), "set up both accounts") {
-		t.Fatalf("y2 (same fresh steward) approves: %d %s", c, b)
+	// Who set up the accounts does not matter (owner decision); fresh
+	// accounts raise an alert per approval.
+	c, b := call(t, y2, "POST", path, reason, true)
+	json.Unmarshal(b, &d)
+	if c != 200 || d.State != "active" || d.ScopeEndpoints != 1 {
+		t.Fatalf("y2 approves: %d %s", c, b)
 	}
 	var as []store.Alert
 	e.api("GET", "/api/alerts?open=1", tokViewer, nil, &as)
@@ -47,12 +51,8 @@ func TestApprovalCredentialStewardsAndFixedScope(t *testing.T) {
 			fresh++
 		}
 	}
-	if fresh != 1 {
+	if fresh != 2 {
 		t.Fatalf("fresh-account approval alerts: %d", fresh)
-	}
-	// A colleague completes it; the approved scope is pc-1 only.
-	if c := e.api("POST", "/api/deployments/"+d.DeploymentID+"/approve", tokApprover, reason, &d); c != 200 || d.State != "active" || d.ScopeEndpoints != 1 {
-		t.Fatalf("alice approves: %d %s scope %d", c, d.State, d.ScopeEndpoints)
 	}
 	// A user puts pc-2 into pilot: it is not added to the approved deployment.
 	if c := e.api("PATCH", "/api/endpoints/"+a2.id, tokOperator, map[string]any{"groups": []string{"pilot", "branch"}}, nil); c != 200 {
@@ -73,27 +73,11 @@ func TestApprovalCredentialStewardsAndFixedScope(t *testing.T) {
 		t.Fatalf("exclusion audit: %+v", evs)
 	}
 
-	// A bank admin creates two users and approves their own deployment with them.
+	// A bank admin cannot take over another admin's account.
 	if c := e.api("POST", "/api/users", tokSuper, map[string]string{"email": "boss@bank.example", "role": "admin", "password": "temporary password boss"}, nil); c != 201 {
 		t.Fatal("create admin")
 	}
 	boss := e.passwordUser(t, "boss@bank.example", "temporary password boss", "boss's own passphrase")
-	if c, b := call(t, boss, "POST", e.srv.URL+"/api/users", map[string]string{"email": "x1@bank.example", "role": "user", "password": "temporary password x1"}, true); c != 201 {
-		t.Fatalf("create x1: %d %s", c, b)
-	}
-	x1 := e.passwordUser(t, "x1@bank.example", "temporary password x1", "x1's own passphrase")
-	rb := store.NewDeployment{PackageID: "KB5009311-x64", Name: "undo", Operation: "rollback", Justification: "INC-9 regression", Rings: dep.Rings, MaxFailurePct: 50}
-	e.api("POST", "/api/deployments/"+d.DeploymentID+"/cancel", tokOperator, reason, nil)
-	c, b := call(t, boss, "POST", e.srv.URL+"/api/deployments", rb, true)
-	var r store.Deployment
-	json.Unmarshal(b, &r)
-	if c != 201 {
-		t.Fatalf("boss creates rollback: %d %s", c, b)
-	}
-	if c, b := call(t, x1, "POST", e.srv.URL+"/api/deployments/"+r.DeploymentID+"/approve", reason, true); c != 409 || !strings.Contains(string(b), "set up your account's credentials") {
-		t.Fatalf("approval from an account the creator set up: %d %s", c, b)
-	}
-	// And the admin cannot take over another admin's account instead.
 	if c, b := call(t, boss, "POST", e.srv.URL+"/api/users/adam@bank.test/reset_password", map[string]string{"reason": "x"}, true); c != 403 {
 		t.Fatalf("admin resets another admin: %d %s", c, b)
 	}

@@ -394,15 +394,10 @@ the last required approval publishes the content to the repository.
 approved a package cannot create a deployment for it (HTTP 409 "separation of duties: … a different
 operator must deploy it"). Plan who approves and who deploys.
 
-**Independent approvers.** Each local account records who last set its credentials (created it,
-reset its password or MFA, or changed its role). Two accounts do not count as two people when one
-of them set up the other, or the same person set up both, however long ago. This applies to the
-deployment's creator and every approver of a deployment, and to the approvers of a package
-(HTTP 409 "… so your approval would not be a second person's"). So the accounts of the people who
-create, approve and deploy must be set up by **different** admins (or come from SSO): for example
-the vendor super admin creates two bank admins, and each bank admin creates part of the team. A
-single admin who creates every account cannot complete an approval through them. An approval from
-an account set up in the last 7 days is allowed but raises a critical alert.
+**Who may approve.** Any two different Users or Admins (not the deployment's creator; one approval
+per person), whoever set up their accounts. An approval from an account whose credentials were set
+in the last 7 days (created, password or MFA reset, role changed) is allowed and raises a critical
+alert, so a second look is easy.
 
 ### 3.3 Creating a staged deployment
 

@@ -149,7 +149,7 @@ func newEnvOpts(t *testing.T, tlsMode bool, extra string) *env {
 	e.sess, e.mfa = map[string]string{}, map[string][]byte{}
 	// The bank's staff accounts were set up long ago, each by a different
 	// person (accounts one person set up don't count as two approvers, see
-	// TestApprovalCredentialStewardsAndFixedScope).
+	// TestApprovalFreshAccountsAndFixedScope).
 	realNow := e.st.Now
 	e.st.Now = func() time.Time { return realNow().Add(-60 * 24 * time.Hour) }
 	for _, u := range envUsers {

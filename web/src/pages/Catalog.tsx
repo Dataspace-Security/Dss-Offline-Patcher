@@ -53,8 +53,9 @@ export default function Catalog({ agents = false }: { agents?: boolean }) {
   const all = (list.data ?? []).filter((p) => isAgentPackage(p) === agents);
   const kindCount = (k: KindFilter) => all.filter((p) => !k || kindGroup(p.kind) === k).length;
   const fleetOf = (id: string): PackageFleet | undefined => needs.data?.[id];
-  // In use: some machine needs it, or a deployment of it is running or failed somewhere.
+  // In use: waiting for approval, some machine needs it, or a deployment of it is running or failed somewhere.
   const inUse = (p: Package) => {
+    if (p.state === "quarantined") return true;
     const f = fleetOf(p.package_id);
     return !!f && ((f.needed ?? 0) > 0 || (f.deploying ?? 0) > 0 || (f.failed ?? 0) > 0);
   };
@@ -237,8 +238,8 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
             <span className="spacer" />
             {p.state === "quarantined" && canApprove && (
               <>
-                <button className="btn btn-primary" onClick={() => setAction("approve")} disabled={alreadyApproved || !!p.approval_block}
-                        title={alreadyApproved ? "You have already approved this package; someone else must approve it" : p.approval_block || undefined}>
+                <button className="btn btn-primary" onClick={() => setAction("approve")} disabled={alreadyApproved}
+                        title={alreadyApproved ? "You have already approved this package; someone else must approve it" : undefined}>
                   Approve…
                 </button>
                 <button className="btn btn-danger" onClick={() => setAction("reject")}>Reject…</button>

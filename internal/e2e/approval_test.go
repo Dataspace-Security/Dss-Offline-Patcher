@@ -126,12 +126,8 @@ func TestTwoPersonDeploymentApproval(t *testing.T) {
 	if simHasKB(a1, "KB5009301") {
 		t.Fatal("installed after one approval")
 	}
-	// adam set up uma's account (the creator): not a second person.
-	if c, _ := approve(adam, "CAB ok"); c != 409 {
-		t.Fatalf("approval by the creator's admin: %d", c)
-	}
-	var d2 store.Deployment
-	c = e.api("POST", "/api/deployments/"+d.DeploymentID+"/approve", tokApprover, map[string]string{"reason": "CAB ok"}, &d2)
+	// adam set up uma's account (the creator); that does not matter.
+	c, d2 := approve(adam, "CAB ok")
 	if c != 200 || d2.State != "active" || len(d2.Approvals) != 2 || d2.ActivatedAt == "" || !strings.Contains(d2.StateReason, "ivy@bank.example") {
 		t.Fatalf("second approval: %d %+v", c, d2)
 	}
@@ -147,7 +143,7 @@ func TestTwoPersonDeploymentApproval(t *testing.T) {
 	var acts []string
 	for _, ev := range evs {
 		acts = append(acts, ev.Action)
-		if ev.Action == "deployment.activated" && (!strings.Contains(string(ev.Details), "ivy@bank.example") || !strings.Contains(string(ev.Details), "alice@bank.test")) {
+		if ev.Action == "deployment.activated" && (!strings.Contains(string(ev.Details), "ivy@bank.example") || !strings.Contains(string(ev.Details), "adam.bank@bank.example")) {
 			t.Fatalf("activation names: %s", ev.Details)
 		}
 	}

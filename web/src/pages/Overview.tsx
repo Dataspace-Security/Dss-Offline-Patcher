@@ -12,6 +12,7 @@ import { PatchExposure } from "../components/dashboard/PatchExposure";
 import { Rollouts } from "../components/dashboard/Rollouts";
 import { SupplyChain, type AcquisitionOverview } from "../components/dashboard/SupplyChain";
 import { RecentActivity } from "../components/dashboard/RecentActivity";
+import { NeedsApproval } from "../components/dashboard/NeedsApproval";
 import type { AcquisitionRequestRecord, Alert, AuditEvent, Deployment, Endpoint, Package, Summary } from "../types";
 import { isOpenAlert } from "./Alerts";
 import { useLoad } from "../util";
@@ -72,6 +73,7 @@ export default function Overview() {
       )}
 
       <HeroRow summary={s} endpoints={eps.data} needs={needs.data} alerts={alerts.data} />
+      <NeedsApproval packages={packages.data} deployments={deployments.data} policy={policy.data} />
 
       <div className="dash-grid">
         <FleetHealth summary={s} isOperator={canPatch} />
