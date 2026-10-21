@@ -44,7 +44,7 @@ func portableMatch(p manifest.Package, it store.InventoryItem) bool {
 	if p.Kind != manifest.KindPortable || p.Portable == nil || it.Kind != "product" || it.Scope == "user" {
 		return false
 	}
-	return strings.EqualFold(it.ID, p.Portable.ARPKey) || arpNameMatch(p.Portable.DisplayName, it.Name)
+	return strings.EqualFold(it.ID, p.Portable.ARPKey) || arpNameMatch(p.Portable.DisplayName, it.Name, it.View)
 }
 
 // msixMatch: it is the appx package family of p.

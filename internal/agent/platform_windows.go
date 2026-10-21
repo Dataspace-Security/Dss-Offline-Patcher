@@ -144,10 +144,8 @@ func (w *Windows) Inventory() ([]store.InventoryItem, bool, error) {
 		return nil, false, fmt.Errorf("inventory: %w", err)
 	}
 	items := []store.InventoryItem{}
-	for _, kb := range kbs {
-		if kb = strings.ToUpper(strings.TrimSpace(kb)); strings.HasPrefix(kb, "KB") {
-			items = append(items, store.InventoryItem{Kind: "kb", ID: kb})
-		}
+	for _, kb := range mergeKBs(kbs, servicingKBs(ctx)) {
+		items = append(items, store.InventoryItem{Kind: "kb", ID: kb})
 	}
 	prods, err := msiProducts()
 	if err != nil {
@@ -155,6 +153,23 @@ func (w *Windows) Inventory() ([]store.InventoryItem, bool, error) {
 	}
 	items = append(items, mergeUserInventory(prods, userProducts())...)
 	return append(items, storeApps(ctx)...), rebootPending(), nil
+}
+
+// servicingTimeout bounds the servicing-store listing (Get-WindowsPackage
+// can take a while on a busy machine).
+const servicingTimeout = 2 * time.Minute
+
+// servicingKBs lists the KBs the servicing stack reports installed. Best
+// effort: if Get-WindowsPackage is unavailable, slow or fails, the QFE list
+// alone is reported.
+func servicingKBs(ctx context.Context) []string {
+	ctx, cancel := context.WithTimeout(ctx, servicingTimeout)
+	defer cancel()
+	out, err := powershell(ctx, servicingScript)
+	if err != nil {
+		return nil
+	}
+	return parseServicingKBs(out)
 }
 
 // storeApps is the Microsoft Store / MSIX part of the inventory. Best
@@ -179,10 +194,14 @@ var productKeyRe = regexp.MustCompile(`^\{[0-9A-Fa-f-]{36}\}$`)
 // EXE-installed apps that Apps & features shows (keys named by the app).
 func msiProducts() ([]store.InventoryItem, error) {
 	var items []store.InventoryItem
-	for _, path := range uninstallKeys {
+	for i, path := range uninstallKeys {
 		found, err := scanUninstall(registry.LOCAL_MACHINE, path, registry.WOW64_64KEY)
 		if err != nil {
 			return nil, err
+		}
+		v := uninstallView(i, osArch())
+		for j := range found {
+			found[j].View = v
 		}
 		items = append(items, found...)
 	}

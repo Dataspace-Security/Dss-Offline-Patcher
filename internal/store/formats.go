@@ -61,7 +61,7 @@ func portableMatch(p Package, it InventoryItem) bool {
 		return true
 	}
 	n := p.Portable.DisplayName
-	return strings.TrimSpace(it.Name) != "" && SameAppName(it.Name, n) && ExeArchTag(it.Name) == ExeArchTag(n)
+	return strings.TrimSpace(it.Name) != "" && SameAppName(it.Name, n) && itemArchCompatible(it, n)
 }
 
 // portableWantVersion: the DisplayVersion the agent writes.

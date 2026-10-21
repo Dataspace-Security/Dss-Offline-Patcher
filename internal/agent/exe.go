@@ -323,8 +323,11 @@ func archTag(name string) string {
 }
 
 // exeAppMatch reports whether an inventory item is the app an EXE package
-// installs: by ARP key (detect.product_code) when known, else by display
-// name (store.SameAppName, as the server, plus the same architecture).
+// installs, with the server's rule (internal/store/exe.go): by ARP key
+// (detect.product_code) when known, as long as the architectures the names
+// (or the item's registry view) mention agree (both Notepad++ builds use
+// the key "Notepad++"); else by display name (store.SameAppName) with a
+// compatible architecture: a name without one ("7-Zip") matches either.
 // A machine-wide package counts per-machine entries only, a per-user
 // installer (exe.scope user) per-user entries only.
 func exeAppMatch(p manifest.Package, it store.InventoryItem) bool {
@@ -333,16 +336,39 @@ func exeAppMatch(p manifest.Package, it store.InventoryItem) bool {
 	}
 	d := p.Exe.Detect
 	if d.ProductCode != "" && strings.EqualFold(it.ID, d.ProductCode) {
-		return true
+		return strings.TrimSpace(it.Name) == "" || strings.TrimSpace(d.DisplayName) == "" || itemArchOK(it.Name, it.View, d.DisplayName)
 	}
-	return arpNameMatch(d.DisplayName, it.Name)
+	return arpNameMatch(d.DisplayName, it.Name, it.View)
 }
 
-func arpNameMatch(want, name string) bool {
+// arpNameMatch: an Apps & features name (from registry view, "" if
+// unknown) is the app named want.
+func arpNameMatch(want, name, view string) bool {
 	if strings.TrimSpace(want) == "" || strings.TrimSpace(name) == "" {
 		return false
 	}
-	return store.SameAppName(name, want) && archTag(name) == archTag(want)
+	return store.SameAppName(name, want) && itemArchOK(name, view, want)
+}
+
+// itemArchOK: the architecture an installed entry's name (or registry
+// view: "32" is a 32-bit app, "64" is not) mentions is compatible with the
+// package name's; a name without one matches either (the server's
+// archCompatible / itemArchCompatible).
+func itemArchOK(name, view, want string) bool {
+	tn, tw := archTag(name), archTag(want)
+	if tn != "" && tw != "" {
+		return tn == tw
+	}
+	if tw == "" || tn != "" {
+		return true
+	}
+	switch view {
+	case "32":
+		return tw == "x86"
+	case "64":
+		return tw != "x86"
+	}
+	return true
 }
 
 // exeWantVersion is the version the app reports once the package is
@@ -442,6 +468,7 @@ func sigFailure(err error) Result {
 
 // arpEntry is one Apps & features (Uninstall key) entry.
 type arpEntry struct {
+	View           string // registry view: "64" or "32"
 	Key            string
 	DisplayName    string
 	DisplayVersion string
@@ -465,7 +492,7 @@ func chooseARPEntry(p manifest.Package, entries []arpEntry) (arpEntry, bool) {
 	}
 	var named []arpEntry
 	for _, e := range entries {
-		if arpNameMatch(d.DisplayName, e.DisplayName) {
+		if arpNameMatch(d.DisplayName, e.DisplayName, e.View) {
 			named = append(named, e)
 		}
 	}

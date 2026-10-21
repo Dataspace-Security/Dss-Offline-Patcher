@@ -146,6 +146,29 @@ func archCompatible(a, b string) bool {
 	return ta == tb || ta == "" || tb == ""
 }
 
+// itemArchCompatible is archCompatible for an inventory item and a package
+// name, using the item's registry view when its name mentions no
+// architecture: an entry from the 32-bit view is a 32-bit app (only an x86
+// or untagged package name matches it), one from the 64-bit view is not
+// (an x86 package name does not match it). Without a view (older agents,
+// per-user entries) the names decide alone.
+func itemArchCompatible(it InventoryItem, name string) bool {
+	if !archCompatible(it.Name, name) {
+		return false
+	}
+	pt := ExeArchTag(name)
+	if pt == "" || ExeArchTag(it.Name) != "" {
+		return true
+	}
+	switch it.View {
+	case "32":
+		return pt == "x86"
+	case "64":
+		return pt != "x86"
+	}
+	return true
+}
+
 // msiAppMatch: inventory item it is the app MSI package p installs or
 // upgrades, by product code or by display name (same architecture).
 // Per-user installs count like machine-wide ones.
@@ -156,7 +179,7 @@ func msiAppMatch(p Package, it InventoryItem) bool {
 	if p.ProductCode != "" && strings.EqualFold(it.ID, p.ProductCode) {
 		return true
 	}
-	return p.PackageName != "" && strings.TrimSpace(it.Name) != "" && SameAppName(it.Name, p.PackageName) && archCompatible(it.Name, p.PackageName)
+	return p.PackageName != "" && strings.TrimSpace(it.Name) != "" && SameAppName(it.Name, p.PackageName) && itemArchCompatible(it, p.PackageName)
 }
 
 // appItemMatch: inventory item it is p's app (any version).

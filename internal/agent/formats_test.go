@@ -258,3 +258,56 @@ func TestAfterInstallWait(t *testing.T) {
 		t.Fatalf("shorter wait kept: %s", w)
 	}
 }
+
+func TestUninstallViewAndServicingKBs(t *testing.T) {
+	if uninstallView(0, "x64") != "64" || uninstallView(1, "x64") != "32" || uninstallView(0, "arm64") != "64" || uninstallView(0, "x86") != "32" {
+		t.Error("uninstallView")
+	}
+	out := []byte(`["Package_for_KB5043080~31bf3856ad364e35~amd64~~26100.1742.1.10","Package_for_RollupFix~31bf3856ad364e35~amd64~~26100.9711.1.7",` +
+		`"Package_for_DotNetRollup_481~31bf3856ad364e35~amd64~~10.0.9294.1","Package_for_KB5043080~31bf3856ad364e35~amd64~~26100.1742.1.10",` +
+		`"Microsoft-Windows-Foo-Package~31bf3856ad364e35~amd64~~10.0.1","Package_for_ServicingStack_9711~31bf3856ad364e35~amd64~~26100.9711.1.2",` +
+		`"Package_for_KB5066128~31bf3856ad364e35~amd64~~10.0.1.0"]`)
+	if got := parseServicingKBs(out); strings.Join(got, ",") != "KB5043080,KB5066128" {
+		t.Errorf("servicing KBs: %v", got)
+	}
+	if parseServicingKBs([]byte("not json")) != nil {
+		t.Error("bad output not ignored")
+	}
+	if got := mergeKBs([]string{"kb5031358", "KB5043080"}, []string{"KB5043080", "KB5066128"}); strings.Join(got, ",") != "KB5031358,KB5043080,KB5066128" {
+		t.Errorf("merge: %v", got)
+	}
+}
+
+// The agent's own matching follows the server's (internal/store/exe.go):
+// an untagged detection name matches a tagged entry, an ARP key match
+// still needs compatible architectures, and the registry view tells a
+// 32-bit untagged entry from a 64-bit package.
+func TestAgentArchMatching(t *testing.T) {
+	p := func(name, key string) manifest.Package {
+		return manifest.Package{Kind: manifest.KindExe, Exe: &manifest.ExeInstall{Scope: manifest.ExeScopeMachine, Detect: manifest.ExeDetect{DisplayName: name, ProductCode: key}}}
+	}
+	it := func(id, name, view string) store.InventoryItem {
+		return store.InventoryItem{Kind: "product", ID: id, Name: name, Version: "1", View: view}
+	}
+	cases := []struct {
+		pkg  manifest.Package
+		item store.InventoryItem
+		want bool
+	}{
+		{p("7-Zip", ""), it("7-Zip", "7-Zip 24.08 (x64)", "64"), true},
+		{p("7-Zip", ""), it("7-Zip", "7-Zip 24.08", "32"), true},
+		{p("7-Zip (x64)", ""), it("7-Zip", "7-Zip 24.08", "32"), false},
+		{p("7-Zip (x64)", ""), it("7-Zip", "7-Zip 24.08", "64"), true},
+		{p("7-Zip (x64)", ""), it("7-Zip", "7-Zip 24.08", ""), true},
+		{p("7-Zip (32-bit)", ""), it("7-Zip", "7-Zip 24.08", "64"), false},
+		{p("Notepad++ (64-bit x64)", "Notepad++"), it("Notepad++", "Notepad++ (32-bit x86)", "32"), false},
+		{p("Notepad++ (64-bit x64)", "Notepad++"), it("Notepad++", "Notepad++ (64-bit x64)", "64"), true},
+		{p("Notepad++ (64-bit x64)", "Notepad++"), it("Notepad++", "Notepad++", "32"), false},
+		{p("Microsoft Visual C++ 2015-2022 Redistributable (x64)", ""), it("{X}", "Microsoft Visual C++ 2015-2022 Redistributable (x86) - 14.40", ""), false},
+	}
+	for i, c := range cases {
+		if got := exeAppMatch(c.pkg, c.item); got != c.want {
+			t.Errorf("%d: %q vs %q (view %q): %v", i, c.pkg.Exe.Detect.DisplayName, c.item.Name, c.item.View, got)
+		}
+	}
+}

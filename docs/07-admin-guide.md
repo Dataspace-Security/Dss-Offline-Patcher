@@ -96,7 +96,7 @@ The compliance report says so (scope limitations, PM-04).
 
 | `kind` | Platform | Installed by the agent with | Identified in inventory by |
 |---|---|---|---|
-| `msu` | Windows | `wusa.exe <file> /quiet /norestart` | KB number (`Win32_QuickFixEngineering`) |
+| `msu` | Windows | `wusa.exe <file> /quiet /norestart` | KB number (`Win32_QuickFixEngineering`, and from agent 0.10.0 also the installed servicing packages, `Get-WindowsPackage`) |
 | `msi` | Windows | `msiexec.exe /i <file> /qn /norestart /l*v <log>` | MSI product code `{GUID}` |
 | `deb` | Linux | `dpkg --force-confold -i <file>` | `package_name` and version (`dpkg-query`) |
 | `rpm` | Linux | `rpm -U --replacepkgs <file>` | `package_name` and version (`rpm -qa`) |
@@ -710,6 +710,11 @@ bundles of their own.
   per-user installers cannot (the console says so). Archive packages follow the EXE / MSI rules.
 - After any install the agent checks in again within about 20 seconds with a fresh inventory, so
   targets turn *verified* and the app leaves *Needed* without waiting for the inventory cache.
+- Agent 0.10.0 also reports which registry view each machine-wide Apps & features entry comes
+  from (64- or 32-bit), so a 32-bit app whose name mentions no architecture ("7-Zip 24.08") is
+  never taken for the 64-bit package; and it adds the updates the servicing stack lists as
+  installed (`Get-WindowsPackage`, at most 2 minutes, skipped when unavailable) to the
+  installed-updates list, for updates `Win32_QuickFixEngineering` does not show.
 
 ## 4. Monthly Patch Tuesday workflow (end to end)
 

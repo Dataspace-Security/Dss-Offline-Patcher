@@ -96,7 +96,9 @@ type Endpoint = {
   last_seen: string; inventory_at: string; reboot_pending: boolean; agent_version: string;
   enrolled_at: string; status: EndpointStatus;
 };
-type InventoryItem = { kind: "kb" | "product"; id: string; name: string; version: string };
+type InventoryItem = { kind: "kb" | "product" | "appx"; id: string; name: string; version: string;
+  scope?: "user"; hidden?: boolean; source?: string;
+  view?: "64" | "32" };  // registry view of a machine-wide Apps & features entry (agents 0.10.0+)
 type EndpointDetail = Endpoint & { inventory: InventoryItem[]; targets: Target[] };
 
 type DeploymentState = "active" | "paused" | "cancelled" | "completed";

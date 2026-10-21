@@ -24,6 +24,12 @@ type InventoryItem struct {
 	// features), e.g. Microsoft Edge WebView2 Runtime. It counts like any
 	// other entry for needs and verification.
 	Hidden bool `json:"hidden,omitempty"`
+	// View: the registry view a machine-wide Apps & features entry came
+	// from, "64" (native) or "32" (WOW6432Node, a 32-bit app on 64-bit
+	// Windows); empty for per-user entries and older agents. It tells a
+	// 32-bit app whose name mentions no architecture ("7-Zip 24.08") from
+	// a 64-bit package (itemArchCompatible).
+	View string `json:"view,omitempty"`
 }
 
 type Endpoint struct {

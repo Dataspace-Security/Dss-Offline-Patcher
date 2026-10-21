@@ -55,12 +55,12 @@ func exeAppMatch(p Package, it InventoryItem) bool {
 		// An ARP key name is not unique across the 64- and 32-bit registry
 		// views (both Notepad++ builds use "Notepad++"): the architecture
 		// the names mention must still agree.
-		return strings.TrimSpace(it.Name) == "" || strings.TrimSpace(d.DisplayName) == "" || archCompatible(it.Name, d.DisplayName)
+		return strings.TrimSpace(it.Name) == "" || strings.TrimSpace(d.DisplayName) == "" || itemArchCompatible(it, d.DisplayName)
 	}
 	if strings.TrimSpace(d.DisplayName) == "" || strings.TrimSpace(it.Name) == "" {
 		return false
 	}
-	return SameAppName(it.Name, d.DisplayName) && archCompatible(it.Name, d.DisplayName)
+	return SameAppName(it.Name, d.DisplayName) && itemArchCompatible(it, d.DisplayName)
 }
 
 // exeDetect is the package's detection block (package_name stands in for

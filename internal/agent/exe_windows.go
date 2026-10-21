@@ -248,7 +248,7 @@ func trustError(err error) error {
 // 32-bit views) with what rollback needs.
 func machineARPEntries() ([]arpEntry, error) {
 	var out []arpEntry
-	for _, path := range uninstallKeys {
+	for i, path := range uninstallKeys {
 		k, err := registry.OpenKey(registry.LOCAL_MACHINE, path, registry.ENUMERATE_SUB_KEYS|registry.WOW64_64KEY)
 		if errors.Is(err, registry.ErrNotExist) {
 			continue
@@ -266,7 +266,7 @@ func machineARPEntries() ([]arpEntry, error) {
 			if err != nil {
 				continue
 			}
-			e := arpEntry{Key: n}
+			e := arpEntry{Key: n, View: uninstallView(i, osArch())}
 			e.DisplayName, _, _ = sk.GetStringValue("DisplayName")
 			e.DisplayVersion, _, _ = sk.GetStringValue("DisplayVersion")
 			if q, typ, err := sk.GetStringValue("QuietUninstallString"); err == nil {

@@ -180,3 +180,28 @@ func TestFormatsVerifiedAfterInstall(t *testing.T) {
 		}
 	}
 }
+
+// The registry view settles what an untagged name cannot: a 32-bit 7-Zip
+// ("7-Zip 24.08", WOW6432Node) is not the 64-bit package's app.
+func TestItemArchCompatibleView(t *testing.T) {
+	seven := Package{PackageID: "7zip.7zip-24.08", Kind: manifest.KindExe, Version: "24.08", PackageName: "7-Zip (x64)",
+		Exe: &manifest.ExeInstall{Scope: manifest.ExeScopeMachine, Detect: manifest.ExeDetect{DisplayName: "7-Zip (x64)", ProductCode: "7-Zip"}}}
+	x86 := InventoryItem{Kind: "product", ID: "7-Zip", Name: "7-Zip 24.08", Version: "24.08", View: "32"}
+	x64 := InventoryItem{Kind: "product", ID: "7-Zip", Name: "7-Zip 24.08", Version: "24.08", View: "64"}
+	legacy := InventoryItem{Kind: "product", ID: "7-Zip", Name: "7-Zip 24.08", Version: "24.08"}
+	if exeAppMatch(seven, x86) || !exeAppMatch(seven, x64) || !exeAppMatch(seven, legacy) {
+		t.Error("view not used for an untagged name")
+	}
+	if ok, _, _ := presentOn([]InventoryItem{x86}, OSFacts{}, seven, nil); ok {
+		t.Error("a 32-bit install verified the x64 package")
+	}
+	msi := Package{Kind: "msi", PackageName: "7-Zip (x64 edition)", Version: "24.08", ProductCode: "{11111111-2222-3333-4444-555555555555}"}
+	if msiAppMatch(msi, x86) || !msiAppMatch(msi, x64) {
+		t.Error("msi name match ignores the view")
+	}
+	untagged := seven
+	untagged.Exe = &manifest.ExeInstall{Scope: manifest.ExeScopeMachine, Detect: manifest.ExeDetect{DisplayName: "7-Zip"}}
+	if !exeAppMatch(untagged, x86) || !exeAppMatch(untagged, x64) {
+		t.Error("an untagged package name must match either view")
+	}
+}
