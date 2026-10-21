@@ -25,6 +25,7 @@ const usage = `pmagent — offpatch endpoint agent
   pmagent run    [-state-dir dir] [-once]
   pmagent secure-state-dir [-state-dir dir]   (check ownership and lock down the state directory; used by the MSI)
   pmagent service install|uninstall [-state-dir dir]     (Windows service, systemd unit or launchd daemon)
+  pmagent portable-remove <key>   (Windows: remove a portable app the agent installed; its Apps & features uninstall)
 `
 
 func defaultStateDir() string {
@@ -64,6 +65,12 @@ func main() {
 		dir := fs.String("state-dir", defaultStateDir(), "agent state directory")
 		fs.Parse(os.Args[2:])
 		err = agent.SecureStateDir(*dir)
+	case "portable-remove":
+		if len(os.Args) != 3 {
+			fmt.Print(usage)
+			os.Exit(2)
+		}
+		err = agent.RemovePortable(os.Args[2])
 	case "version":
 		fmt.Println(agent.Version)
 	default:

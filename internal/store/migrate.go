@@ -68,6 +68,9 @@ var columnMigrations = []struct{ table, column, ddl string }{
 	// When a deployment's approved endpoint set was fixed (deployment_scope;
 	// "" = not yet, still waiting for approval).
 	{"deployments", "scope_at", "TEXT NOT NULL DEFAULT ''"},
+	// App formats (archive, portable, msix): the manifest's blocks as JSON
+	// ("" = none).
+	{"packages", "formats", "TEXT NOT NULL DEFAULT ''"},
 }
 
 func hasColumn(db *sql.DB, table, column string) (bool, error) {

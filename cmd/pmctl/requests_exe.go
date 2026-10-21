@@ -11,7 +11,7 @@ package main
 import (
 	"errors"
 	"fmt"
-	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
@@ -29,13 +29,17 @@ func (r *requestRun) fetchWingetExe(a acqrequest.App, arch string, m *acquire.Wi
 		ver = v
 	}
 	file := wingetPackageID(a.WingetID, m.Version, arch) + ".exe"
-	got, err := r.installerFile(a, m, in, file)
+	got, err := r.installerFile(a, m, in, file, false)
 	if err != nil {
 		return err
 	}
-	res, err := verifyExeResult(got.path)
+	defer got.cleanup()
+	res, err := verifyExeResult(got.installer())
+	if err == nil && got.archive != nil {
+		err = verifyArchivePrograms(got.tree, got.archive)
+	}
 	if err != nil {
-		os.Remove(got.path) // never left where a later run could pick it up
+		got.discard() // never left where a later run could pick it up
 		return unsupportedItem(shortReason("the installer's Authenticode signature is not valid: "+strings.TrimPrefix(err.Error(), "Authenticode: ")),
 			fmt.Sprintf("%s %s (%s): %v", a.WingetID, m.Version, in.URL, err))
 	}
@@ -54,7 +58,7 @@ func (r *requestRun) fetchWingetExe(a acqrequest.App, arch string, m *acquire.Wi
 	// Revocation, and the signer pinned for this winget id (signerpin.go).
 	vs, err := pinInstaller(r.ctx, r.c, r.pins, pinKeyWinget(a.WingetID), m.Version, pub, infoFromResult(res))
 	if err != nil {
-		os.Remove(got.path)
+		got.discard()
 		return err
 	}
 	ex, err := in.ExeInstall(acquire.ExeInstallOptions{Signer: signer, DisplayName: name, Publisher: arpPublisher(in, pub)})
@@ -79,14 +83,15 @@ func (r *requestRun) fetchWingetExe(a acqrequest.App, arch string, m *acquire.Wi
 	if title == "" {
 		title = a.WingetID
 	}
-	_, err = acquire.FetchURL(r.ctx, acquire.FetchURLOptions{URL: in.URL, SHA256: got.sha256, FileName: file, PackageID: wingetPackageID(a.WingetID, a.Version, arch),
+	_, err = acquire.FetchURL(r.ctx, acquire.FetchURLOptions{URL: in.URL, SHA256: got.sha256, FileName: filepath.Base(got.path), PackageID: wingetPackageID(a.WingetID, a.Version, arch),
 		Title: title + " " + ver, Vendor: pub, Kind: manifest.KindExe, PackageName: name, OS: "windows",
 		Version: ver, Severity: "important", ReleaseDate: rel, Arch: arch, OutDir: r.downloads, SpecPath: r.spec, HTTP: r.hc, Exe: ex, FromZip: got.zip,
-		Verified: "sha256(winget manifest " + murl + ")" + zipVerified(got.zip) + "+authenticode(" + signer + ")", VendorSignature: &vs,
-		VerifyPayload: func(p string) error {
-			got, err := verifyExeSigner(p)
-			if err == nil && got != signer {
-				err = fmt.Errorf("signer changed from %q to %q", signer, got)
+		Archive:  got.archive,
+		Verified: "sha256(winget manifest " + murl + ")" + zipVerified(got.zip, got.archive) + "+authenticode(" + signer + ")", VendorSignature: &vs,
+		VerifyPayload: func(string) error {
+			now, err := verifyExeSigner(got.installer())
+			if err == nil && now != signer {
+				err = fmt.Errorf("signer changed from %q to %q", signer, now)
 			}
 			return err
 		}})

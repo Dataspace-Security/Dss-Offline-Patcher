@@ -149,7 +149,8 @@ func ResolveWinget(ctx context.Context, hc *http.Client, base, id, version strin
 		if in.InstallerType == "zip" {
 			// The installer inside: its type and (one) path in the zip.
 			ri.NestedType = libToken(in.NestedInstallerType)
-			if len(in.NestedInstallerFiles) == 1 {
+			// One named installer; for a portable app, its first program.
+			if n := len(in.NestedInstallerFiles); n == 1 || n > 1 && strings.EqualFold(in.NestedInstallerType, "portable") {
 				if p, err := CleanZipPath(in.NestedInstallerFiles[0]); err == nil && len(p) <= maxLibraryName {
 					ri.NestedPath = p
 				}

@@ -191,11 +191,17 @@ func (s *Server) catalogIndex(ctx context.Context) (*catalogIndex, error) {
 		if p.ProductCode != "" {
 			keep(ci.byCode, strings.ToLower(p.ProductCode), p)
 		}
-		if k := intel.Normalize(p.PackageName); (p.Kind == "msi" || p.Kind == "exe") && k != "" && p.Version != "" {
+		if k := intel.Normalize(p.PackageName); (p.Kind == "msi" || p.Kind == "exe" || p.Kind == "portable") && k != "" && p.Version != "" {
 			keep(ci.byName, nameKey(k, p.PackageName), p)
 		}
 		if p.Kind == "exe" && p.Exe != nil && p.Exe.Detect.ProductCode != "" {
 			keep(ci.byCode, strings.ToLower(p.Exe.Detect.ProductCode), p) // the ARP key inventory reports as the id
+		}
+		if p.Kind == "portable" && p.Portable != nil {
+			keep(ci.byCode, strings.ToLower(p.Portable.ARPKey), p) // the Uninstall key the agent writes
+		}
+		if p.Kind == "msix" && p.Msix != nil {
+			keep(ci.byCode, strings.ToLower(p.Msix.PackageFamilyName), p) // appx inventory id
 		}
 	}
 	return ci, nil

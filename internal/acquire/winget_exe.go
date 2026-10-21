@@ -236,11 +236,30 @@ func httpsURL(s string) bool {
 	return err == nil && u.Scheme == "https" && u.Host != ""
 }
 
-// PickEXE chooses the EXE installer for arch that offpatch can deploy:
-// machine scope (or unspecified), https, SHA-256 and a silent switch; then
-// a neutral or en-US locale over others. Otherwise an UnsupportedError
-// whose reason names why (e.g. "installs per user only").
-func (m *WingetManifest) PickEXE(arch string) (WingetInstaller, error) {
+// PickEXE chooses the EXE installer for arch that offpatch can deploy
+// per machine: machine scope (or unspecified), https, SHA-256 and a silent
+// switch; then a neutral or en-US locale over others. Otherwise an
+// UnsupportedError whose reason names why (e.g. "installs per user only").
+func (m *WingetManifest) PickEXE(arch string) (WingetInstaller, error) { return m.pickEXE(arch, false) }
+
+// PickPerUserEXE is PickEXE for per-user installers (Scope user), which
+// agents 0.10.0 and later run in each signed-in user's session.
+func (m *WingetManifest) PickPerUserEXE(arch string) (WingetInstaller, error) {
+	return m.pickEXE(arch, true)
+}
+
+// exeScopeReason: why an EXE installer does not fit the scope wanted.
+func exeScopeReason(in WingetInstaller, user bool) string {
+	switch {
+	case !user && in.Scope == "user":
+		return intel.ReasonPerUser
+	case user && in.Scope != "user":
+		return "installs per machine"
+	}
+	return ""
+}
+
+func (m *WingetManifest) pickEXE(arch string, user bool) (WingetInstaller, error) {
 	var ok []WingetInstaller
 	var reasons, types []string
 	for _, in := range m.zipped() {
@@ -248,6 +267,10 @@ func (m *WingetManifest) PickEXE(arch string) (WingetInstaller, error) {
 			continue
 		}
 		types = append(types, in.InstallerType)
+		if r := exeScopeReason(in, user); r != "" {
+			reasons = append(reasons, r)
+			continue
+		}
 		if r := in.ExeUnsupportedReason(); r != "" {
 			reasons = append(reasons, r)
 			continue
@@ -263,6 +286,10 @@ func (m *WingetManifest) PickEXE(arch string) (WingetInstaller, error) {
 				continue
 			}
 			types = append(types, in.InstallerType)
+			if r := exeScopeReason(in, user); r != "" {
+				reasons = append(reasons, r)
+				continue
+			}
 			if r := in.ExeUnsupportedReason(); r != "" {
 				reasons = append(reasons, r)
 				continue
@@ -298,6 +325,11 @@ func (m *WingetManifest) PickEXE(arch string) (WingetInstaller, error) {
 		return r
 	}
 	sort.SliceStable(ok, func(i, j int) bool { return rank(ok[i]) < rank(ok[j]) })
+	if user && ok[0].ZipPath != "" {
+		// The agent runs a per-user installer from a folder the user can
+		// read; an installer that needs a whole unpacked zip is not one.
+		return WingetInstaller{}, unsupported("%s %s: per-user installer for %s is inside a zip, which is not supported", m.ID, m.Version, arch)
+	}
 	return ok[0], nil
 }
 
@@ -313,9 +345,12 @@ func firstReason(rs []string) string {
 	return "is not importable: " + rs[0]
 }
 
-// PickInstaller picks what pmctl imports for arch: an MSI when there is one
-// (PickMSI), else an EXE installer (PickEXE); either may be inside a zip
-// (ZipPath set). The error explains both.
+// PickInstaller picks what pmctl imports for arch, in the importable
+// rule's order (intel.Importable): an MSI (PickMSI), a machine-wide EXE
+// installer (PickEXE), an MSIX package (PickMSIX), a per-user EXE
+// installer (PickPerUserEXE), a portable app (PickPortable). MSI, EXE and
+// portable may be inside a zip (ZipPath set). The error explains why none
+// fits.
 func (m *WingetManifest) PickInstaller(arch string) (WingetInstaller, error) {
 	in, err := m.PickMSI(arch)
 	if err == nil {
@@ -325,18 +360,29 @@ func (m *WingetManifest) PickInstaller(arch string) (WingetInstaller, error) {
 	if !errors.As(err, &msiErr) {
 		return in, err
 	}
-	ex, exErr := m.PickEXE(arch)
-	if exErr == nil {
-		return ex, nil
+	var errs []error
+	for _, pick := range []func(string) (WingetInstaller, error){m.PickEXE, m.PickMSIX, m.PickPerUserEXE, m.PickPortable} {
+		got, err := pick(arch)
+		if err == nil {
+			return got, nil
+		}
+		errs = append(errs, err)
 	}
-	var un *UnsupportedError
-	if errors.As(exErr, &un) && strings.Contains(un.Reason, "is not importable") {
-		return WingetInstaller{}, exErr // the EXE reason is the useful one
+	// The most useful reason: why an installer that exists cannot be used.
+	for _, err := range errs {
+		var un *UnsupportedError
+		if errors.As(err, &un) && strings.Contains(un.Reason, "is not importable") && !strings.HasSuffix(un.Reason, ": "+intel.ReasonPerUser) &&
+			!strings.HasSuffix(un.Reason, ": installs per machine") {
+			return WingetInstaller{}, err
+		}
+		if errors.As(err, &un) && strings.Contains(un.Reason, "inside a zip, which is not supported") {
+			return WingetInstaller{}, err
+		}
 	}
 	if why := m.zipUnsupported(arch); why != "" {
 		return WingetInstaller{}, unsupported("%s %s: zip installer for %s is not importable: %s", m.ID, m.Version, arch, why)
 	}
-	return WingetInstaller{}, &UnsupportedError{Reason: strings.Replace(msiErr.Reason, "has no MSI installer", "has no MSI or EXE installer", 1)}
+	return WingetInstaller{}, &UnsupportedError{Reason: strings.Replace(msiErr.Reason, "has no MSI installer", "has no supported installer", 1)}
 }
 
 // ExeInstallOptions are the parts of an ExeInstall pmctl knows only after
@@ -357,8 +403,12 @@ func (in WingetInstaller) ExeInstall(o ExeInstallOptions) (*manifest.ExeInstall,
 	}
 	args, _ := in.SilentArgs()
 	success, busy := in.ExitCodes()
+	scope := manifest.ExeScopeMachine
+	if in.Scope == "user" {
+		scope = manifest.ExeScopeUser
+	}
 	e := &manifest.ExeInstall{InstallerType: in.InstallerType, SilentArgs: args, SuccessCodes: success, BusyCodes: busy,
-		Signer: o.Signer, Scope: manifest.ExeScopeMachine,
+		Signer: o.Signer, Scope: scope,
 		Detect:    manifest.ExeDetect{DisplayName: o.DisplayName, DisplayVersion: in.ARPVersion(), ProductCode: in.ARPKey(), Publisher: o.Publisher},
 		Uninstall: manifest.ExeUninstall{QuietUninstall: quietUninstallKnown(in)}}
 	return e, nil

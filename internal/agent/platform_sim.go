@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -34,6 +35,11 @@ type SimConfig struct {
 	// InstallDelayMs makes each simulated install take this long, so tests
 	// and demos can observe live "installing" progress (0 = instant).
 	InstallDelayMs int `json:"install_delay_ms,omitempty"`
+	// NoUserSession: nobody is signed in (per-user installers wait).
+	NoUserSession bool `json:"no_user_session,omitempty"`
+	// RunningApps: portable app folders with a program running (updates
+	// of them are retried later).
+	RunningApps []string `json:"running_apps,omitempty"`
 }
 
 type simState struct {
@@ -115,11 +121,47 @@ func (s *Sim) Install(ctx context.Context, p manifest.Package, file string) Resu
 		}
 	}
 	st := s.load()
+	if p.Archive != nil && p.Kind != manifest.KindPortable {
+		// Like the platform: the archive is extracted and every file verified
+		// before the installer inside would run.
+		dir, err := os.MkdirTemp(filepath.Dir(s.path), "sim-archive-")
+		if err != nil {
+			return Result{State: "failed", ExitCode: -1, Detail: err.Error()}
+		}
+		err = extractArchive(p, file, dir)
+		os.RemoveAll(dir)
+		if err != nil {
+			return archiveFailure(err)
+		}
+	}
 	if p.Kind == "msu" {
 		if slices.Contains(st.KBs, p.KB) {
 			return Result{State: "installed", ExitCode: 2359302, Detail: "already installed"}
 		}
 		st.KBs = append(st.KBs, p.KB)
+	} else if p.Kind == manifest.KindPortable {
+		if p.Portable == nil {
+			return Result{State: "failed", ExitCode: -1, Detail: "portable package without a portable block"}
+		}
+		env := portableEnv{parent: filepath.Join(filepath.Dir(s.path), "sim-programfiles", manifest.PortableParent),
+			verify: func(string, string) error { return nil },
+			running: func(dir string) string {
+				if slices.Contains(s.cfg.RunningApps, p.Portable.Folder) {
+					return filepath.Join(dir, p.Portable.Command)
+				}
+				return ""
+			}}
+		if _, res := installPortableFiles(p, file, env); res != nil {
+			return *res
+		}
+		st.Products = slices.DeleteFunc(st.Products, func(it store.InventoryItem) bool { return portableMatch(p, it) })
+		st.Products = append(st.Products, store.InventoryItem{Kind: "product", ID: p.Portable.ARPKey, Name: p.Portable.DisplayName, Version: formatWantVersion(p)})
+	} else if p.Kind == manifest.KindMsix {
+		if p.Msix == nil {
+			return Result{State: "failed", ExitCode: -1, Detail: "msix package without an msix block"}
+		}
+		st.Products = slices.DeleteFunc(st.Products, func(it store.InventoryItem) bool { return msixMatch(p, it) })
+		st.Products = append(st.Products, store.InventoryItem{Kind: "appx", ID: p.Msix.PackageFamilyName, Name: p.Msix.Name, Version: p.Msix.Version, Source: "provisioned"})
 	} else if p.Kind == manifest.KindExe {
 		if p.Exe == nil {
 			return Result{State: "failed", ExitCode: -1, Detail: "exe package without an exe block"}
@@ -127,9 +169,16 @@ func (s *Sim) Install(ctx context.Context, p manifest.Package, file string) Resu
 		if _, err := exeArgs(p.Exe); err != nil {
 			return Result{State: "failed", ExitCode: -1, Detail: "exe package refused: " + err.Error()}
 		}
+		if perUserExe(p) && s.cfg.NoUserSession {
+			return aggregateUserRuns(nil)
+		}
 		// Like the EXE installer: an older version's ARP entry is replaced.
 		st.Products = slices.DeleteFunc(st.Products, func(it store.InventoryItem) bool { return exeAppMatch(p, it) })
-		st.Products = append(st.Products, store.InventoryItem{Kind: "product", ID: id, Name: p.Exe.Detect.DisplayName, Version: exeWantVersion(p)})
+		it := store.InventoryItem{Kind: "product", ID: id, Name: p.Exe.Detect.DisplayName, Version: exeWantVersion(p)}
+		if perUserExe(p) {
+			it.Scope = "user"
+		}
+		st.Products = append(st.Products, it)
 	} else {
 		st.Products = append(st.Products, store.InventoryItem{Kind: "product", ID: p.ProductCode, Name: p.Title, Version: p.Version})
 	}
@@ -162,8 +211,11 @@ func (s *Sim) Uninstall(ctx context.Context, p manifest.Package) Result {
 	n := len(st.KBs) + len(st.Products)
 	st.KBs = slices.DeleteFunc(st.KBs, func(k string) bool { return strings.EqualFold(k, id) })
 	st.Products = slices.DeleteFunc(st.Products, func(it store.InventoryItem) bool {
-		return strings.EqualFold(it.ID, id) || (p.Kind == manifest.KindExe && exeAppMatch(p, it))
+		return strings.EqualFold(it.ID, id) || (p.Kind == manifest.KindExe && exeAppMatch(p, it)) || portableMatch(p, it)
 	})
+	if p.Kind == manifest.KindPortable && p.Portable != nil {
+		os.RemoveAll(portableDir(p, filepath.Join(filepath.Dir(s.path), "sim-programfiles", manifest.PortableParent)))
+	}
 	if len(st.KBs)+len(st.Products) == n {
 		return Result{State: "installed", Detail: "not installed; nothing to remove"}
 	}
@@ -192,6 +244,23 @@ func (s *Sim) simulateWork(ctx context.Context) {
 	case <-t.C:
 	case <-ctx.Done():
 	}
+}
+
+// SignedInUsers simulates the signed-in users (one, unless NoUserSession).
+func (s *Sim) SignedInUsers() (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cfg.NoUserSession {
+		return 0, nil
+	}
+	return 1, nil
+}
+
+// SetUserSession signs the simulated user in or out (tests).
+func (s *Sim) SetUserSession(signedIn bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cfg.NoUserSession = !signedIn
 }
 
 // FreeDisk and Power simulate the pre-install conditions.
@@ -291,6 +360,21 @@ func simID(p manifest.Package) string {
 			return p.Exe.Detect.ProductCode
 		}
 		return p.Exe.Detect.DisplayName
+	case manifest.KindPortable:
+		if p.Portable != nil {
+			return p.Portable.ARPKey
+		}
+	case manifest.KindMsix:
+		if p.Msix != nil {
+			return p.Msix.PackageFamilyName
+		}
 	}
 	return p.KB
+}
+
+// SetRunningApps sets the portable app folders with a running program (tests).
+func (s *Sim) SetRunningApps(folders []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cfg.RunningApps = folders
 }

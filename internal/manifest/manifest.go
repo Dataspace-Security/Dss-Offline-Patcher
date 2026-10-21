@@ -70,6 +70,13 @@ type Package struct {
 	ExpectedUBR int `json:"expected_ubr,omitempty"`
 	// Exe: install/detect/rollback details, only for kind "exe" (see exe.go).
 	Exe *ExeInstall `json:"exe,omitempty"`
+	// Archive: the payload is a zip holding the installer and the files it
+	// needs (kinds msi, exe, portable; see formats.go).
+	Archive *Archive `json:"archive,omitempty"`
+	// Portable: how a portable app is installed (kind portable only).
+	Portable *Portable `json:"portable,omitempty"`
+	// Msix: the package identity (kind msix only).
+	Msix *Msix `json:"msix,omitempty"`
 }
 
 type Manifest struct {
@@ -110,15 +117,18 @@ func validBase(base string) bool {
 	if !baseRe.MatchString(base) || base == "." || base == ".." || strings.HasSuffix(base, ".") {
 		return false
 	}
-	stem, _, _ := strings.Cut(strings.ToUpper(base), ".")
+	return !reservedDeviceName(base)
+}
+
+// reservedDeviceName: CON, PRN, AUX, NUL, COM0-9, LPT0-9, with any extension.
+func reservedDeviceName(name string) bool {
+	stem, _, _ := strings.Cut(strings.ToUpper(name), ".")
+	stem = strings.TrimRight(stem, " ")
 	switch stem {
 	case "CON", "PRN", "AUX", "NUL":
-		return false
+		return true
 	}
-	if len(stem) == 4 && (strings.HasPrefix(stem, "COM") || strings.HasPrefix(stem, "LPT")) && stem[3] >= '0' && stem[3] <= '9' {
-		return false
-	}
-	return true
+	return len(stem) == 4 && (strings.HasPrefix(stem, "COM") || strings.HasPrefix(stem, "LPT")) && stem[3] >= '0' && stem[3] <= '9'
 }
 
 // ValidateSchema checks structural rules that don't depend on server state.
@@ -203,16 +213,27 @@ func (m *Manifest) ValidateSchema(now time.Time) error {
 		case KindExe:
 			wantOS = "windows"
 			validateExe(&p, pfx, add)
+		case KindPortable:
+			wantOS = "windows"
+			validatePortable(&p, pfx, add)
+		case KindMsix:
+			wantOS = "windows"
+			validateMsix(&p, pfx, add)
 		case "agent":
 			// offpatch agent self-upgrade; any supported OS.
 			if !versionRe.MatchString(p.Version) {
 				add("%s: agent packages need a version like 1.2.3", pfx)
 			}
 		default:
-			add("%s.kind must be msu, msi, exe, deb, rpm, pkg or agent", pfx)
+			add("%s.kind must be msu, msi, exe, portable, msix, deb, rpm, pkg or agent", pfx)
 		}
 		if err := exeBlockMisuse(&p); err != nil {
 			add("%s: %v", pfx, err)
+		}
+		if err := formatBlockMisuse(&p); err != nil {
+			add("%s: %v", pfx, err)
+		} else if p.Archive != nil {
+			validateArchive(&p, pfx, add)
 		}
 		if wantOS != "" && p.Applicability.OS != wantOS {
 			add("%s: kind %s requires applicability.os %s", pfx, p.Kind, wantOS)

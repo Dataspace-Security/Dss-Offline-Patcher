@@ -39,8 +39,13 @@ type SpecEntry struct {
 	Applicability manifest.Applicability `json:"applicability"`
 	// Exe: how the agent runs an EXE installer (kind exe only). pmctl build
 	// verifies the payload's Authenticode signer against Exe.Signer again.
-	Exe       *manifest.ExeInstall `json:"exe,omitempty"`
-	SourceURL string               `json:"source_url"`
+	Exe *manifest.ExeInstall `json:"exe,omitempty"`
+	// Archive, Portable, Msix: the app-format blocks (agents 0.10.0+).
+	// pmctl build re-verifies an archive's files against the zip.
+	Archive   *manifest.Archive  `json:"archive,omitempty"`
+	Portable  *manifest.Portable `json:"portable,omitempty"`
+	Msix      *manifest.Msix     `json:"msix,omitempty"`
+	SourceURL string             `json:"source_url"`
 	// VendorSignature: verified at fetch time (pmctl auto); build keeps it.
 	VendorSignature *manifest.VendorSignature `json:"vendor_signature,omitempty"`
 	Path            string                    `json:"path"`
@@ -97,6 +102,9 @@ func ValidateEntry(e SpecEntry, size int64, sha256hex string) error {
 			ExpectedUBR:     e.ExpectedUBR,
 			Applicability:   e.Applicability,
 			Exe:             e.Exe,
+			Archive:         e.Archive,
+			Portable:        e.Portable,
+			Msix:            e.Msix,
 			File:            manifest.FileRef{Name: "payload/" + filepath.Base(filepath.FromSlash(e.Path)), Size: size, SHA256: sha256hex},
 			SourceURL:       e.SourceURL,
 			VendorSignature: manifest.VendorSignature{Status: "not_checked"},
@@ -240,6 +248,8 @@ func kindFromName(name string) (string, error) {
 		return "rpm", nil
 	case ".pkg":
 		return "pkg", nil
+	case ".msix", ".appx", ".msixbundle", ".appxbundle":
+		return manifest.KindMsix, nil
 	}
 	return "", fmt.Errorf("%s: cannot infer kind from extension; pass -kind (msu|msi|exe|deb|rpm|pkg|agent)", name)
 }

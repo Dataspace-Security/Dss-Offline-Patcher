@@ -30,8 +30,10 @@ const (
 	ExeTypeBurn     = "burn"
 )
 
-// ExeScopeMachine is the only supported install scope: per-user installers
-// would install into the SYSTEM profile when the agent runs them.
+// ExeScopeMachine: the installer runs as SYSTEM and installs per machine.
+// ExeScopeUser (formats.go): agents 0.10.0 and later run a per-user
+// installer as each signed-in user (it would install into the SYSTEM
+// profile if the agent ran it itself).
 const ExeScopeMachine = "machine"
 
 // ExeInstall describes how the agent runs, detects and (optionally) rolls
@@ -49,7 +51,7 @@ type ExeInstall struct {
 	Signer    string       `json:"signer"`
 	Detect    ExeDetect    `json:"detect"`
 	Uninstall ExeUninstall `json:"uninstall"`
-	// Scope is always "machine".
+	// Scope is "machine", or "user" for a per-user installer (agents 0.10.0+).
 	Scope string `json:"scope"`
 }
 
@@ -91,12 +93,17 @@ func IsExeInstallerType(t string) bool {
 }
 
 // RollbackSupported reports whether the package can be rolled back
-// (uninstalled) by the agent. Non-EXE kinds keep their existing rules.
+// (uninstalled) by the agent. MSIX packages and per-user installers cannot
+// (the agent does not remove apps from user profiles); portable apps can
+// (the agent removes the folder it wrote). Other kinds keep their rules.
 func (p *Package) RollbackSupported() bool {
-	if p.Kind != KindExe {
-		return true
+	switch p.Kind {
+	case KindMsix:
+		return false
+	case KindExe:
+		return p.Exe != nil && p.Exe.Uninstall.QuietUninstall && p.Exe.Scope != ExeScopeUser
 	}
-	return p.Exe != nil && p.Exe.Uninstall.QuietUninstall
+	return true
 }
 
 const (
@@ -183,8 +190,8 @@ func validateExe(p *Package, pfx string, add func(string, ...any)) {
 	if e.Detect.ProductCode != "" && !arpKeyRe.MatchString(e.Detect.ProductCode) {
 		add("%s.exe.detect.product_code must be an ARP key name or {GUID}", pfx)
 	}
-	if e.Scope != ExeScopeMachine {
-		add("%s.exe.scope must be machine", pfx)
+	if e.Scope != ExeScopeMachine && e.Scope != ExeScopeUser {
+		add("%s.exe.scope must be machine or user", pfx)
 	}
 	if strings.TrimSpace(p.Version) == "" {
 		add("%s: exe packages need a version", pfx)
@@ -192,8 +199,8 @@ func validateExe(p *Package, pfx string, add func(string, ...any)) {
 	if p.ProductCode != "" {
 		add("%s.product_code is for msi; use exe.detect.product_code", pfx)
 	}
-	if !strings.HasSuffix(strings.ToLower(p.File.Name), ".exe") {
-		add("%s.file.name must end in .exe for kind exe", pfx)
+	if p.Archive == nil && !strings.HasSuffix(strings.ToLower(p.File.Name), ".exe") {
+		add("%s.file.name must end in .exe for kind exe (or .zip with an archive block)", pfx)
 	}
 }
 

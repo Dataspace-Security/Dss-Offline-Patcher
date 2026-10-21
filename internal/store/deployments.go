@@ -699,6 +699,8 @@ func presentOn(inv []InventoryItem, os OSFacts, p Package, sup map[string]bool) 
 			return true, "inventory shows " + it.Name + " " + it.Version, evidenceLine(it)
 		case p.Kind == manifest.KindExe && exePresent(p, it):
 			return true, "inventory shows " + it.Name + " " + it.Version, evidenceLine(it)
+		case (p.Kind == manifest.KindPortable || p.Kind == manifest.KindMsix) && formatPresent(p, it):
+			return true, "inventory shows " + firstNonEmpty(it.Name, it.ID) + " " + it.Version, evidenceLine(it)
 		case it.Kind == "kb" && p.KB != "" && strings.EqualFold(it.ID, p.KB):
 			return true, "inventory shows " + p.KB, evidenceLine(it)
 		case it.Kind == "kb" && sup[strings.ToUpper(it.ID)]:
@@ -798,7 +800,7 @@ func (s *Store) ensureTarget(ctx context.Context, tx *sql.Tx, d Deployment, e En
 	state, detail, evidence := "pending", "", ""
 	if ok, why := applicable(p, e); !ok {
 		state, detail = "not_applicable", why
-	} else if why := exeAgentGate(p, e); why != "" {
+	} else if why := agentGate(p, e); why != "" {
 		state, detail = "not_applicable", why
 	} else if d.Operation == "rollback" {
 		// Only endpoints that have this package (this version) are in scope.
@@ -1113,14 +1115,21 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 		}
 		touched := map[string]bool{}
 		for _, t := range ts {
-			// EXE packages wait for agent 0.9.0: once the agent is upgraded,
-			// the target is back in scope.
-			if t.State == "not_applicable" && t.Detail == manifest.AgentTooOldForExe && AgentSupportsExe(e.AgentVersion) {
-				if err := s.setTarget(tx, "system:scheduler", t, "pending", "agent upgraded to "+e.AgentVersion+"; EXE package in scope again", 0, 0); err != nil {
+			// EXE packages wait for agent 0.9.0, the app formats (archive,
+			// portable, MSIX, per-user) for 0.10.0: once the agent is
+			// upgraded, the target is back in scope.
+			if t.State == "not_applicable" && agentTooOld(t.Detail) {
+				p, err := getPackage(ctx, tx, t.PackageID)
+				if err != nil {
 					return err
 				}
-				touched[t.DeploymentID] = true
-				t.State = "pending"
+				if agentGate(p, e) == "" {
+					if err := s.setTarget(tx, "system:scheduler", t, "pending", "agent upgraded to "+e.AgentVersion+"; package in scope again", 0, 0); err != nil {
+						return err
+					}
+					touched[t.DeploymentID] = true
+					t.State = "pending"
+				}
 			}
 			if t.State == "verified" || t.State == "not_applicable" {
 				continue
@@ -1129,8 +1138,8 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 			if err != nil {
 				return err
 			}
-			if why := exeAgentGate(p, e); why != "" && (t.State == "pending" || t.State == "deferred" || t.State == "failed") {
-				// Never offered: older agents refuse manifests with kind exe.
+			if why := agentGate(p, e); why != "" && (t.State == "pending" || t.State == "deferred" || t.State == "failed") {
+				// Never offered: older agents refuse manifests they do not know.
 				if err := s.setTarget(tx, "system:scheduler", t, "not_applicable", why, t.ExitCode, 0); err != nil {
 					return err
 				}

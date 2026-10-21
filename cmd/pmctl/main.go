@@ -229,9 +229,9 @@ func buildFromSpec(o buildOpts, spec []specPackage, specDir string) (buildResult
 		if p.Supersedes == nil {
 			p.Supersedes = []string{}
 		}
-		if p.Kind == manifest.KindExe {
-			// Always re-verified: the signer is what the agent will require.
-			vs, err := checkExeSignature(p, path)
+		// EXE, portable, MSIX and archive packages are always re-verified:
+		// the signer (and an archive's file list) is what the agent requires.
+		if vs, handled, err := checkPayload(p, path); handled {
 			if err != nil {
 				return buildResult{}, fmt.Errorf("%s: %w", p.PackageID, err)
 			}

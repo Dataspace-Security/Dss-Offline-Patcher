@@ -60,18 +60,19 @@ func deliver(d *deliveryRun) error {
 	if err := acquire.CheckDiskSpace(d.runDir, total); err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
-	// EXE packages travel in bundles of their own: agents before 0.9.0
-	// parse manifests strictly and would refuse a bundle that mixes them in.
-	var plain, exes []pendingPkg
+	// Agents parse manifests strictly: EXE packages (agents 0.9.0+) and the
+	// app formats (archive, portable, MSIX, per-user; agents 0.10.0+)
+	// travel in bundles of their own, so an older agent never meets a
+	// bundle it would refuse.
+	var gens [3][]pendingPkg
 	for _, p := range pkgs {
-		if p.sp.Kind == manifest.KindExe {
-			exes = append(exes, p)
-		} else {
-			plain = append(plain, p)
-		}
+		g := p.sp.FormatGeneration()
+		gens[g] = append(gens[g], p)
 	}
-	groups := append(partition(plain, d.c.MaxBundleBytes, d.c.MaxBundlePackages, d.fail),
-		partition(exes, d.c.MaxBundleBytes, d.c.MaxBundlePackages, d.fail)...)
+	var groups [][]pendingPkg
+	for _, g := range gens {
+		groups = append(groups, partition(g, d.c.MaxBundleBytes, d.c.MaxBundlePackages, d.fail)...)
+	}
 	d.rep.New = slices.DeleteFunc(d.rep.New, func(id string) bool { return d.rep.Failures[id] != "" })
 	for i, g := range groups {
 		if err := d.ctx.Err(); err != nil {
@@ -152,8 +153,7 @@ func preparePackages(specPath string, fail func(id string, err error)) ([]pendin
 			fail(id, fmt.Errorf("payload: %w", err))
 			continue
 		}
-		if sp.Kind == manifest.KindExe {
-			vs, err := checkExeSignature(sp.Package, sp.Path)
+		if vs, handled, err := checkPayload(sp.Package, sp.Path); handled {
 			if err != nil {
 				fail(id, fmt.Errorf("left out of the bundle: %w", err))
 				continue
@@ -193,25 +193,45 @@ func validatePackage(sp specPackage, size int64) error {
 	return nil
 }
 
+// manifestBudget keeps a bundle's manifest well below the 16 MiB intake
+// limit: archive packages list every file (about perArchiveFile bytes each).
+const (
+	manifestBudget = 12 << 20
+	perArchiveFile = 256
+)
+
+// manifestCost estimates a package's share of the manifest.
+func manifestCost(p pendingPkg) int64 {
+	n := int64(perPackageOverhead)
+	if p.sp.Archive != nil {
+		n += int64(len(p.sp.Archive.Files)) * perArchiveFile
+	}
+	return n
+}
+
 // partition splits pkgs, in spec order (checkpoint prerequisites precede
-// the updates that need them), into bundles of at most maxPkgs packages and
-// maxBytes bytes. A package that cannot fit any bundle is a failure.
+// the updates that need them), into bundles of at most maxPkgs packages,
+// maxBytes bytes and manifestBudget bytes of manifest. A package that
+// cannot fit any bundle is a failure.
 func partition(pkgs []pendingPkg, maxBytes int64, maxPkgs int, fail func(id string, err error)) [][]pendingPkg {
 	var out [][]pendingPkg
 	var cur []pendingPkg
 	var curBytes int64 = perBundleOverhead
+	var curManifest int64
 	for _, p := range pkgs {
 		need := p.size + perPackageOverhead
 		if perBundleOverhead+need > maxBytes {
 			fail(p.sp.PackageID, fmt.Errorf("payload is %d bytes, more than one bundle may carry (max_bundle_bytes %d)", p.size, maxBytes))
 			continue
 		}
-		if len(cur) > 0 && (len(cur) >= maxPkgs || curBytes+need > maxBytes) {
+		mc := manifestCost(p)
+		if len(cur) > 0 && (len(cur) >= maxPkgs || curBytes+need > maxBytes || curManifest+mc > manifestBudget) {
 			out = append(out, cur)
-			cur, curBytes = nil, perBundleOverhead
+			cur, curBytes, curManifest = nil, perBundleOverhead, 0
 		}
 		cur = append(cur, p)
 		curBytes += need
+		curManifest += mc
 	}
 	if len(cur) > 0 {
 		out = append(out, cur)

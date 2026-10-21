@@ -36,9 +36,18 @@ func RollbackUnsupported(p Package) string {
 			return "the package has no package name"
 		}
 	case "exe":
+		if perUserExe(p) {
+			return RollbackPerUser
+		}
 		if p.Exe == nil || !p.Exe.Uninstall.QuietUninstall {
 			return RollbackNoQuietUninstall
 		}
+	case "portable":
+		if p.Portable == nil {
+			return "the package has no portable block"
+		}
+	case "msix":
+		return RollbackMsix
 	case "pkg":
 		return "macOS .pkg installers have no uninstall; deploy the previous version's .pkg instead, or remove the app by hand"
 	case "agent":
@@ -65,6 +74,11 @@ func rollbackPresent(inv []InventoryItem, p Package) (bool, string) {
 				return true, "inventory shows " + it.Name + " " + it.Version
 			}
 			return false, fmt.Sprintf("installed version %s is not %s; nothing of this package to roll back", it.Version, exeWantVersion(p))
+		case (p.Kind == "portable" || p.Kind == "msix") && formatAppMatch(p, it):
+			if want := formatWantVersion(p); it.Version == "" || (VersionAtLeast(it.Version, want) && VersionAtLeast(want, it.Version)) {
+				return true, "inventory shows " + firstNonEmpty(it.Name, it.ID) + " " + it.Version
+			}
+			return false, fmt.Sprintf("installed version %s is not %s; nothing of this package to roll back", it.Version, formatWantVersion(p))
 		case (p.Kind == "deb" || p.Kind == "rpm") && it.Kind == "pkg" && it.ID == p.PackageName:
 			if VersionAtLeast(it.Version, p.Version) && VersionAtLeast(p.Version, it.Version) {
 				return true, "inventory shows " + p.PackageName + " " + it.Version

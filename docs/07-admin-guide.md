@@ -102,6 +102,10 @@ The compliance report says so (scope limitations, PM-04).
 | `rpm` | Linux | `rpm -U --replacepkgs <file>` | `package_name` and version (`rpm -qa`) |
 | `pkg` | macOS | `/usr/sbin/installer -pkg <file> -target /` | receipt id (`package_name`) and version (`pkgutil`) |
 | `agent` | any | the agent replaces its own binary (self-upgrade) | agent version |
+| `exe` | Windows | the vendor EXE installer, silently (agents 0.9.0+); per-user installers in each signed-in user's session (0.10.0+) | Apps & features name / key and version |
+| `msi`, `exe` with an archive | Windows | the installer inside the verified zip, after every file is checked (agents 0.10.0+) | as `msi` / `exe` |
+| `portable` | Windows | files copied to `%ProgramFiles%\DSS Patcher Apps\<app>`, Apps & features entry written (agents 0.10.0+) | the entry `DSSPatcher.<app>` and its version |
+| `msix` | Windows | `Add-AppxProvisionedPackage` for all users (agents 0.10.0+) | package family name and version (Store / MSIX apps) |
 
 > The Windows agent (`wusa`/`msiexec`) has so far only been exercised through the simulated
 > platform; roadmap item B1 (validation on real Windows VMs) is still open. Test on a VM before any
@@ -549,6 +553,9 @@ reboot policy, health checks and auto-pause like an install, needs role `user` a
 | `msi` | `msiexec /x {ProductCode} /qn /norestart` (verbose log in the agent log directory) | |
 | `deb` / `rpm` | `dpkg -r` / `rpm -e` | Removes the package (it does not reinstall the previous version). Refused when other packages depend on it. Only endpoints at exactly this version are targeted |
 | `pkg` (macOS) | — | **Not supported**: macOS installer packages have no uninstall. Deploy the previous version's `.pkg` or remove the app by hand |
+| `portable` | the agent removes the app's folder, shortcut and Apps & features entry (only what it wrote) | Retried later while the app runs |
+| `msix` | — | **Not supported**: remove the app with `Remove-AppxProvisionedPackage` and `Remove-AppxPackage -AllUsers` |
+| `exe` per user | — | **Not supported**: each user removes the app in Apps & features |
 
 Only endpoints whose inventory shows the package are targeted; the others are `not_applicable`. A
 rollback target is `verified` when a fresh inventory no longer shows the package; the matching
@@ -592,10 +599,10 @@ and the Windows cumulative updates per build), not only what the fleet is missin
 never opens a link and never installs anything from the Library; links are shown as text
 (https only).
 
-- **Available** (default) shows what offpatch can import (*Importable: yes*: an MSI installer, or
-  an EXE installer that installs per machine and has a documented silent switch) or what is
-  installed in the fleet. *Importable: no* says why (for example "installs per user only" or
-  "EXE installer without a documented silent switch"); *unknown* means the acquisition zone has
+- **Available** (default) shows what offpatch can import (*Importable: yes*: an MSI installer, an
+  EXE installer with a documented silent switch, an MSIX package, a per-user installer or a
+  portable app; see §3.13) or what is installed in the fleet. *Importable: no* says why (for
+  example "EXE installer without a documented silent switch"); *unknown* means the acquisition zone has
   not looked the app up yet (it does so for configured, requested and about 200 common
   enterprise apps). Patches → Needed shows the same verdict: "Can't import: <reason>" replaces
   the Import button, and the server refuses such a request.
@@ -671,6 +678,38 @@ switch. The acquisition zone checks the download against the winget SHA-256 and 
   the critical *manifest verification failed* alert: treat them like a tampered bundle (§8.1).
 - EXE packages always arrive in bundles of their own, so endpoints with older agents keep
   receiving every other update.
+
+### 3.13 Archive packages, portable apps, MSIX and per-user installers (agent 0.10.0)
+
+Agent 0.10.0 installs four more kinds of apps. Upgrade the **server first, then the acquisition
+zone (pmctl), then the agents**; until an agent reports 0.10.0 its targets show *not applicable —
+agent too old for … : upgrade the agent to 0.10.0 or later* and are never offered the package;
+they come back into scope by themselves after the upgrade. These packages always travel in
+bundles of their own.
+
+| What | Example | What the endpoint does | Review before approving |
+|---|---|---|---|
+| **Archive package** (an installer that needs the other files of its zip) | Adobe Acrobat (`setup.exe` + `.msi` + `.cab` + `setup.ini`) | Extracts the zip into a private folder, refuses it unless every file matches the signed list (else *possible tampering*, critical alert), checks the installer's signature, runs it silently from its folder, removes the folder | The kind shows *EXE · archive* (or *msi · archive*); the detail lists the installer run and the number of files |
+| **Portable app** (no installer) | Rufus, Sysinternals tools | Copies the verified files to `%ProgramFiles%\DSS Patcher Apps\<app>`, writes an Apps & features entry (so inventory and verification see the version) and a Start-menu shortcut; nothing is run | The program's signer, the folder, the Apps & features key |
+| **MSIX package** | Windows Terminal | Checks the package signature, provisions it for every user (`Add-AppxProvisionedPackage`); users get it at their next sign-in | Package family name, version, signer (*not checked at acquisition* when pmctl runs on Linux: the agent still requires a valid signature) |
+| **Per-user installer** | balenaEtcher | Runs the installer in each signed-in user's session, as that user, hidden; checks the user's Apps & features afterwards | *EXE · per user*; the signer and silent arguments as for EXE packages |
+
+- **Only installed apps are updated**, as for every third-party package: a portable app counts
+  as installed when Apps & features shows it (its `DSSPatcher.<app>` entry, or a per-machine
+  entry with the same name); an MSIX app when the Store / MSIX app list shows its package family;
+  a per-user app when a signed-in user's Apps & features shows it.
+- **A portable app that is running** is not replaced: the target shows *retry later: installer
+  busy (the app is running: …)* and is retried at the next check-ins, like a busy installer.
+- **Per-user installers wait for a user**: with nobody signed in the target is *deferred —
+  waiting for the user to sign in (per-user installer)*; it uses no retry and installs at the
+  first check-in after someone signs in. Users who are not signed in are not updated; when they
+  sign in with an old copy the endpoint shows the update as needed again.
+- **MSIX apps update at the next sign-in** of each user; the console shows the endpoint as up to
+  date as soon as the package is provisioned.
+- **Rollback**: portable apps can be rolled back (the agent removes the app); MSIX packages and
+  per-user installers cannot (the console says so). Archive packages follow the EXE / MSI rules.
+- After any install the agent checks in again within about 20 seconds with a fresh inventory, so
+  targets turn *verified* and the app leaves *Needed* without waiting for the inventory cache.
 
 ## 4. Monthly Patch Tuesday workflow (end to end)
 
@@ -1135,6 +1174,10 @@ Notes:
 | Target `lost_after_install`, critical alert | Endpoint silent since the install / reboot (§3.8) | Check the machine; it recovers automatically when it checks in. |
 | Create rollback returns 409 `rollback not supported` | macOS `.pkg`, the agent, or a package without KB / product code / package name | Remove by hand or deploy the previous version. |
 | Target stays `pending_reboot` | `reboot_policy: never`, or no maintenance window with `allow_reboot` is open (detail `no maintenance window allows automatic restarts` when none ever is) | Reboot through your normal process, or add a maintenance window with `allow_reboot`. |
+| Target `failed`, detail `archive does not match signed manifest: … — possible tampering` | The zip on the endpoint holds a file the signed manifest does not list, or one with another hash | Treat like a tampered bundle (§8.1); revoke the package and check the transfer path. |
+| Target `deferred`, detail `waiting for the user to sign in (per-user installer)` | Per-user installer and nobody is signed in to the machine | Nothing: it installs at the first check-in after a user signs in. |
+| Target `failed`, detail `retry later: installer busy (the app is running: …)` | A portable app is running (or a file of it is open) | Nothing: retried at the next check-ins; ask the user to close the app if it stays. |
+| Target `failed`, detail `the installer asks for administrator rights: it is not a per-user installer` | winget lists the installer as per-user, but it needs elevation | Import a machine-wide installer of the app instead, or report it upstream. |
 | Target `failed`, detail `waiting: another installation is running on this machine (try N)` | Another installer or Windows Update is running on the machine (msiexec 1618, servicing busy) | Nothing: it is retried at the next check-in without using up retries, 10 times in a row; after that it counts as a normal failure. |
 | Package `rejected`, operator clicked "Import again" | The next acquisition run sends it again | The package returns to `quarantined` for a new review (audit `package.reimported`, earlier approvals cleared). A `revoked` package is never imported again. |
 | Endpoint `awaiting_checkin` for a long time | Agent installed but not running, or cannot reach the server | As for `offline` (§3.6). After 24 h it is shown `offline`. |

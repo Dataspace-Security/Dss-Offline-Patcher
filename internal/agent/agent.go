@@ -32,7 +32,7 @@ import (
 )
 
 // Version is set at build time: -ldflags "-X offpatch/internal/agent.Version=1.2.3".
-var Version = "0.9.8"
+var Version = "0.10.0"
 
 // State is persisted in <state-dir>/agent.json (0600).
 type State struct {
@@ -189,6 +189,10 @@ type Agent struct {
 	// awaitingReboot: targets installed but waiting for a reboot (progress
 	// key → waiting_reboot progress), re-sent while the reboot is pending.
 	awaitingReboot map[string]Progress
+	// recheckSoon: an installer (or uninstaller) ran this cycle: check in
+	// again after postInstallRecheck with a fresh inventory, so the server
+	// verifies the target and the console shows the new version promptly.
+	recheckSoon bool
 }
 
 const (
@@ -204,6 +208,10 @@ const (
 	// reportTimeout bounds the final report sent after an installer, which
 	// must go out even when the agent is stopping.
 	reportTimeout = 2 * time.Minute
+	// postInstallRecheck: the next check-in after a cycle that ran an
+	// installer comes this soon (with a fresh inventory), whatever the
+	// check-in interval.
+	postInstallRecheck = 20 * time.Second
 )
 
 // downloadIdleTimeout aborts a download that stops receiving data (the
@@ -562,6 +570,7 @@ func (a *Agent) Run(ctx context.Context, once bool) error {
 		if a.failures > 0 {
 			wait += rand.N(wait/10 + 1) // spread retries across the fleet
 		}
+		wait = a.afterInstallWait(wait)
 		select {
 		case <-ctx.Done():
 			return nil
@@ -760,7 +769,7 @@ func (a *Agent) process(ctx context.Context, as store.Assignment, f Facts, inv [
 			(pkg.ProductCode != "" && it.Kind == "product" && strings.EqualFold(it.ID, pkg.ProductCode) &&
 				(pkg.Version == "" || it.Version == "" || store.VersionAtLeast(it.Version, pkg.Version))) ||
 			(pkg.PackageName != "" && (it.Kind == "pkg" || (it.Kind == "app" && pkg.Kind == "pkg")) && it.ID == pkg.PackageName && store.VersionAtLeast(it.Version, pkg.Version)) ||
-			(pkg.Kind == manifest.KindExe && exeUpToDate(pkg, it)) {
+			(pkg.Kind == manifest.KindExe && exeUpToDate(pkg, it)) || formatUpToDate(pkg, it) {
 			a.report(ctx, as, "installed", 0, "already present in local inventory")
 			return
 		}
@@ -769,9 +778,20 @@ func (a *Agent) process(ctx context.Context, as store.Assignment, f Facts, inv [
 			return
 		}
 	}
+	// A per-user installer needs someone signed in: until then the target
+	// is deferred (no attempt used) and tried again at later check-ins.
+	if perUserExe(pkg) {
+		if us, ok := a.plat.(userSessions); ok {
+			if n, err := us.SignedInUsers(); err == nil && n == 0 {
+				a.report(ctx, as, "deferred", 0, waitingForUser)
+				return
+			}
+		}
+	}
 	// 3. Pre-install checks (disk space, power): failing them defers the
-	//    install to a later check-in; it is not a failure.
-	if why := a.preflight(ctx, pkg.File.Size, f.OS); why != "" {
+	//    install to a later check-in; it is not a failure. An archive
+	//    package also needs room for its extracted files.
+	if why := a.preflight(ctx, installSize(pkg), f.OS); why != "" {
 		log.Info("install deferred", "why", why)
 		a.report(ctx, as, "deferred", 0, why)
 		return
@@ -802,15 +822,32 @@ func (a *Agent) process(ctx context.Context, as store.Assignment, f Facts, inv [
 		return a.plat.Install(ictx, pkg, file)
 	}()
 	a.invAt = time.Time{} // refresh inventory at the next check-in
+	a.recheckSoon = a.recheckSoon || res.State != "deferred"
 	log.Info("install finished", "state", res.State, "exit", res.ExitCode, "detail", res.Detail)
 	rctx, cancel := context.WithTimeout(ictx, reportTimeout)
 	defer cancel()
 	a.finish(rctx, as, res)
-	if res.State != "failed" {
+	if res.State != "failed" && res.State != "deferred" {
 		os.Remove(file)
 	}
 	a.afterInstall(rctx, as, res, pkg.File.Size)
 	return res.State == "pending_reboot"
+}
+
+// userSessions is implemented by platforms that run per-user installers:
+// how many users are signed in (an installer can run in their sessions).
+type userSessions interface {
+	SignedInUsers() (int, error)
+}
+
+// afterInstallWait shortens the wait before the next check-in after a
+// cycle that ran an installer: the fresh inventory then verifies it.
+func (a *Agent) afterInstallWait(wait time.Duration) time.Duration {
+	if !a.recheckSoon {
+		return wait
+	}
+	a.recheckSoon = false
+	return min(wait, postInstallRecheck)
 }
 
 // uninstaller is implemented by platforms that can roll a package back.
@@ -834,7 +871,7 @@ func (a *Agent) rollback(ctx context.Context, as store.Assignment, pkg manifest.
 	present := false
 	for _, it := range inv {
 		if (pkg.KB != "" && it.Kind == "kb" && strings.EqualFold(it.ID, pkg.KB)) || (pkg.ProductCode != "" && it.Kind == "product" && strings.EqualFold(it.ID, pkg.ProductCode)) ||
-			(pkg.PackageName != "" && it.Kind == "pkg" && it.ID == pkg.PackageName) || (pkg.Kind == manifest.KindExe && exeAppMatch(pkg, it)) {
+			(pkg.PackageName != "" && it.Kind == "pkg" && it.ID == pkg.PackageName) || (pkg.Kind == manifest.KindExe && exeAppMatch(pkg, it)) || formatAppMatch(pkg, it) {
 			present = true
 		}
 	}
@@ -854,6 +891,7 @@ func (a *Agent) rollback(ctx context.Context, as store.Assignment, pkg manifest.
 		return u.Uninstall(ictx, pkg)
 	}()
 	a.invAt = time.Time{}
+	a.recheckSoon = true
 	log.Info("uninstall finished", "state", res.State, "exit", res.ExitCode, "detail", res.Detail)
 	rctx, cancel := context.WithTimeout(ictx, reportTimeout)
 	defer cancel()

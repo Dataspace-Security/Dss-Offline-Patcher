@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { api, enc, qs } from "../api";
 import { paths } from "../paths";
 import { useCan, useMe } from "../auth";
-import { ExeDetails, KindTag, rollbackBlocker } from "../components/exeParts";
+import { ExeDetails, FormatDetails, KindTag, rollbackBlocker } from "../components/exeParts";
 import { LifecycleTimeline } from "../components/LifecycleTimeline";
 import { FleetLine, PatchThis } from "../components/PatchThis";
 import { approvedBy, fetchFleet, fetchPolicy, isAgentPackage } from "../components/patchPlan";
@@ -335,6 +335,7 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
             ["Bundle", <Link to={paths.imports}><Mono>{p.bundle_id}</Mono></Link>],
           ]} />
           <ExeDetails p={p} />
+          <FormatDetails p={p} />
           <h3>Applicability</h3>
           <KV rows={[
             ["OS", p.applicability?.os],

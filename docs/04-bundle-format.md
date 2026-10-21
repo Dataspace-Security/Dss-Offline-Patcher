@@ -75,7 +75,9 @@ Any other entry is rejected. That includes directories other than `payload/`, sy
 | `rpm` | `package_name`, `version` | `linux` | `rpm -U --replacepkgs` |
 | `pkg` | `package_name` (receipt id), `version` | `macos` | `/usr/sbin/installer` |
 | `agent` | `version` like `1.2.3` (1–4 numeric parts, optional `-`/`+` suffix) | any one of the three | agent self-upgrade |
-| `exe` | `exe` block (below), `version`, `package_name` = `exe.detect.display_name`, file name ending `.exe`, no `product_code` | `windows` | the EXE installer with `exe.silent_args` (agents 0.9.0 and later) |
+| `exe` | `exe` block (below), `version`, `package_name` = `exe.detect.display_name`, file name ending `.exe` (`.zip` with an `archive` block), no `product_code` | `windows` | the EXE installer with `exe.silent_args` (agents 0.9.0 and later; `exe.scope` `user` and archive packages: 0.10.0) |
+| `portable` | `portable` block (below), `version`, `package_name` = `portable.display_name`; file name ending `.exe`, or `.zip` with an `archive` block | `windows` | files copied to `%ProgramFiles%\DSS Patcher Apps\<folder>`, Apps & features entry written (agents 0.10.0 and later) |
+| `msix` | `msix` block (below), `version`; file name ending `.msix`, `.appx`, `.msixbundle` or `.appxbundle` | `windows` | `Add-AppxProvisionedPackage -Online -SkipLicense` (agents 0.10.0 and later) |
 
 `package_name`: `[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}`.
 
@@ -113,9 +115,65 @@ Optional field `exe` (`omitempty`): msu, msi, deb, rpm, pkg and agent manifests 
 | `detect.product_code` | optional: the Apps & features key name (`[A-Za-z0-9{}][A-Za-z0-9{}._ +()-]{0,127}`, e.g. `Microsoft EdgeWebView` or a `{GUID}`). |
 | `detect.publisher` | optional. |
 | `uninstall.quiet_uninstall` | true only if the app registers a `QuietUninstallString` (burn, inno); otherwise rollback is not supported. |
-| `scope` | must be `machine`. |
+| `scope` | `machine`, or `user`: a per-user installer the agent runs in each signed-in user's session (agents 0.10.0 and later; not with an `archive` block). |
 
 Agents before 0.9.0 parse manifests strictly and do not know the field: pmctl puts EXE packages in bundles of their own, and the server never offers them to those agents (target `not_applicable`, "agent too old for EXE packages: upgrade the agent to 0.9.0 or later").
+
+#### App formats: `archive`, `portable`, `msix` (agents 0.10.0 and later)
+
+Optional fields (`omitempty`), like `exe`; a package of another kind with a `portable` or `msix` block, or an `archive` block on a kind other than `msi`, `exe` and `portable`, is rejected. See [08-acquisition.md](08-acquisition.md) for how pmctl fills them and what the agent does.
+
+```json
+"archive": {
+  "format": "zip",
+  "entry": "Adobe Acrobat/setup.exe",
+  "files": [
+    { "path": "Adobe Acrobat/setup.exe", "size": 1234567, "sha256": "…64 hex…" },
+    { "path": "Adobe Acrobat/AcroPro.msi", "size": 7654321, "sha256": "…64 hex…" }
+  ]
+}
+```
+
+| Field | Rule |
+|---|---|
+| `archive.format` | `zip`; the payload (`file.name`) ends in `.zip` and is the vendor's zip |
+| `archive.files` | 1–5,000 files: `path` with forward slashes, at most 240 characters, no empty, `.` or `..` element, no leading `/`, no `:`, `\` or control characters, no element ending in a dot or space; unique without regard to case; no file is also a directory of another; `size` ≥ 0; `sha256` lower-case hex; at most 4 GB in total. The agent refuses a zip that holds any other file, or a file with another size or hash. |
+| `archive.entry` | one of `files`, written exactly as there: the `.msi` (kind msi) or `.exe` (kind exe; kind portable: the main program) |
+
+```json
+"portable": {
+  "folder": "Akeo.Rufus", "command": "rufus-4.6.exe", "signer": "Akeo Consulting",
+  "arp_key": "DSSPatcher.Akeo.Rufus", "display_name": "Rufus", "display_version": "4.6",
+  "publisher": "Akeo Consulting", "shortcut": "Rufus"
+}
+```
+
+| Field | Rule |
+|---|---|
+| `folder` | one folder name `[A-Za-z0-9][A-Za-z0-9._ +()-]{0,99}`, no trailing dot or space, not a device name; the app lives in `%ProgramFiles%\DSS Patcher Apps\<folder>` |
+| `command` | the main program (`.exe`): a plain file name for a single-file payload (`file.name` ends in `.exe`), else `archive.entry` |
+| `signer` | required: the Authenticode signer CommonName of `command` that pmctl verified; the agent checks it again |
+| `arp_key` | the Apps & features key the agent writes (`[A-Za-z0-9{}][A-Za-z0-9{}._ +()-]{0,127}`) |
+| `display_name`, `display_version` | required, single line, no `"`; `display_name` equals `package_name` |
+| `publisher`, `shortcut` | optional; `shortcut` is a plain name (Start-menu shortcut for all users) |
+
+```json
+"msix": {
+  "package_family_name": "Microsoft.WindowsTerminal_8wekyb3d8bbwe", "name": "Microsoft.WindowsTerminal",
+  "publisher": "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US",
+  "version": "1.21.2361.0", "bundle": true, "signer": "Microsoft Corporation"
+}
+```
+
+| Field | Rule |
+|---|---|
+| `package_family_name` | `<name>_<13-character publisher id>`; the inventory reports the app under it (kind `appx`) |
+| `name`, `publisher` | the package identity; the family name starts with `name` |
+| `version` | four numbers (`1.21.2361.0`): the version the endpoint reports |
+| `bundle` | true for `.msixbundle` / `.appxbundle` payloads |
+| `signer` | optional: the signer pmctl verified (Windows acquisition hosts); the agent always requires a valid signature, and this signer when set |
+
+Agents before 0.10.0 refuse manifests with these fields or kinds: pmctl puts such packages in bundles of their own (never with EXE or plain packages), and the server never offers them to those agents (target `not_applicable`, "agent too old for archive packages / portable apps / MSIX packages / per-user installers: upgrade the agent to 0.10.0 or later").
 
 ### Limits (server config, defaults)
 

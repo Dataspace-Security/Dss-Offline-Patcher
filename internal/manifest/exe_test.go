@@ -93,7 +93,7 @@ func TestExeManifestValidation(t *testing.T) {
 		"no signer":             func(p *Package) { p.Exe.Signer = "" },
 		"no display name":       func(p *Package) { p.Exe.Detect.DisplayName = "" },
 		"package name mismatch": func(p *Package) { p.PackageName = "Other" },
-		"per user scope":        func(p *Package) { p.Exe.Scope = "user" },
+		"unknown scope":         func(p *Package) { p.Exe.Scope = "everyone" },
 		"no scope":              func(p *Package) { p.Exe.Scope = "" },
 		"no version":            func(p *Package) { p.Version = "" },
 		"msi product code":      func(p *Package) { p.ProductCode = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" },

@@ -325,9 +325,10 @@ func archTag(name string) string {
 // exeAppMatch reports whether an inventory item is the app an EXE package
 // installs: by ARP key (detect.product_code) when known, else by display
 // name (store.SameAppName, as the server, plus the same architecture).
-// Per-user entries do not count: EXE packages install per machine.
+// A machine-wide package counts per-machine entries only, a per-user
+// installer (exe.scope user) per-user entries only.
 func exeAppMatch(p manifest.Package, it store.InventoryItem) bool {
-	if p.Exe == nil || it.Kind != "product" || it.Scope == "user" {
+	if p.Exe == nil || it.Kind != "product" || (it.Scope == "user") != perUserExe(p) {
 		return false
 	}
 	d := p.Exe.Detect

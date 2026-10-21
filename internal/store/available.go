@@ -34,6 +34,8 @@ func identity(p Package) string {
 		return "agent"
 	case "exe":
 		return exeIdentity(p)
+	case "portable", "msix":
+		return formatIdentity(p)
 	case "msi":
 		if p.PackageName != "" {
 			return "msi:" + strings.ToLower(p.PackageName)
@@ -75,6 +77,12 @@ func needs(p Package, e Endpoint, inv []InventoryItem, sup map[string]bool) (boo
 	case "exe":
 		for _, it := range inv {
 			if exeAppMatch(p, it) && it.Version != "" && !VersionAtLeast(it.Version, exeWantVersion(p)) {
+				return true, it.Version, "update available"
+			}
+		}
+	case "portable", "msix":
+		for _, it := range inv {
+			if formatAppMatch(p, it) && it.Version != "" && !VersionAtLeast(it.Version, formatWantVersion(p)) {
 				return true, it.Version, "update available"
 			}
 		}
@@ -295,8 +303,8 @@ func SameAppName(installed, packageName string) bool {
 
 const notInstalledDetail = "app not installed: third-party packages update an installed app and are never installed on machines without it"
 
-// appInstalled reports whether a third-party app package (msi, deb, rpm,
-// pkg) has any version of its app on the endpoint. Windows updates and agent
+// appInstalled reports whether a third-party app package (msi, exe,
+// portable, msix, deb, rpm, pkg) has any version of its app on the endpoint. Windows updates and agent
 // packages are not apps and always count as installed.
 func appInstalled(inv []InventoryItem, p Package) bool {
 	switch p.Kind {
@@ -313,6 +321,13 @@ func appInstalled(inv []InventoryItem, p Package) bool {
 	case "exe":
 		for _, it := range inv {
 			if exeAppMatch(p, it) {
+				return true
+			}
+		}
+		return false
+	case "portable", "msix":
+		for _, it := range inv {
+			if formatAppMatch(p, it) {
 				return true
 			}
 		}

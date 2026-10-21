@@ -49,13 +49,13 @@ func TestImportableOnFleetRows(t *testing.T) {
 				{Arch: "x64", Type: "exe", Scope: "user", URL: "https://x/wv2.exe", SHA256: sha, Silent: true},
 				{Arch: "x64", Type: "exe", Scope: "machine", URL: "https://x/wv2.exe", SHA256: sha, Silent: true}}},
 			{ID: "Microsoft.VisualStudioCode", Version: "1.142.0", ResolvedAt: gen, Installers: []intel.ResolvedInstaller{
-				{Arch: "x64", Type: "inno", Scope: "user", URL: "https://x/code-user.exe", SHA256: sha}}},
+				{Arch: "x64", Type: "exe", Scope: "user", URL: "https://x/code-user.exe", SHA256: sha}}},
 		}}, e.priv, "intel-imp")
 
 	want := map[string][2]string{
 		"KB5044280":                     {"yes", "Windows cumulative update (Microsoft Update Catalog)"},
 		"Microsoft.EdgeWebView2Runtime": {"yes", "EXE installer (exe)"},
-		"Microsoft.VisualStudioCode":    {"no", "installs per user only"},
+		"Microsoft.VisualStudioCode":    {"no", "EXE installer without a documented silent switch"},
 		"Contoso.Unresolved":            {"unknown", "installer details not resolved yet"},
 	}
 	check := func(what string, rows []importableRow) {
@@ -106,7 +106,7 @@ func TestImportableOnFleetRows(t *testing.T) {
 
 	// Requests: the "no" row is refused with its reason; the others export.
 	if c, msg := e.apiErr("POST", "/api/acquisition-requests", tokOperator, map[string]any{"apps": []string{"Microsoft.VisualStudioCode", "Microsoft.EdgeWebView2Runtime"}}); c != 400 ||
-		msg != "can't import: Microsoft.VisualStudioCode: installs per user only" {
+		msg != "can't import: Microsoft.VisualStudioCode: EXE installer without a documented silent switch" {
 		t.Errorf("refusal: %d %q", c, msg)
 	}
 	if c := e.api("POST", "/api/acquisition-requests", tokOperator, map[string]any{"apps": []string{"Microsoft.EdgeWebView2Runtime", "Contoso.Unresolved"}, "kbs": []string{"KB5044280"}}, nil); c != 200 {

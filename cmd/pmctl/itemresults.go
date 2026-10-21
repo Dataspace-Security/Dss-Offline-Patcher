@@ -118,7 +118,10 @@ func pickMSIReason(full, arch string) string {
 		return why
 	}
 	kind := "MSI"
-	if strings.Contains(full, "no MSI or EXE installer") {
+	switch {
+	case strings.Contains(full, "no supported installer"):
+		kind = "supported"
+	case strings.Contains(full, "no MSI or EXE installer"):
 		kind = "MSI or EXE"
 	}
 	if _, rest, ok := strings.Cut(full, "(only "); ok {

@@ -110,11 +110,17 @@ const kbScript = `ConvertTo-Json -Compress @(Get-CimInstance -ClassName Win32_Qu
 
 // appxScript lists Microsoft Store / MSIX apps installed for any user:
 // main packages only (no frameworks, resource or bundle parts) and not the
-// ones signed as part of Windows itself. Shown in the inventory; the update
-// intelligence does not match them (the Store updates them).
+// ones signed as part of Windows itself. Shown in the inventory; MSIX
+// packages (kind msix) are matched and verified by package family name.
 const appxScript = `ConvertTo-Json -Compress @(Get-AppxPackage -AllUsers -PackageTypeFilter Main -ErrorAction SilentlyContinue |
   Where-Object { -not $_.IsFramework -and $_.SignatureKind -ne 'System' } |
   ForEach-Object { @{ id = [string]$_.PackageFamilyName; name = [string]$_.Name; version = [string]$_.Version } })`
+
+// provisionedScript lists packages provisioned for all users (MSIX
+// packages the agent installs, Add-AppxProvisionedPackage): existing users
+// get them at their next sign-in, so their version is the machine's.
+const provisionedScript = `ConvertTo-Json -Compress @(Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
+  ForEach-Object { @{ name = [string]$_.DisplayName; version = [string]$_.Version; publisher_id = [string]$_.PublisherId } })`
 
 var uninstallKeys = []string{
 	`SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall`,
@@ -159,7 +165,11 @@ func storeApps(ctx context.Context) []store.InventoryItem {
 	if err != nil {
 		return nil
 	}
-	return parseStoreApps(out)
+	installed := parseStoreApps(out)
+	if out, err := powershell(ctx, provisionedScript); err == nil {
+		return mergeAppx(installed, parseProvisioned(out))
+	}
+	return installed
 }
 
 var productKeyRe = regexp.MustCompile(`^\{[0-9A-Fa-f-]{36}\}$`)
@@ -305,6 +315,16 @@ func (w *Windows) Install(ctx context.Context, p manifest.Package, file string) 
 	var code int
 	var res *Result
 	logPath := "" // msiexec verbose log, quoted in the detail on failure
+	switch {
+	case p.Archive != nil && (p.Kind == "msi" || p.Kind == manifest.KindExe):
+		return w.installArchive(ctx, p, file)
+	case p.Kind == manifest.KindPortable:
+		return w.installPortable(ctx, p, file)
+	case p.Kind == manifest.KindMsix:
+		return w.installMsix(ctx, p, file)
+	case perUserExe(p):
+		return w.installPerUser(ctx, p, file)
+	}
 	switch p.Kind {
 	case "msu":
 		code, res = runInstaller(ctx, filepath.Join(sys, "wusa.exe"), file, "/quiet", "/norestart")
@@ -344,7 +364,12 @@ func (w *Windows) Uninstall(ctx context.Context, p manifest.Package) Result {
 		logPath = w.msiLog(p, "-uninstall")
 		code, res = runInstaller(ctx, filepath.Join(sys, "msiexec.exe"), "/x", p.ProductCode, "/qn", "/norestart", "/l*v", logPath)
 	case manifest.KindExe:
+		if !p.RollbackSupported() {
+			return Result{State: "failed", ExitCode: -1, Detail: exeRollbackUnsupported}
+		}
 		return w.uninstallExe(ctx, p)
+	case manifest.KindPortable:
+		return w.uninstallPortable(p)
 	default:
 		return Result{State: "failed", ExitCode: -1, Detail: "rollback is not supported for kind " + p.Kind}
 	}

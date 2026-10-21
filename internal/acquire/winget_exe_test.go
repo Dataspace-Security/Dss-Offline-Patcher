@@ -130,7 +130,6 @@ func TestPickEXEReasons(t *testing.T) {
 	}
 	cases := []struct{ body, reason string }{
 		{"InstallerType: exe\nInstallers:\n- Architecture: x64\n  InstallerUrl: https://c.example/t.exe\n  InstallerSha256: " + sha + "\n", intel.ReasonExeNoSilent},
-		{"InstallerType: inno\nScope: user\nInstallers:\n- Architecture: x64\n  InstallerUrl: https://c.example/t.exe\n  InstallerSha256: " + sha + "\n", intel.ReasonPerUser},
 		{"InstallerType: nullsoft\nInstallers:\n- Architecture: x64\n  InstallerUrl: https://c.example/t.exe\n", intel.ReasonExeNoSHA},
 		{"InstallerType: burn\nInstallers:\n- Architecture: x64\n  InstallerUrl: http://c.example/t.exe\n  InstallerSha256: " + sha + "\n", intel.ReasonExeNoHTTPS},
 		{"InstallerType: exe\nInstallerSwitches:\n  Silent: /S & calc\nInstallers:\n- Architecture: x64\n  InstallerUrl: https://c.example/t.exe\n  InstallerSha256: " + sha + "\n", intel.ReasonExeNoSilent},
@@ -143,10 +142,32 @@ func TestPickEXEReasons(t *testing.T) {
 			t.Errorf("%q: %v", c.body, err)
 		}
 	}
-	// Only msix/zip: neither MSI nor EXE.
-	_, err := parse("Installers:\n- Architecture: x64\n  InstallerType: msix\n  InstallerUrl: https://c.example/t.msix\n  InstallerSha256: " + sha + "\n").PickInstaller("x64")
-	if err == nil || !strings.Contains(err.Error(), "has no MSI or EXE installer for x64 (only msix)") {
-		t.Errorf("msix: %v", err)
+	// A per-user EXE installer is taken (agents 0.10.0+), as scope user.
+	pu, err := parse("InstallerType: inno\nScope: user\nInstallers:\n- Architecture: x64\n  InstallerUrl: https://c.example/t.exe\n  InstallerSha256: " + sha + "\n").PickInstaller("x64")
+	if err != nil || pu.Scope != "user" || !pu.IsEXE() {
+		t.Errorf("per user: %v %+v", err, pu)
+	} else if ex, err := pu.ExeInstall(ExeInstallOptions{Signer: "C", DisplayName: "Tool"}); err != nil || ex.Scope != manifest.ExeScopeUser {
+		t.Errorf("per user exe block: %v %+v", err, ex)
+	}
+	// A machine installer wins over a per-user one.
+	both := parse("InstallerType: inno\nInstallers:\n- Architecture: x64\n  Scope: user\n  InstallerUrl: https://c.example/u.exe\n  InstallerSha256: " + sha +
+		"\n- Architecture: x64\n  Scope: machine\n  InstallerUrl: https://c.example/m.exe\n  InstallerSha256: " + sha + "\n")
+	if in, err := both.PickInstaller("x64"); err != nil || in.Scope != "machine" {
+		t.Errorf("machine over user: %v %+v", err, in)
+	}
+	// MSIX is taken (agents 0.10.0+).
+	if in, err := parse("Installers:\n- Architecture: x64\n  InstallerType: msix\n  InstallerUrl: https://c.example/t.msix\n  InstallerSha256: " + sha + "\n").PickInstaller("x64"); err != nil || !in.IsMSIX() {
+		t.Errorf("msix: %v %+v", err, in)
+	}
+	// Nothing offpatch knows.
+	_, err = parse("Installers:\n- Architecture: x64\n  InstallerType: pwa\n  InstallerUrl: https://c.example/t\n  InstallerSha256: " + sha + "\n").PickInstaller("x64")
+	if err == nil || !strings.Contains(err.Error(), "has no supported installer for x64 (only pwa)") {
+		t.Errorf("pwa: %v", err)
+	}
+	// An MSIX without a SHA-256 says why.
+	_, err = parse("Installers:\n- Architecture: x64\n  InstallerType: msix\n  InstallerUrl: https://c.example/t.msix\n").PickInstaller("x64")
+	if err == nil || !strings.Contains(err.Error(), "is not importable: "+intel.ReasonMsixNoSHA) {
+		t.Errorf("msix without sha: %v", err)
 	}
 	// Installer-level switches and codes override the root.
 	m := parse("InstallerType: exe\nInstallerSwitches:\n  Silent: --root\nExpectedReturnCodes:\n- InstallerReturnCode: 5\n  ReturnResponse: installInProgress\n" +

@@ -23,7 +23,8 @@ export type Bundle = {
 
 export type PackageState = "quarantined" | "approved" | "rejected" | "revoked";
 export type PackageKind = "msu" | "msi" | "deb" | "rpm" | "pkg" | "agent"
-  | "exe"; // EXE contract: signed vendor EXE installer (Inno Setup / Nullsoft / WiX Burn / plain EXE)
+  | "exe" // EXE contract: signed vendor EXE installer (Inno Setup / Nullsoft / WiX Burn / plain EXE)
+  | "portable" | "msix"; // app formats (agents 0.10.0+): portable app copied to Program Files; MSIX provisioned for all users
 /** EXE contract: installer technology of an exe-kind package (winget InstallerType). */
 export type ExeInstallerType = "exe" | "inno" | "nullsoft" | "burn";
 /** EXE contract: manifest.ExeInstall (present only on kind "exe"). */
@@ -35,8 +36,15 @@ export type ExeInstall = {
   signer: string; // Authenticode subject CN that pmctl verified
   detect: { display_name: string; display_version?: string; product_code?: string; publisher?: string };
   uninstall: { quiet_uninstall: boolean }; // false = rollback not supported
-  scope: "machine";
+  scope: "machine" | "user"; // user: per-user installer, run in each signed-in user's session (agents 0.10.0+)
 };
+/** App formats (agents 0.10.0+): manifest.Archive, manifest.Portable, manifest.Msix. */
+export type ArchiveBlock = { format: "zip"; entry: string; files: { path: string; size: number; sha256: string }[] };
+export type PortableBlock = {
+  folder: string; command: string; signer: string; arp_key: string;
+  display_name: string; display_version: string; publisher?: string; shortcut?: string;
+};
+export type MsixBlock = { package_family_name: string; name: string; publisher: string; version: string; bundle?: boolean; signer?: string };
 export type Approval = { by: string; reason: string; at: string };
 export type Package = {
   package_id: string; bundle_id: string; title: string; vendor: string;
@@ -54,6 +62,9 @@ export type Package = {
   rollback_unsupported: string;
   // EXE contract (assumed server field: store.Package gains `exe` from the manifest, omitted for other kinds)
   exe?: ExeInstall | null;
+  archive?: ArchiveBlock | null;
+  portable?: PortableBlock | null;
+  msix?: MsixBlock | null;
 };
 
 export type EndpointStatus = "compliant" | "noncompliant" | "pending_reboot" | "failed" | "exception" | "stale" | "offline" | "retired"

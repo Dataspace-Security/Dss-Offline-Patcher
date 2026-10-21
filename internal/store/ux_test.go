@@ -22,9 +22,10 @@ func addPackage(t *testing.T, s *Store, p Package) {
 		p.Severity = "important"
 	}
 	now := s.now()
-	if _, err := s.db.Exec(`INSERT INTO packages(`+packageCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := s.db.Exec(`INSERT INTO packages(`+packageCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.PackageID, "b-1", p.PackageID, "Vendor", p.Kind, p.Version, p.KB, p.ProductCode, p.Severity, "2026-10-01", mustJSON(nonNil(p.Supersedes)),
-		mustJSON(p.Applicability), "f.bin", 1, strings.Repeat("a", 63)+string(rune('a'+len(p.PackageID)%6)), "", `{}`, "", p.State, "", "", now, now, p.PackageName, "[]", "", p.ExpectedUBR, exeJSON(p.Exe)); err != nil {
+		mustJSON(p.Applicability), "f.bin", 1, strings.Repeat("a", 63)+string(rune('a'+len(p.PackageID)%6)), "", `{}`, "", p.State, "", "", now, now, p.PackageName, "[]", "", p.ExpectedUBR, exeJSON(p.Exe),
+		formatsJSON(manifest.Package{Archive: p.Archive, Portable: p.Portable, Msix: p.Msix})); err != nil {
 		t.Fatal(err)
 	}
 }

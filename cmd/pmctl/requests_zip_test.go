@@ -57,8 +57,10 @@ func serveZipApp(t *testing.T, srv *acquiretest.Server, id, version, head string
 // Apps whose winget installer is a zip: the MSI or EXE named by
 // NestedInstallerFiles is extracted and packaged on its own (ProductCode
 // read from it, signature checked on it, provenance naming the zip); a
-// setup.exe that needs the zip's other files, a portable app and a zip
-// without the named file are unsupported with a clear reason.
+// setup.exe that needs the zip's other files (Acrobat) and a portable app
+// become archive packages (the verified zip, every file listed with its
+// SHA-256) in a bundle of their own; a zip without the named file is
+// unsupported with a clear reason.
 func TestRequestZipInstallers(t *testing.T) {
 	stubAuthenticode(t)
 	stubExeVerify(t, "Contoso Ltd")
@@ -99,19 +101,45 @@ func TestRequestZipInstallers(t *testing.T) {
 	rep := runRequests(t, e)
 	checkItems(t, rep.Items, "acq-request-zip", map[string][2]string{
 		"Contoso.ZipMsi": {"fetched", ""}, "Contoso.ZipExe": {"fetched", ""},
-		"Contoso.Portable":   {"unsupported", "zip with a portable app (no installer)"},
+		"Contoso.Portable":   {"fetched", ""},
 		"Contoso.ZipMissing": {"unsupported", "the zip cannot be used: the zip has no Tool.msi"},
-		"Adobe.Acrobat.Pro":  {"unsupported", acquire.ReasonZipSiblings},
+		"Adobe.Acrobat.Pro":  {"fetched", ""},
 	})
-	if w := strings.Join(rep.Warnings, "\n"); !strings.Contains(w, "Adobe Acrobat/setup.exe in the zip") || !strings.Contains(w, "AcroPro.msi") {
-		t.Errorf("Acrobat warning does not name the files: %s", w)
-	}
 
 	pkgs := map[string]manifest.Package{}
+	bundleOf := map[string]string{}
 	for _, m := range e.bundles() {
 		for _, p := range m.Packages {
 			pkgs[p.PackageID] = p
+			bundleOf[p.PackageID] = m.BundleID
 		}
+	}
+	// Acrobat: an archive package whose payload is the verified zip.
+	acroSum := sha256.Sum256(acroZip)
+	ac, ok := pkgs["Adobe.Acrobat.Pro-25.001.20756"]
+	if !ok || ac.Kind != manifest.KindExe || ac.Archive == nil || ac.Archive.Entry != "Adobe Acrobat/setup.exe" || len(ac.Archive.Files) != 5 ||
+		ac.File.SHA256 != hex.EncodeToString(acroSum[:]) || !strings.HasSuffix(ac.File.Name, ".zip") || ac.Exe.Signer != "Contoso Ltd" || ac.Exe.Scope != manifest.ExeScopeMachine {
+		t.Fatalf("Acrobat archive package: %+v %+v", ac, ac.Archive)
+	}
+	for _, f := range ac.Archive.Files {
+		if f.Path == "Adobe Acrobat/AcroPro.msi" {
+			if s := sha256.Sum256([]byte(msiBody)); f.SHA256 != hex.EncodeToString(s[:]) || f.Size != int64(len(msiBody)) {
+				t.Errorf("AcroPro.msi listed as %+v", f)
+			}
+		}
+	}
+	// The portable app: the zip, installed by copying its files.
+	po, ok := pkgs["Contoso.Portable-1.0.0"]
+	if !ok || po.Kind != manifest.KindPortable || po.Portable == nil || po.Archive == nil || po.Portable.Command != "tool.exe" ||
+		po.Portable.Folder != "Contoso.Portable" || po.Portable.ARPKey != "DSSPatcher.Contoso.Portable" || po.Portable.Signer != "Contoso Ltd" ||
+		po.Portable.DisplayVersion != "1.0.0" || po.PackageName != po.Portable.DisplayName {
+		t.Fatalf("portable package: %+v %+v", po, po.Portable)
+	}
+	// Agents parse manifests strictly: the app formats travel apart from
+	// EXE (agents 0.9.0+) and plain packages.
+	if bundleOf["Adobe.Acrobat.Pro-25.001.20756"] != bundleOf["Contoso.Portable-1.0.0"] ||
+		bundleOf["Adobe.Acrobat.Pro-25.001.20756"] == bundleOf["Contoso.ZipExe-2.0.0"] || bundleOf["Contoso.ZipExe-2.0.0"] == bundleOf["Contoso.ZipMsi-1.2.0"] {
+		t.Errorf("bundles mix generations: %v", bundleOf)
 	}
 	msiSum, exeSum := sha256.Sum256([]byte(msiBody)), sha256.Sum256([]byte(exeBody))
 	zm, ok := pkgs["Contoso.ZipMsi-1.2.0"]
@@ -147,10 +175,13 @@ func TestRequestZipInstallers(t *testing.T) {
 	if found == 0 {
 		t.Errorf("no spec entry for the zip EXE in %v", specs)
 	}
-	// Neither the zips nor the extraction directories are left behind.
+	// Neither the zips of extracted installers nor the extraction
+	// directories are left behind (archive payloads are the zips).
 	left, _ := filepath.Glob(filepath.Join(e.dir, "work", "downloads", "*"))
 	for _, p := range left {
-		if strings.HasSuffix(p, ".zip") || strings.Contains(filepath.Base(p), ".unzip-") {
+		b := filepath.Base(p)
+		if strings.HasSuffix(p, ".zip") && !strings.HasPrefix(b, "Adobe.Acrobat.Pro-") && !strings.HasPrefix(b, "Contoso.Portable-") ||
+			strings.Contains(b, ".unzip-") || strings.Contains(b, ".tree-") {
 			t.Errorf("left in downloads: %s", p)
 		}
 	}

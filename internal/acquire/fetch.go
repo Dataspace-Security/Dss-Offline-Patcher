@@ -415,6 +415,11 @@ type FetchURLOptions struct {
 	Verified string
 	// Exe: the EXE install block (Kind "exe" only).
 	Exe *manifest.ExeInstall
+	// Archive, Portable, Msix: the app-format blocks (formats.go). With
+	// Archive, FileName is the zip (FromZip set: already verified on disk).
+	Archive  *manifest.Archive
+	Portable *manifest.Portable
+	Msix     *manifest.Msix
 	// VerifyPayload, if set, runs on the downloaded, hash-checked file
 	// before the spec entry is written (e.g. the Authenticode check of an
 	// EXE installer). An error leaves the spec unchanged.
@@ -492,6 +497,7 @@ func FetchURL(ctx context.Context, o FetchURLOptions) (*FetchResult, error) {
 		Supersedes:    filterKBs(o.Supersedes, o.KB),
 		Applicability: manifest.Applicability{OS: osForKind(o.Kind, o.OS), Arch: o.Arch, MinBuild: o.MinBuild, MaxBuild: o.MaxBuild},
 		SourceURL:     o.URL, Path: path, Exe: o.Exe, VendorSignature: o.VendorSignature,
+		Archive: o.Archive, Portable: o.Portable, Msix: o.Msix,
 	}
 	// Validate metadata before spending bandwidth.
 	if err := ValidateEntry(e, 1, o.SHA256); err != nil {

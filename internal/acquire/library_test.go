@@ -121,8 +121,10 @@ func TestLibraryImportable(t *testing.T) {
 		{[]intel.ResolvedInstaller{in("arm64", "msi")}, nil, "yes", "MSI installer (arm64)"}, // nothing installed: any arch
 		{[]intel.ResolvedInstaller{in("arm64", "msi"), in("x64", "inno")}, []string{"x64"}, "yes", "EXE installer (inno)"},
 		{[]intel.ResolvedInstaller{in("x64", "exe")}, []string{"x64"}, "no", "EXE installer without a documented silent switch"},
-		{[]intel.ResolvedInstaller{{Arch: "x64", Type: "burn", URL: "https://x/y", SHA256: sha, Scope: "user"}}, []string{"x64"}, "no", "installs per user only"},
-		{[]intel.ResolvedInstaller{in("x64", "msix"), in("x64", "zip")}, []string{"x64"}, "no", "no MSI or EXE installer (msix, zip)"},
+		{[]intel.ResolvedInstaller{{Arch: "x64", Type: "burn", URL: "https://x/y", SHA256: sha, Scope: "user"}}, []string{"x64"}, "yes", "per-user installer (installs for signed-in users) (burn)"},
+		{[]intel.ResolvedInstaller{in("x64", "msix"), in("x64", "zip")}, []string{"x64"}, "yes", "MSIX package (provisioned for all users)"},
+		{[]intel.ResolvedInstaller{in("x64", "pwa"), in("x64", "zip")}, []string{"x64"}, "no", "no supported installer (pwa, zip)"},
+		{[]intel.ResolvedInstaller{in("x64", "portable")}, []string{"x64"}, "yes", "portable app (copied to Program Files)"},
 		{[]intel.ResolvedInstaller{in("x86", "exe")}, []string{"arm64"}, "no", "no installer for arm64 (only x86)"},
 		{nil, nil, "no", "no installers listed in the winget manifest"},
 	}

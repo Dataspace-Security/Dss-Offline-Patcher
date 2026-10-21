@@ -78,11 +78,9 @@ ManifestType: installer
 	if in, err := m.PickInstaller("arm64"); err != nil || in.ZipPath != "" || in.InstallerType != "msi" {
 		t.Errorf("arm64: %v %+v", err, in)
 	}
-	// x86 has only a portable zip.
-	_, err = m.PickInstaller("x86")
-	var un *UnsupportedError
-	if !errors.As(err, &un) || !strings.Contains(un.Reason, "is not importable: zip with a portable app (no installer)") {
-		t.Errorf("x86 portable: %v", err)
+	// x86 has only a portable zip: a portable app (agents 0.10.0+).
+	if in, err := m.PickInstaller("x86"); err != nil || !in.IsPortable() || in.ZipPath != "tool.exe" || in.ZipAlias != "tool" {
+		t.Errorf("x86 portable: %v %+v", err, in)
 	}
 }
 

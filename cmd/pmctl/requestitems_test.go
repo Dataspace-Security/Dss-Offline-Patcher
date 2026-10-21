@@ -182,6 +182,7 @@ func TestPickMSIReason(t *testing.T) {
 		"Foo 1.0: installer URL \"http://x\" is not https":                                                         "the winget installer URL is not HTTPS",
 		"Foo 1.0: manifest has no valid InstallerSha256":                                                           "the winget manifest has no valid SHA-256 for the installer",
 		"Foo 1.0 has no MSI or EXE installer for x86 (only msix, zip)":                                             "no MSI or EXE installer for x86 in winget (only msix, zip)",
+		"Foo 1.0 has no supported installer for x86 (only pwa)":                                                    "no supported installer for x86 in winget (only pwa)",
 		"Foo 1.0: EXE installer (inno) for x86 is not importable: installs per user only":                          "installs per user only (winget EXE installer (inno) for x86)",
 		"Foo 1.0: EXE installer (exe) for x86 is not importable: EXE installer without a documented silent switch": "EXE installer without a documented silent switch (winget EXE installer (exe) for x86)",
 	} {

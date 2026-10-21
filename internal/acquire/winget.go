@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strings"
 
-	"offpatch/internal/intel"
 	"offpatch/internal/manifest"
 )
 
@@ -57,13 +56,21 @@ type WingetInstaller struct {
 	ReleaseDate         string
 	ARP                 []WingetARPEntry
 	// NestedInstallerFiles: the RelativeFilePath of each file named in the
-	// zip (PortableCommandAlias is ignored), as the manifest writes it.
+	// zip, as the manifest writes it; NestedAliases their
+	// PortableCommandAlias ("" when none), index for index.
 	NestedInstallerFiles []string
+	NestedAliases        []string
+	// Commands: the manifest's Commands (portable apps: the command names).
+	Commands []string
+	// PackageFamilyName: MSIX/APPX installers (Name_PublisherId).
+	PackageFamilyName string
 	// ZipPath: set by the pickers (zipped) when the installer offpatch
 	// takes is inside the zip at URL: its RelativeFilePath with forward
-	// slashes. InstallerType is then the nested type; URL and SHA256 are
-	// the zip's.
+	// slashes (for a portable app, the first file the manifest names).
+	// InstallerType is then the nested type; URL and SHA256 are the zip's.
 	ZipPath string
+	// ZipAlias: the PortableCommandAlias of ZipPath ("" when none).
+	ZipAlias string
 	// EXE installers (winget_exe.go): switches, extra success codes,
 	// ExpectedReturnCodes and the OS architectures the entry is not for.
 	Switches        WingetSwitches
@@ -177,7 +184,8 @@ func ParseWingetManifest(b []byte) (*WingetManifest, error) {
 	}
 	def := WingetInstaller{InstallerType: str(root, "InstallerType"), NestedInstallerType: str(root, "NestedInstallerType"),
 		Scope: str(root, "Scope"), Locale: str(root, "InstallerLocale"), ProductCode: str(root, "ProductCode"),
-		ReleaseDate: str(root, "ReleaseDate"), ARP: arpEntries(root), NestedInstallerFiles: nestedFiles(root)}
+		ReleaseDate: str(root, "ReleaseDate"), ARP: arpEntries(root), NestedInstallerFiles: nestedFiles(root, "RelativeFilePath"),
+		NestedAliases: nestedFiles(root, "PortableCommandAlias"), Commands: strList(root, "Commands"), PackageFamilyName: str(root, "PackageFamilyName")}
 	var err2 error
 	if def.Switches, def.SuccessCodes, def.ReturnCodes, def.UnsupportedArch, err2 = exeFields(root); err2 != nil {
 		return nil, err2
@@ -196,7 +204,8 @@ func ParseWingetManifest(b []byte) (*WingetManifest, error) {
 		in.URL = str(im, "InstallerUrl")
 		in.SHA256 = strings.ToLower(str(im, "InstallerSha256"))
 		for f, dst := range map[string]*string{"InstallerType": &in.InstallerType, "NestedInstallerType": &in.NestedInstallerType,
-			"Scope": &in.Scope, "InstallerLocale": &in.Locale, "ProductCode": &in.ProductCode, "ReleaseDate": &in.ReleaseDate} {
+			"Scope": &in.Scope, "InstallerLocale": &in.Locale, "ProductCode": &in.ProductCode, "ReleaseDate": &in.ReleaseDate,
+			"PackageFamilyName": &in.PackageFamilyName} {
 			if s := str(im, f); s != "" {
 				*dst = s
 			}
@@ -204,8 +213,11 @@ func ParseWingetManifest(b []byte) (*WingetManifest, error) {
 		if a := arpEntries(im); len(a) > 0 {
 			in.ARP = a
 		}
-		if nf := nestedFiles(im); nf != nil {
-			in.NestedInstallerFiles = nf
+		if nf := nestedFiles(im, "RelativeFilePath"); nf != nil {
+			in.NestedInstallerFiles, in.NestedAliases = nf, nestedFiles(im, "PortableCommandAlias")
+		}
+		if c := strList(im, "Commands"); c != nil {
+			in.Commands = c
 		}
 		sw, succ, codes, unsup, err := exeFields(im)
 		if err != nil {
@@ -241,8 +253,10 @@ func str(m map[string]any, k string) string {
 	return strings.TrimSpace(s)
 }
 
-// nestedFiles reads NestedInstallerFiles (nil when the key is absent).
-func nestedFiles(m map[string]any) []string {
+// nestedFiles reads one field of every NestedInstallerFiles entry that has
+// a RelativeFilePath (nil when the key is absent): field RelativeFilePath
+// gives the files, PortableCommandAlias their aliases ("" when none).
+func nestedFiles(m map[string]any, field string) []string {
 	list, ok := m["NestedInstallerFiles"].([]any)
 	if !ok {
 		return nil
@@ -251,8 +265,23 @@ func nestedFiles(m map[string]any) []string {
 	for _, it := range list {
 		if e, ok := it.(map[string]any); ok {
 			if p := str(e, "RelativeFilePath"); p != "" {
-				out = append(out, p)
+				out = append(out, str(e, field))
 			}
+		}
+	}
+	return out
+}
+
+// strList reads a list of strings (nil when the key is absent).
+func strList(m map[string]any, k string) []string {
+	list, ok := m[k].([]any)
+	if !ok {
+		return nil
+	}
+	out := []string{}
+	for _, v := range list {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+			out = append(out, strings.TrimSpace(s))
 		}
 	}
 	return out
@@ -345,16 +374,22 @@ func (m *WingetManifest) PickMSI(arch string) (WingetInstaller, error) {
 // zipped returns the installers with each zip that names one MSI or EXE
 // installer (NestedInstallerType msi, wix, exe, inno, nullsoft or burn,
 // exactly one NestedInstallerFiles entry) turned into that installer:
-// InstallerType the nested type, ZipPath the file in the zip. Other zips
-// are returned as they are ("zip", with NestedInstallerType kept), so the
+// InstallerType the nested type, ZipPath the file in the zip. A zip of a
+// portable app (NestedInstallerType portable, one or more files) becomes
+// InstallerType "portable" with ZipPath its first file. Other zips are
+// returned as they are ("zip", with NestedInstallerType kept), so the
 // pickers report them by type.
 func (m *WingetManifest) zipped() []WingetInstaller {
 	out := make([]WingetInstaller, 0, len(m.Installers))
 	for _, in := range m.Installers {
 		nt := in.NestedInstallerType
-		if in.InstallerType == "zip" && (msiTypes[nt] || manifest.IsExeInstallerType(nt)) && len(in.NestedInstallerFiles) == 1 {
+		one := len(in.NestedInstallerFiles) == 1
+		if in.InstallerType == "zip" && ((msiTypes[nt] || manifest.IsExeInstallerType(nt)) && one || nt == "portable" && len(in.NestedInstallerFiles) > 0) {
 			if p, err := CleanZipPath(in.NestedInstallerFiles[0]); err == nil {
 				in.InstallerType, in.ZipPath = nt, p
+				if len(in.NestedAliases) > 0 {
+					in.ZipAlias = in.NestedAliases[0]
+				}
 			}
 		}
 		out = append(out, in)
@@ -362,8 +397,8 @@ func (m *WingetManifest) zipped() []WingetInstaller {
 	return out
 }
 
-// zipUnsupported: why a zip installer for arch cannot be imported (a
-// portable app, or not one named installer), or "" if there is none.
+// zipUnsupported: why a zip installer for arch cannot be imported (not one
+// named installer), or "" if there is none.
 func (m *WingetManifest) zipUnsupported(arch string) string {
 	for _, in := range m.zipped() {
 		if in.InstallerType != "zip" || !exeArchFits(in, arch) && !(arch == "x64" && in.Architecture == "x86") {
@@ -372,7 +407,7 @@ func (m *WingetManifest) zipUnsupported(arch string) string {
 		nt := in.NestedInstallerType
 		switch {
 		case nt == "portable":
-			return intel.ReasonZipPortable
+			return "zip with a portable app whose program path is unsafe or missing (NestedInstallerFiles)"
 		case msiTypes[nt] || manifest.IsExeInstallerType(nt):
 			return "zip that does not name exactly one installer file (NestedInstallerFiles)"
 		}
