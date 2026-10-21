@@ -53,6 +53,10 @@ func RollbackUnsupported(p Package) string {
 // whether a rollback has something to remove. deb/rpm must be at exactly
 // p's version: removing a newer version would not undo this package.
 func rollbackPresent(inv []InventoryItem, p Package) (bool, string) {
+	// An app can have several entries (64- and 32-bit registry views, a
+	// per-user copy): one at this version is enough, so a different version
+	// is only the answer once no entry matches.
+	other := ""
 	for _, it := range inv {
 		switch {
 		case p.Kind == "msu" && it.Kind == "kb" && strings.EqualFold(it.ID, p.KB):
@@ -64,13 +68,16 @@ func rollbackPresent(inv []InventoryItem, p Package) (bool, string) {
 			if want := exeWantVersion(p); want == "" || it.Version == "" || (VersionAtLeast(it.Version, want) && VersionAtLeast(want, it.Version)) {
 				return true, "inventory shows " + it.Name + " " + it.Version
 			}
-			return false, fmt.Sprintf("installed version %s is not %s; nothing of this package to roll back", it.Version, exeWantVersion(p))
+			other = fmt.Sprintf("installed version %s is not %s; nothing of this package to roll back", it.Version, exeWantVersion(p))
 		case (p.Kind == "deb" || p.Kind == "rpm") && it.Kind == "pkg" && it.ID == p.PackageName:
 			if VersionAtLeast(it.Version, p.Version) && VersionAtLeast(p.Version, it.Version) {
 				return true, "inventory shows " + p.PackageName + " " + it.Version
 			}
-			return false, fmt.Sprintf("installed version %s is not %s; nothing of this package to roll back", it.Version, p.Version)
+			other = fmt.Sprintf("installed version %s is not %s; nothing of this package to roll back", it.Version, p.Version)
 		}
+	}
+	if other != "" {
+		return false, other
 	}
 	return false, "not installed; nothing to roll back"
 }

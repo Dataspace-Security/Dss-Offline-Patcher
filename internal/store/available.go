@@ -43,57 +43,16 @@ func identity(p Package) string {
 	return p.Kind + ":" + p.PackageName
 }
 
-// needs decides whether endpoint e (with inventory inv) needs package p.
-// Third-party apps are offered as UPDATES only: an app that is not installed
-// at all is never "needed" (we don't push Chrome to machines without it).
-func needs(p Package, e Endpoint, inv []InventoryItem, sup map[string]bool) (bool, string, string) {
-	if ok, _ := applicable(p, e); !ok {
+// needs decides whether endpoint e (with inventory inv) needs package p
+// (classify: the verdict every caller shares). Third-party apps are offered
+// as UPDATES only: an app that is not installed at all is never "needed"
+// (we don't push Chrome to machines without it).
+func needs(p Package, e Endpoint, os OSFacts, inv []InventoryItem, sup map[string]bool) (bool, string, string) {
+	v := classify(p, e, os, inv, sup)
+	if v.Presence != PresenceNeeded {
 		return false, "", ""
 	}
-	if ok, _, _ := presentOn(inv, osFacts(e.OSVersion, e.Build), p, sup); ok {
-		return false, "", ""
-	}
-	if appStoreManaged(inv, p) {
-		return false, "", ""
-	}
-	switch p.Kind {
-	case "msu":
-		return true, "", "security update not installed"
-	case "agent":
-		for _, it := range inv {
-			if it.Kind == "agent" {
-				return true, it.Version, "agent upgrade"
-			}
-		}
-		return true, "", "agent upgrade"
-	case "deb", "rpm", "pkg":
-		for _, it := range inv {
-			if (it.Kind == "pkg" || (it.Kind == "app" && p.Kind == "pkg")) && it.ID == p.PackageName && !VersionAtLeast(it.Version, p.Version) {
-				return true, it.Version, "update available"
-			}
-		}
-	case "exe":
-		for _, it := range inv {
-			if exeAppMatch(p, it) && it.Version != "" && !VersionAtLeast(it.Version, exeWantVersion(p)) {
-				return true, it.Version, "update available"
-			}
-		}
-	case "msi":
-		if p.PackageName == "" && p.ProductCode == "" {
-			return false, "", ""
-		}
-		for _, it := range inv {
-			if it.Kind != "product" || it.Version == "" || p.Version == "" || VersionAtLeast(it.Version, p.Version) {
-				continue
-			}
-			// Same app by name, or an older version under the same product
-			// code (MSIs such as Chrome's keep it across versions).
-			if (p.PackageName != "" && SameAppName(it.Name, p.PackageName)) || (p.ProductCode != "" && strings.EqualFold(it.ID, p.ProductCode)) {
-				return true, it.Version, "update available"
-			}
-		}
-	}
-	return false, "", ""
+	return true, v.Have, v.Why
 }
 
 // catalogForNeeds: approved + quarantined packages, minus any superseded by
@@ -163,7 +122,7 @@ func (s *Store) AvailableFor(ctx context.Context, endpointID string) ([]Availabl
 		if err != nil {
 			return nil, err
 		}
-		ok, have, why := needs(p, e, e.inventory, sup)
+		ok, have, why := needs(p, e, s.osFactsFor(e.OSVersion, e.Build, e.Arch), e.inventory, sup)
 		if !ok {
 			continue
 		}
@@ -197,7 +156,9 @@ type PackageNeed struct {
 	NotInstalledIDs []string `json:"not_installed_ids"`
 	// Targets of install deployments and active exceptions, per endpoint
 	// (may overlap with needed).
-	Deploying          int    `json:"deploying"`
+	Deploying int `json:"deploying"`
+	// RestartNeeded: of those deploying, installed and waiting for a restart.
+	RestartNeeded      int    `json:"restart_needed"`
 	Verified           int    `json:"verified"`
 	Failed             int    `json:"failed"`
 	Exception          int    `json:"exception"`
@@ -254,22 +215,24 @@ func (s *Store) NeedsFor(ctx context.Context, eps []Endpoint) (map[string]Packag
 				pn.Verified++
 			case st.Deploying:
 				pn.Deploying++
+				if st.RestartNeeded {
+					pn.RestartNeeded++
+				}
 			case st.Failed:
 				pn.Failed++
 			}
 			if e.InventoryAt == "" {
 				continue
 			}
-			need, _, _ := needs(p, e, e.inventory, sup)
-			switch {
-			case need:
+			switch classify(p, e, s.osFactsFor(e.OSVersion, e.Build, e.Arch), e.inventory, sup).Presence {
+			case PresenceNeeded:
 				pn.Needed++
 				pn.Endpoints = append(pn.Endpoints, e.EndpointID)
 				pn.Hostnames = append(pn.Hostnames, e.Hostname)
-			case !appInstalled(e.inventory, p):
+			case PresenceNotInstalled:
 				pn.NotInstalled++
 				pn.NotInstalledIDs = append(pn.NotInstalledIDs, e.EndpointID)
-			default:
+			default: // present, or kept current by the Mac App Store
 				pn.UpToDate++
 				pn.UpToDateIDs = append(pn.UpToDateIDs, e.EndpointID)
 			}
@@ -300,33 +263,9 @@ const notInstalledDetail = "app not installed: third-party packages update an in
 // packages are not apps and always count as installed.
 func appInstalled(inv []InventoryItem, p Package) bool {
 	switch p.Kind {
-	case "msi":
+	case "msi", "exe", "deb", "rpm", "pkg":
 		for _, it := range inv {
-			if it.Kind != "product" {
-				continue
-			}
-			if (p.ProductCode != "" && strings.EqualFold(it.ID, p.ProductCode)) || (p.PackageName != "" && SameAppName(it.Name, p.PackageName)) {
-				return true
-			}
-		}
-		return false
-	case "exe":
-		for _, it := range inv {
-			if exeAppMatch(p, it) {
-				return true
-			}
-		}
-		return false
-	case "deb", "rpm":
-		for _, it := range inv {
-			if it.Kind == "pkg" && it.ID == p.PackageName {
-				return true
-			}
-		}
-		return false
-	case "pkg":
-		for _, it := range inv {
-			if (it.Kind == "pkg" || it.Kind == "app") && it.ID == p.PackageName {
+			if appItemMatch(p, it) {
 				return true
 			}
 		}

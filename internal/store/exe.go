@@ -12,9 +12,12 @@ import (
 // 0.9.0 and later. The installed app is recognised in Apps & features the
 // way the agent does it (internal/agent/exe.go exeAppMatch): by its ARP key
 // (exe.detect.product_code) when known, else by display name (SameAppName)
-// with the same architecture tag, so the x86 and x64 builds of one product
-// (the VC++ redistributables) never satisfy each other. Per-user ARP
-// entries do not count: EXE packages install per machine.
+// with a compatible architecture tag (archCompatible), so the x86 and x64
+// builds of one product (the VC++ redistributables) never satisfy each
+// other, while a detection name without an architecture ("7-Zip") still
+// finds "7-Zip 24.08 (x64)" (the catalog links such packages the same way,
+// catalogIndex.byNameFor). Per-user ARP entries do not count: EXE packages
+// install per machine.
 
 // RollbackNoQuietUninstall is why an EXE package without a known silent
 // uninstall cannot be rolled back.
@@ -41,12 +44,15 @@ func exeAppMatch(p Package, it InventoryItem) bool {
 	}
 	d := exeDetect(p)
 	if d.ProductCode != "" && strings.EqualFold(it.ID, d.ProductCode) {
-		return true
+		// An ARP key name is not unique across the 64- and 32-bit registry
+		// views (both Notepad++ builds use "Notepad++"): the architecture
+		// the names mention must still agree.
+		return strings.TrimSpace(it.Name) == "" || strings.TrimSpace(d.DisplayName) == "" || archCompatible(it.Name, d.DisplayName)
 	}
 	if strings.TrimSpace(d.DisplayName) == "" || strings.TrimSpace(it.Name) == "" {
 		return false
 	}
-	return SameAppName(it.Name, d.DisplayName) && ExeArchTag(it.Name) == ExeArchTag(d.DisplayName)
+	return SameAppName(it.Name, d.DisplayName) && archCompatible(it.Name, d.DisplayName)
 }
 
 // exeDetect is the package's detection block (package_name stands in for

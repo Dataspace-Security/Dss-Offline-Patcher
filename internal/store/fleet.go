@@ -27,6 +27,10 @@ type TargetStatus struct {
 	Failed    bool // failed / lost_after_install in a deployment that is not cancelled
 	Deploying bool // pending..pending_reboot (or deferred) in an active or paused deployment
 	Verified  bool // verified in any install deployment
+	// RestartNeeded: installed, waiting for the restart the install asked
+	// for (pending_reboot in an active or paused deployment). Deploying is
+	// set too; the console shows "restart needed", not "being patched".
+	RestartNeeded bool
 }
 
 // FleetTargetIndex is a snapshot of install targets and active exceptions,
@@ -82,6 +86,9 @@ func (s *Store) FleetTargets(ctx context.Context) (*FleetTargetIndex, error) {
 			st.Failed = true
 		case deployingStates[ts] && live:
 			st.Deploying = true
+			if ts == "pending_reboot" {
+				st.RestartNeeded = true
+			}
 		}
 		m[eid] = st
 		if live {

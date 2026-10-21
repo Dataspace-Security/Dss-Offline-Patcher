@@ -36,7 +36,7 @@ func TestPresentInMSIVersion(t *testing.T) {
 	if ok, _ := presentIn(cur, p, nil); !ok {
 		t.Fatal("same version not counted as installed")
 	}
-	if need, from, _ := needs(p, Endpoint{OS: "windows", Arch: "x64"}, old, nil); !need || from != "155.0.8059.82" {
+	if need, from, _ := needs(p, Endpoint{OS: "windows", Arch: "x64"}, OSFacts{}, old, nil); !need || from != "155.0.8059.82" {
 		t.Fatalf("needs: %v %q", need, from)
 	}
 }

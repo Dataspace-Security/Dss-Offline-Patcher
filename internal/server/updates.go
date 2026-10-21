@@ -94,8 +94,21 @@ func (s *Server) intelIndex(ctx context.Context) (*intel.Index, *intake.IntelSum
 		}
 	}
 	ix, err := s.loadIntel()
+	hadIndex := s.intel.ix != nil
 	s.intel.generated, s.intel.ix, s.intel.err, s.intel.errAt = gen, ix, err, time.Now()
 	s.intel.fleet, s.intel.status = nil, nil
+	// The store proves a cumulative update by the endpoint's build revision
+	// when Windows no longer lists its KB: it needs the revision each KB
+	// brings, which the intelligence knows (also for packages imported
+	// without expected_ubr). Needs and fleet caches follow the change.
+	if err != nil {
+		s.store.SetUBRHint(nil)
+	} else {
+		s.store.SetUBRHint(ix.ReleaseUBR)
+	}
+	if err == nil || hadIndex {
+		s.store.Changed()
+	}
 	if err != nil {
 		s.log.Error("update intelligence unusable", "err", err)
 		sum.Error = err.Error()
@@ -151,6 +164,26 @@ type catalogIndex struct {
 	kbPkgs         map[string][]kbPackage // every package of a KB with its applicability
 	byCode, byName map[string]namedPackage
 	byID           map[string]catalogLink // every package by package_id (Library: pmctl's winget package ids)
+
+	// pkgs: every package by package_id. classify (nil in unit tests that
+	// build an index by hand) is the store's verdict for a package on an
+	// endpoint, so the fleet view never calls "needed" what a deployment
+	// would skip as already present, or "current" what it would install.
+	pkgs     map[string]store.Package
+	classify func(p store.Package, e store.Endpoint) store.Verdict
+}
+
+// verdict is the store's verdict for the linked package on e (ok false
+// without a link or a classifier).
+func (ci *catalogIndex) verdict(l *catalogLink, e store.Endpoint) (store.Package, store.Verdict, bool) {
+	if ci.classify == nil || l == nil {
+		return store.Package{}, store.Verdict{}, false
+	}
+	p, ok := ci.pkgs[l.PackageID]
+	if !ok {
+		return store.Package{}, store.Verdict{}, false
+	}
+	return p, ci.classify(p, e), true
 }
 
 // kbPackage is one Windows update package and the builds it applies to. One
@@ -171,16 +204,28 @@ func (s *Server) catalogIndex(ctx context.Context) (*catalogIndex, error) {
 	if err != nil {
 		return nil, err
 	}
-	ci := &catalogIndex{byKB: map[string]catalogLink{}, kbPkgs: map[string][]kbPackage{}, byCode: map[string]namedPackage{}, byName: map[string]namedPackage{}, byID: map[string]catalogLink{}}
+	return newCatalogIndex(pkgs, s.store), nil
+}
+
+// newCatalogIndex indexes pkgs; st (nil: intelligence alone decides) gives
+// the store's verdict per endpoint.
+func newCatalogIndex(pkgs []store.Package, st *store.Store) *catalogIndex {
+	ci := &catalogIndex{byKB: map[string]catalogLink{}, kbPkgs: map[string][]kbPackage{}, byCode: map[string]namedPackage{}, byName: map[string]namedPackage{}, byID: map[string]catalogLink{},
+		pkgs: map[string]store.Package{}}
 	// keep the newest version per product; on a tie, the approved one.
 	keep := func(m map[string]namedPackage, k string, p store.Package) {
 		cur, ok := m[k]
-		if !ok || !store.VersionAtLeast(cur.version, p.Version) ||
-			(cur.version == p.Version && cur.link.State != "approved" && p.State == "approved") {
-			m[k] = namedPackage{link: catalogLink{PackageID: p.PackageID, State: p.State}, version: p.Version}
+		if v := store.AppWantVersion(p); !ok || !store.VersionAtLeast(cur.version, v) ||
+			(cur.version == v && cur.link.State != "approved" && p.State == "approved") {
+			m[k] = namedPackage{link: catalogLink{PackageID: p.PackageID, State: p.State}, version: store.AppWantVersion(p)}
 		}
 	}
+	if st != nil {
+		sup := store.SupersedingIndex(pkgs)
+		ci.classify = func(p store.Package, e store.Endpoint) store.Verdict { return st.Classify(p, e, sup(p.KB)) }
+	}
 	for _, p := range pkgs {
+		ci.pkgs[p.PackageID] = p
 		ci.byID[p.PackageID] = catalogLink{PackageID: p.PackageID, State: p.State}
 		if p.KB != "" {
 			if cur, ok := ci.byKB[strings.ToUpper(p.KB)]; !ok || cur.State != "approved" {
@@ -191,14 +236,19 @@ func (s *Server) catalogIndex(ctx context.Context) (*catalogIndex, error) {
 		if p.ProductCode != "" {
 			keep(ci.byCode, strings.ToLower(p.ProductCode), p)
 		}
-		if k := intel.Normalize(p.PackageName); (p.Kind == "msi" || p.Kind == "exe") && k != "" && p.Version != "" {
-			keep(ci.byName, nameKey(k, p.PackageName), p)
+		// EXE packages are found in Apps & features by their detection name.
+		name := p.PackageName
+		if p.Kind == "exe" && p.Exe != nil && strings.TrimSpace(p.Exe.Detect.DisplayName) != "" {
+			name = p.Exe.Detect.DisplayName
+		}
+		if k := intel.Normalize(name); (p.Kind == "msi" || p.Kind == "exe") && k != "" && p.Version != "" {
+			keep(ci.byName, nameKey(k, name), p)
 		}
 		if p.Kind == "exe" && p.Exe != nil && p.Exe.Detect.ProductCode != "" {
 			keep(ci.byCode, strings.ToLower(p.Exe.Detect.ProductCode), p) // the ARP key inventory reports as the id
 		}
 	}
-	return ci, nil
+	return ci
 }
 
 // nameKey keys the by-name index by normalized name and the architecture
@@ -218,7 +268,21 @@ func (ci *catalogIndex) byNameFor(normalized, installedName string) (namedPackag
 		return n, true
 	}
 	n, ok := ci.byName[normalized+"|"]
-	return n, ok
+	if ok || store.ExeArchTag(installedName) != "" {
+		return n, ok
+	}
+	// The installed name mentions no architecture ("Zoom Workplace") and
+	// the package's does ("Zoom Workplace (64-bit)"): the one package for
+	// a single architecture serves it (the store matches it the same way);
+	// several are ambiguous.
+	var found namedPackage
+	hits := 0
+	for _, tag := range []string{"x64", "x86", "arm64", "ia64"} {
+		if c, ok := ci.byName[normalized+"|"+tag]; ok {
+			found, hits = c, hits+1
+		}
+	}
+	return found, hits == 1
 }
 
 func (ci *catalogIndex) forOS(kb string) *catalogLink {
@@ -349,14 +413,22 @@ func (s *Server) endpointUpdates(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, err)
 			return
 		}
-		res := ix.Match(toIntelEndpoint(e.Endpoint, e.Inventory))
-		out.Current, out.Unmatched = res.Current, res.Unmatched
-		for _, u := range res.OS {
-			out.OS = append(out.OS, osUpdateView{OSUpdate: u, Catalog: ci.forOSAt(u.KB, e.Endpoint), Requested: refFor(refs, "os", u.KB)})
+		ep := e.Endpoint // loaded with its inventory (GetEndpoint)
+		res := ix.Match(toIntelEndpoint(ep, e.Inventory))
+		m := reconcile(ci, ep, res)
+		out.Current, out.Unmatched = len(m.curApps), res.Unmatched
+		for _, u := range m.os {
+			out.OS = append(out.OS, osUpdateView{OSUpdate: u.OSUpdate, Catalog: u.cat, Requested: refFor(refs, "os", u.KB)})
 		}
-		for _, u := range res.Apps {
+		for _, u := range m.apps {
 			imp, why := importableFor(ix, "app", u.AppID, u.LatestVersion, []string{strings.ToLower(e.Arch)})
-			out.Apps = append(out.Apps, appUpdateView{AppUpdate: u, Catalog: ci.forApp(u), Requested: refFor(refs, "app", u.AppID),
+			var cat *catalogLink
+			if u.pkgID != "" {
+				l := ci.byID[u.pkgID]
+				cat = &l
+			}
+			u.InstalledVersion = u.installed
+			out.Apps = append(out.Apps, appUpdateView{AppUpdate: u.AppUpdate, Catalog: cat, Requested: refFor(refs, "app", u.AppID),
 				Importable: imp, ImportableReason: why})
 		}
 	}
@@ -532,6 +604,101 @@ func (s *Server) cachedFleet(intelGen string) *fleetSnapshot {
 	return nil
 }
 
+// endpointMatch is one endpoint's intelligence result with the store's
+// verdict applied: where a catalog package is linked, the store (the rule
+// deployments and GET /api/packages-needs use) decides "needed" vs
+// "current". Both the fleet view and the endpoint's own update list use it.
+type endpointMatch struct {
+	os      []osNeed
+	curOS   []intel.WindowsRelease
+	apps    []appNeed
+	curApps []appCurrent
+}
+
+type osNeed struct {
+	intel.OSUpdate
+	cat *catalogLink // the package for the endpoint's build, nil if none
+}
+
+type appNeed struct {
+	intel.AppUpdate
+	rowCat    *catalogLink // the catalog link found for the update (row)
+	pkgID     string       // the package that serves this endpoint ("" = none)
+	installed string       // the version a deployment would update
+}
+
+type appCurrent struct {
+	intel.AppUpdate
+	cat *catalogLink
+}
+
+func reconcile(ci *catalogIndex, e store.Endpoint, res intel.Result) endpointMatch {
+	m := endpointMatch{curOS: append([]intel.WindowsRelease(nil), res.CurrentOS...)}
+	for _, o := range res.OS {
+		cat := ci.forOSAt(o.KB, e)
+		if _, v, ok := ci.verdict(cat, e); ok && v.Presence == store.PresencePresent {
+			// The catalog package is installed after all (a superseding KB,
+			// or the build revision proves it): not missing.
+			m.curOS = append(m.curOS, o.WindowsRelease)
+			continue
+		}
+		m.os = append(m.os, osNeed{o, cat})
+	}
+	for _, a := range res.Apps {
+		cat := ci.forApp(a)
+		n := appNeed{AppUpdate: a, rowCat: cat, installed: a.InstalledVersion}
+		if cat != nil {
+			n.pkgID = cat.PackageID
+		}
+		if p, v, ok := ci.verdict(cat, e); ok {
+			switch v.Presence {
+			case store.PresencePresent:
+				if store.VersionAtLeast(store.AppWantVersion(p), a.Target) {
+					// The package is installed and is what the intelligence
+					// calls current (versions written differently): current.
+					m.curApps = append(m.curApps, appCurrent{a, cat})
+					continue
+				}
+				n.pkgID = "" // the catalog only has an older version: it does not help
+			case store.PresenceNeeded:
+			default:
+				n.pkgID = "" // not for this machine (architecture, per-user install, ...)
+			}
+		}
+		m.apps = append(m.apps, n)
+	}
+	for _, a := range res.CurrentApps {
+		cat := ci.forCurrentApp(a)
+		if _, v, ok := ci.verdict(cat, e); ok && v.Presence == store.PresenceNeeded {
+			// A deployment of the catalog package would install it here (it
+			// is newer than what the machine runs, or the copy the
+			// intelligence saw is a per-user one an EXE package does not
+			// count): needed, as GET /api/packages-needs says.
+			have := v.Have
+			if have == "" {
+				have = a.InstalledVersion
+			}
+			m.apps = append(m.apps, appNeed{AppUpdate: a, rowCat: cat, pkgID: cat.PackageID, installed: have})
+			continue
+		}
+		m.curApps = append(m.curApps, appCurrent{a, cat})
+	}
+	return m
+}
+
+// needApp records that endpoint e needs app update a (installed: the
+// version it runs; pkgID: the catalog package that serves it, "" if none).
+func needApp(u *fleetUpdate, e store.Endpoint, a intel.AppUpdate, installed, pkgID string) {
+	u.arches[strings.ToLower(e.Arch)] = true
+	u.installed[acqrequest.Installed{ProductCode: a.ProductCode, Name: a.InstalledName, Version: a.InstalledVersion}] = true
+	u.Endpoints = append(u.Endpoints, fleetNeed{EndpointID: e.EndpointID, Hostname: e.Hostname, Installed: installed, PackageID: pkgID, arch: e.Arch, build: e.Build})
+}
+
+// buildFleet matches every endpoint against the intelligence. Where a
+// catalog package is linked, the store's verdict (store.Classify, the rule
+// deployments and GET /api/packages-needs use) has the last word on
+// "needed" vs "current", so Patches → Needed, the fleet status, Patch this
+// and acquisition requests agree with what a deployment would do.
 func buildFleet(ix *intel.Index, ci *catalogIndex, eps []store.Endpoint) *fleetSnapshot {
 	agg := map[string]*fleetUpdate{}
 	get := func(kind, key, name, latest string, cat *catalogLink) *fleetUpdate {
@@ -551,47 +718,39 @@ func buildFleet(ix *intel.Index, ci *catalogIndex, eps []store.Endpoint) *fleetS
 			continue
 		}
 		ie := toIntelEndpoint(e, e.InventoryItems())
-		res := ix.Match(ie)
+		m := reconcile(ci, e, ix.Match(ie))
 		support, last := ix.OSSupport(ie)
-		snap.perEP[e.EndpointID] = store.EndpointMissing{OS: len(res.OS), Apps: len(res.Apps), OSSupport: support, OSLastUpdate: last}
-		for _, o := range res.OS {
-			cat := ci.forOSAt(o.KB, e)
+		for _, o := range m.os {
 			u := get("os", o.KB, o.Title, o.KB, nil)
 			if u.releases == nil {
 				u.releases = map[string]intel.WindowsRelease{}
 			}
 			u.releases[releaseKey(o.Arch, o.Build)] = o.WindowsRelease
 			n := fleetNeed{EndpointID: e.EndpointID, Hostname: e.Hostname, Installed: e.OSVersion, arch: e.Arch, build: e.Build}
-			if cat != nil {
-				n.PackageID = cat.PackageID
+			if o.cat != nil {
+				n.PackageID = o.cat.PackageID
 			}
 			u.Endpoints = append(u.Endpoints, n)
 		}
-		for _, a := range res.Apps {
-			cat := ci.forApp(a)
-			u := get("app", a.AppID, a.Name, a.LatestVersion, cat)
-			u.arches[strings.ToLower(e.Arch)] = true
-			u.installed[acqrequest.Installed{ProductCode: a.ProductCode, Name: a.InstalledName, Version: a.InstalledVersion}] = true
-			n := fleetNeed{EndpointID: e.EndpointID, Hostname: e.Hostname, Installed: a.InstalledVersion, arch: e.Arch, build: e.Build}
-			if cat != nil {
-				n.PackageID = cat.PackageID
-			}
-			u.Endpoints = append(u.Endpoints, n)
+		for _, a := range m.apps {
+			needApp(get("app", a.AppID, a.Name, a.LatestVersion, a.rowCat), e, a.AppUpdate, a.installed, a.pkgID)
 		}
-		for _, w := range res.CurrentOS {
+		for _, w := range m.curOS {
 			u := get("os", w.KB, w.Title, w.KB, nil)
 			if u.currentCat == nil {
 				u.currentCat = ci.forOSAt(w.KB, e)
 			}
 			u.current = append(u.current, fleetNeed{EndpointID: e.EndpointID, Hostname: e.Hostname, Installed: e.OSVersion, arch: e.Arch})
 		}
-		for _, a := range res.CurrentApps {
+		for _, a := range m.curApps {
 			u := get("app", a.AppID, a.Name, a.LatestVersion, nil)
 			if u.currentCat == nil {
-				u.currentCat = ci.forCurrentApp(a)
+				u.currentCat = a.cat
 			}
 			u.current = append(u.current, fleetNeed{EndpointID: e.EndpointID, Hostname: e.Hostname, Installed: a.InstalledVersion, arch: e.Arch})
 		}
+		nOS, nApps := len(m.os), len(m.apps)
+		snap.perEP[e.EndpointID] = store.EndpointMissing{OS: nOS, Apps: nApps, OSSupport: support, OSLastUpdate: last}
 	}
 	snap.byKey = agg
 	for _, u := range agg {

@@ -46,7 +46,8 @@ type Store struct {
 	loginAudits  deniedAudits  // failed sign-ins per (account, source)
 	pwSlots      passwordSlots // concurrent password checks (authlimits.go)
 	mfaKey       mfaCipher
-	gen          atomic.Uint64 // Generation
+	gen          atomic.Uint64           // Generation
+	ubrHint      atomic.Pointer[UBRHint] // SetUBRHint
 }
 
 const schema = `

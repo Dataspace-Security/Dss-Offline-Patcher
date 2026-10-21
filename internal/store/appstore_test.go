@@ -14,10 +14,10 @@ func TestAppStoreAppsNotOffered(t *testing.T) {
 	e := Endpoint{OS: "macos", Arch: "arm64"}
 	direct := []InventoryItem{{Kind: "app", ID: "com.microsoft.Word", Version: "16.114"}}
 	store := []InventoryItem{{Kind: "app", ID: "com.microsoft.Word", Version: "16.114", Source: "appstore"}}
-	if ok, _, _ := needs(p, e, direct, nil); !ok {
+	if ok, _, _ := needs(p, e, OSFacts{}, direct, nil); !ok {
 		t.Fatal("directly installed older Word should need the update")
 	}
-	if ok, _, _ := needs(p, e, store, nil); ok {
+	if ok, _, _ := needs(p, e, OSFacts{}, store, nil); ok {
 		t.Fatal("App Store Word must not be offered a .pkg update")
 	}
 	if !appStoreManaged(store, p) || appStoreManaged(direct, p) {

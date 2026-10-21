@@ -269,7 +269,7 @@ export function topOutdatedApps(rows: FleetStatusRow[] | null | undefined, n = 1
     .filter((r) => r.kind === "app" && r.outdated + r.failed > 0)
     .map((r) => ({
       key: r.key, name: r.name || r.key, latest: r.latest, outdated: r.outdated + r.failed, failed: r.failed,
-      seen: r.up_to_date + r.outdated + r.being_patched + r.verified + r.failed + r.exception,
+      seen: r.up_to_date + r.outdated + r.being_patched + (r.restart_needed ?? 0) + r.verified + r.failed + r.exception,
     }))
     .sort((a, b) => b.outdated - a.outdated || a.name.localeCompare(b.name))
     .slice(0, n);

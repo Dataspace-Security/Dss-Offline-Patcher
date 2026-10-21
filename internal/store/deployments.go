@@ -646,8 +646,15 @@ func presentIn(inv []InventoryItem, p Package, sup map[string]bool) (bool, strin
 
 // OSFacts is what verification needs to know about the endpoint's Windows
 // besides inventory: the build and its revision (UBR, the "9711" of
-// "(26300.9711)" in os_version; 0 = unknown).
-type OSFacts struct{ Build, UBR int }
+// "(26300.9711)" in os_version; 0 = unknown). Arch and Server (Windows
+// Server) select the update intelligence's revision for a KB (hint, see
+// SetUBRHint).
+type OSFacts struct {
+	Build, UBR int
+	Arch       string
+	Server     bool
+	hint       UBRHint
+}
 
 var ubrRe = regexp.MustCompile(`\((\d{4,6})\.(\d+)\)`)
 
@@ -681,11 +688,15 @@ func evidenceLine(it InventoryItem) string {
 
 // presentOn is presentIn plus the endpoint's OS revision, and returns the
 // evidence: the matching inventory line, or the OS revision for a Windows
-// cumulative update verified by build revision. A cumulative update with
-// expected_ubr counts as installed when the endpoint runs exactly its
-// min_build at that revision or later, even if Windows does not list the KB
-// (some LCUs never show up in the QFE list). Per-user installs (Scope
-// "user") count like machine-wide ones.
+// cumulative update verified by build revision. A cumulative update counts
+// as installed when the endpoint runs a build whose revision it knows
+// (kbUBR: expected_ubr, the catalog title, the update intelligence) at
+// that revision or later, even if Windows does not list the KB: LCUs often
+// vanish from the QFE list after a reboot or once a later one replaces
+// them, and checkpoint updates baked into install media never appear.
+// Per-user installs (Scope "user") count like machine-wide ones, except
+// for EXE packages (exeAppMatch). Application names must agree on the
+// architecture they mention (archCompatible).
 func presentOn(inv []InventoryItem, os OSFacts, p Package, sup map[string]bool) (bool, string, string) {
 	for _, it := range inv {
 		switch {
@@ -695,7 +706,7 @@ func presentOn(inv []InventoryItem, os OSFacts, p Package, sup map[string]bool) 
 			return true, "inventory shows app " + it.Name + " " + it.Version, evidenceLine(it)
 		case (p.Kind == "deb" || p.Kind == "rpm" || p.Kind == "pkg") && it.Kind == "pkg" && it.ID == p.PackageName && VersionAtLeast(it.Version, p.Version):
 			return true, "inventory shows " + p.PackageName + " " + it.Version, evidenceLine(it)
-		case p.Kind == "msi" && p.PackageName != "" && it.Kind == "product" && SameAppName(it.Name, p.PackageName) && p.Version != "" && VersionAtLeast(it.Version, p.Version):
+		case p.Kind == "msi" && p.PackageName != "" && msiAppMatch(Package{Kind: "msi", PackageName: p.PackageName}, it) && p.Version != "" && it.Version != "" && VersionAtLeast(it.Version, p.Version):
 			return true, "inventory shows " + it.Name + " " + it.Version, evidenceLine(it)
 		case p.Kind == manifest.KindExe && exePresent(p, it):
 			return true, "inventory shows " + it.Name + " " + it.Version, evidenceLine(it)
@@ -710,9 +721,11 @@ func presentOn(inv []InventoryItem, os OSFacts, p Package, sup map[string]bool) 
 			return true, "inventory shows product " + p.ProductCode, evidenceLine(it)
 		}
 	}
-	if p.Kind == "msu" && p.ExpectedUBR > 0 && os.UBR > 0 && p.Applicability.MinBuild > 0 && os.Build == p.Applicability.MinBuild && os.UBR >= p.ExpectedUBR {
-		rev := fmt.Sprintf("%d.%d", os.Build, os.UBR)
-		return true, fmt.Sprintf("Windows reports build %s, at or past %d.%d (%s)", rev, os.Build, p.ExpectedUBR, p.KB), "os_version build " + rev
+	if p.Kind == "msu" && os.UBR > 0 {
+		if want := kbUBR(p, os); want > 0 && os.UBR >= want {
+			rev := fmt.Sprintf("%d.%d", os.Build, os.UBR)
+			return true, fmt.Sprintf("Windows reports build %s, at or past %d.%d (%s)", rev, os.Build, want, p.KB), "os_version build " + rev
+		}
 	}
 	return false, "", ""
 }
@@ -810,12 +823,15 @@ func (s *Store) ensureTarget(ctx context.Context, tx *sql.Tx, d Deployment, e En
 		if err != nil {
 			return err
 		}
-		if ok, why, ev := presentOn(e.inventory, osFacts(e.OSVersion, e.Build), p, sup); ok && e.InventoryAt != "" {
-			state, detail, evidence = "verified", "already present: "+withEvidence(why, ev), ev
-		} else if appStoreManaged(e.inventory, p) {
-			state, detail = "not_applicable", appStoreDetail
-		} else if e.InventoryAt != "" && !appInstalled(e.inventory, p) {
-			state, detail = "not_applicable", notInstalledDetail
+		// The same verdict GET /api/packages-needs shows for this machine.
+		v := Verdict{Presence: PresenceNeeded}
+		if e.InventoryAt != "" {
+			v = classify(p, e, s.osFactsFor(e.OSVersion, e.Build, e.Arch), e.inventory, sup)
+		}
+		if v.Presence == PresencePresent {
+			state, detail, evidence = "verified", "already present: "+withEvidence(v.Why, v.Evidence), v.Evidence
+		} else if v.Presence == PresenceStoreManaged || v.Presence == PresenceNotInstalled || v.Presence == PresenceNotApplicable {
+			state, detail = "not_applicable", v.Why
 		} else if xid, err := s.activeException(ctx, tx, e.EndpointID, p.PackageID); err != nil {
 			return err
 		} else if xid != "" {
@@ -898,8 +914,8 @@ func (s *Store) evaluate(ctx context.Context, tx *sql.Tx, id string, failRing in
 		COALESCE(SUM(health='failed' AND state NOT IN ('failed','lost_after_install')),0),
 		COALESCE(SUM(state='lost_after_install'),0),
 		COALESCE(SUM(state='pending_reboot'),0),
-		COALESCE(SUM(state='installed' AND detail=? AND health != 'failed'),0)
-		FROM targets WHERE deployment_id=? AND ring=?`, d.MaxRetries, UnverifiedDetail, id, ring).Scan(&total, &skipped, &verified, &exhausted, &unhealthy, &lost, &restart, &unverified)
+		COALESCE(SUM(state='installed' AND detail LIKE ? AND health != 'failed'),0)
+		FROM targets WHERE deployment_id=? AND ring=?`, d.MaxRetries, unverifiedLike, id, ring).Scan(&total, &skipped, &verified, &exhausted, &unhealthy, &lost, &restart, &unverified)
 		return
 	}
 	now := s.now()
@@ -1115,6 +1131,7 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 			return err
 		}
 		touched := map[string]bool{}
+		facts := s.osFactsFor(r.OSVersion, r.Build, r.Arch)
 		for _, t := range ts {
 			// EXE packages wait for agent 0.9.0: once the agent is upgraded,
 			// the target is back in scope.
@@ -1168,7 +1185,7 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 			}
 			// Verification: fresh inventory evidence, and no outstanding reboot
 			// if the install itself asked for one.
-			if ok, why, ev := presentOn(r.Inventory, osFacts(r.OSVersion, r.Build), p, sup); ok && !rebootWait {
+			if ok, why, ev := presentOn(r.Inventory, facts, p, sup); ok && !rebootWait {
 				if err := s.setVerified(tx, t, why, ev); err != nil {
 					return err
 				}
@@ -1183,6 +1200,16 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 				continue
 			}
 			retryable := t.State == "pending" || t.State == "failed" || t.State == "deferred"
+			// Targeted before the endpoint's first inventory (or the app was
+			// removed since): never offered yet, and the app is not there, so
+			// nothing is installed on it (as targeting decides with inventory).
+			if t.State == "pending" && t.Attempts == 0 && !appInstalled(r.Inventory, p) {
+				if err := s.setTarget(tx, "system:scheduler", t, "not_applicable", notInstalledDetail, t.ExitCode, 0); err != nil {
+					return err
+				}
+				touched[t.DeploymentID] = true
+				continue
+			}
 			if appStoreManaged(r.Inventory, p) && retryable {
 				if err := s.setTarget(tx, "system:scheduler", t, "not_applicable", appStoreDetail, t.ExitCode, 0); err != nil {
 					return err
@@ -1265,7 +1292,7 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 			if c.operation == "install" {
 				json.Unmarshal([]byte(c.prereqJSON), &prereqs)
 			}
-			if miss := missingPrereqs(prereqs, r.Inventory); len(miss) > 0 {
+			if miss := missingPrereqs(prereqs, r.Inventory, facts); len(miss) > 0 {
 				msg := "waiting for prerequisite(s) " + strings.Join(miss, ", ")
 				if c.detail != msg {
 					if _, err := tx.Exec(`UPDATE targets SET detail=? WHERE deployment_id=? AND endpoint_id=?`, msg, c.a.DeploymentID, endpointID); err != nil {
@@ -1683,18 +1710,14 @@ func VersionAtLeast(have, want string) bool {
 	return true
 }
 
-// missingPrereqs returns prerequisites not shown in the inventory.
-func missingPrereqs(prereqs []string, inv []InventoryItem) []string {
+// missingPrereqs returns prerequisites the endpoint does not have: neither
+// listed in its inventory nor proven by its Windows build revision
+// (prereqMet; a checkpoint update baked into the install media is never
+// listed).
+func missingPrereqs(prereqs []string, inv []InventoryItem, os OSFacts) []string {
 	var missing []string
 	for _, pr := range prereqs {
-		found := false
-		for _, it := range inv {
-			if strings.EqualFold(it.ID, pr) {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !prereqMet(pr, inv, os) {
 			missing = append(missing, pr)
 		}
 	}

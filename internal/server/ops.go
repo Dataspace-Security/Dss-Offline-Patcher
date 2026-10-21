@@ -172,6 +172,12 @@ func (s *Server) RunAlerts(ctx context.Context, every time.Duration) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
+		// The intelligence's Windows revisions back check-in verification
+		// and the unverified-install explanations (store.SetUBRHint): load
+		// it before anyone opens the console.
+		if _, _, err := s.intelIndex(ctx); err != nil {
+			s.log.Error("update intelligence", "err", err)
+		}
 		if err := s.store.SweepAlerts(ctx, s.th); err != nil {
 			s.log.Error("alert sweep", "err", err)
 		}

@@ -78,11 +78,11 @@ func TestExeMatching(t *testing.T) {
 	}
 	// Needs: an older x64 runtime needs the x64 package, not the x86 one.
 	e := Endpoint{OS: "windows", Arch: "x64", AgentVersion: "0.9.0"}
-	if need, have, _ := needs(x64, e, []InventoryItem{old64}, nil); !need || have != "14.40.33810.0" {
+	if need, have, _ := needs(x64, e, OSFacts{}, []InventoryItem{old64}, nil); !need || have != "14.40.33810.0" {
 		t.Fatalf("needs x64: %v %s", need, have)
 	}
 	x86.Applicability = manifest.Applicability{OS: "windows", Arch: "x64"}
-	if need, _, _ := needs(x86, e, []InventoryItem{old64}, nil); need {
+	if need, _, _ := needs(x86, e, OSFacts{}, []InventoryItem{old64}, nil); need {
 		t.Fatal("x86 package needed by an x64-only inventory")
 	}
 	if !appInstalled([]InventoryItem{old64}, x64) || appInstalled([]InventoryItem{old64}, x86) {

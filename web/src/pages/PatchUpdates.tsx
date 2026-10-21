@@ -68,6 +68,7 @@ function groupRows(rows: FleetStatusRow[]): FleetStatusRow[] {
       uncovered: (prev.uncovered ?? 0) + (r.uncovered ?? 0),
       uncovered_builds: Array.from(new Set([...(prev.uncovered_builds ?? []), ...(r.uncovered_builds ?? [])])).sort(),
       up_to_date: prev.up_to_date + r.up_to_date, outdated: prev.outdated + r.outdated, being_patched: prev.being_patched + r.being_patched,
+      restart_needed: (prev.restart_needed ?? 0) + (r.restart_needed ?? 0),
       verified: prev.verified + r.verified, failed: prev.failed + r.failed, exception: prev.exception + r.exception,
       endpoints: uniqueEndpoints([...(prev.endpoints ?? []), ...(r.endpoints ?? [])]),
     });
