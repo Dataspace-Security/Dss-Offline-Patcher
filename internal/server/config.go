@@ -198,13 +198,10 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	c.dir = filepath.Dir(path)
 	c.mfaOptOut = explicitFalse(b, "require_mfa")
-	// Bank defaults (security review S-3): critical and important packages
-	// need two approvers, and whoever approved a package may not deploy it.
-	// Only an explicit "separation_of_duties": false or an approval_policy
-	// entry in the file changes that.
-	if !explicitFalse(b, "separation_of_duties") {
-		c.SeparationOfDuties = true
-	}
+	// Bank default (security review S-3): critical and important packages
+	// need two approvers unless approval_policy says otherwise. Separation
+	// of duties stays off unless set (owner decision: whoever approved a
+	// package may also deploy it; the deployment needs its own approvals).
 	if c.ApprovalPolicy == nil {
 		c.ApprovalPolicy = map[string]int{}
 	}

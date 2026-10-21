@@ -53,6 +53,20 @@ func IsServer(product string) bool { return strings.Contains(strings.ToLower(pro
 // the catalog; the older build keeps the plain ID existing catalogs use.
 var sharedKBBuilds = map[int]bool{26200: true, 22631: true, 19044: true}
 
+// SharedKBBase is the older build whose cumulative update a shared-KB
+// build installs too (26200 → 26100), or 0.
+func SharedKBBase(build int) int {
+	switch build {
+	case 26200:
+		return 26100
+	case 22631:
+		return 22621
+	case 19044:
+		return 19045
+	}
+	return 0
+}
+
 // KBPackageSuffix is what follows "<KB>-<arch>" in the package ID of a
 // Windows update for product at build: "-server" for Windows Server (it
 // shares KB numbers with the client release of the same build), "-<build>"

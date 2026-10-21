@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -263,5 +264,17 @@ func checkItems(t *testing.T, items []acqstatus.ItemResult, rid string, want map
 		case (it.Result == "fetched" || it.Result == "already_sent") && it.PackageID == "":
 			t.Errorf("%s %s: no package id", rid, key)
 		}
+	}
+}
+
+// A 25H2 cumulative update is looked up by its title without the build
+// suffix, then by the release's catalog names, then as the 24H2 row (the
+// same file).
+func TestKBProducts(t *testing.T) {
+	got := kbProducts(acqrequest.KB{KB: "KB5127648", Build: 26200, Arch: "x64", Product: "Windows 11 Version 25H2",
+		Title: "2026-10 Cumulative Update for Windows 11, version 25H2 for x64-based Systems (KB5127648) (26200.9711)"})
+	want := []string{"2026-10 Cumulative Update for Windows 11, version 25H2 for x64-based Systems (KB5127648)", "Windows 11 Version 25H2", "Windows 11 Version 24H2"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %q", got)
 	}
 }

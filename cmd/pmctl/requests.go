@@ -368,14 +368,43 @@ func wingetPublisher(in acquire.WingetInstaller, m *acquire.WingetManifest) stri
 	return pub
 }
 
-func (r *requestRun) fetchKB(k acqrequest.KB) error {
-	prod := k.Title
-	if prod == "" {
-		prod = k.Product
+// buildSuffixRe is the "(26200.9711)" the intelligence appends to update
+// titles; catalog titles never carry it.
+var buildSuffixRe = regexp.MustCompile(`\s*\(\d{4,6}\.\d+\)\s*$`)
+
+// kbProducts are the catalog product texts to try for k, most specific
+// first: the update title (without the build suffix), the catalog name of
+// the Windows release, the MSRC product, and for a release that shares its
+// cumulative update with an older one (25H2 with 24H2) the older one's
+// catalog name, whose row is the same file.
+func kbProducts(k acqrequest.KB) []string {
+	var out []string
+	add := func(s string) {
+		if s = strings.TrimSpace(s); s != "" && !slices.Contains(out, s) {
+			out = append(out, s)
+		}
 	}
-	if prod == "" {
+	add(buildSuffixRe.ReplaceAllString(k.Title, ""))
+	if kw, ok := acqpolicy.LookupKnown(k.Product, k.Build, k.Arch); ok {
+		add(kw.CatalogProduct)
+	}
+	add(k.Product)
+	if base := acqpolicy.SharedKBBase(k.Build); base > 0 {
+		for _, kw := range acqpolicy.Known {
+			if kw.Build == base && kw.Arch == k.Arch && kw.Server == k.Server {
+				add(kw.CatalogProduct)
+			}
+		}
+	}
+	return out
+}
+
+func (r *requestRun) fetchKB(k acqrequest.KB) error {
+	prods := kbProducts(k)
+	if len(prods) == 0 {
 		return unsupportedItem("the request names no Windows product", k.KB+": the request names no product")
 	}
+	prod := prods[0]
 	if r.cat == nil {
 		r.cat, r.ms = acquire.NewCatalog(), acquire.NewMSRC()
 		msHC := r.c.msClient(r.hc)
@@ -387,12 +416,19 @@ func (r *requestRun) fetchKB(k acqrequest.KB) error {
 			r.ms.BaseURL = r.c.MSRCURL
 		}
 	}
-	res, err := acquire.FetchKB(r.ctx, r.cat, r.ms, acquire.FetchKBOptions{KB: k.KB, Product: prod, Arch: k.Arch, MinBuild: k.Build, MaxBuild: k.Build,
-		PackageID: k.KB + "-" + k.Arch + acqpolicy.KBPackageSuffix(prod, k.Server, k.Build), OutDir: r.downloads, SpecPath: r.spec, RecordUBR: r.c.ExpectedUBR, ExpectedUBR: r.st.WindowsUBR[k.KB+"/"+strconv.Itoa(k.Build)],
-		SkipPrerequisite: func(id string) bool {
-			_, done := r.st.Done[id]
-			return done || slices.Contains(r.rep.New, id)
-		}})
+	var res *acquire.FetchResult
+	var err error
+	for _, p := range prods {
+		res, err = acquire.FetchKB(r.ctx, r.cat, r.ms, acquire.FetchKBOptions{KB: k.KB, Product: p, Arch: k.Arch, MinBuild: k.Build, MaxBuild: k.Build,
+			PackageID: k.KB + "-" + k.Arch + acqpolicy.KBPackageSuffix(prod, k.Server, k.Build), OutDir: r.downloads, SpecPath: r.spec, RecordUBR: r.c.ExpectedUBR, ExpectedUBR: r.st.WindowsUBR[k.KB+"/"+strconv.Itoa(k.Build)],
+			SkipPrerequisite: func(id string) bool {
+				_, done := r.st.Done[id]
+				return done || slices.Contains(r.rep.New, id)
+			}})
+		if err == nil || !strings.HasPrefix(err.Error(), "no catalog row matches") {
+			break // found, or a failure another product text would not fix
+		}
+	}
 	if err != nil {
 		return kbCatalogError(k, err)
 	}

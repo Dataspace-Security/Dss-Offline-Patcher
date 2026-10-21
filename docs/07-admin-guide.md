@@ -390,7 +390,7 @@ it, for example `{"critical": 3}`. The first approval is recorded
 second, **different** approver must approve. The same person approving twice gets HTTP 409. Only
 the last required approval publishes the content to the repository.
 
-**Separation of duties.** On by default (`"separation_of_duties": false` turns it off): anyone who
+**Separation of duties.** Off by default (`"separation_of_duties": true` turns it on): then anyone who
 approved a package cannot create a deployment for it (HTTP 409 "separation of duties: … a different
 operator must deploy it"). Plan who approves and who deploys.
 
