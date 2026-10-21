@@ -34,18 +34,21 @@ func TestKeepUninstallEntry(t *testing.T) {
 	cases := []struct {
 		msi       bool
 		name      string
+		version   string
 		sysComp   uint64
 		hasParent bool
 		want      bool
 	}{
-		{true, "", 1, true, true}, // MSI products are always kept
-		{false, "Zoom Workplace", 0, false, true},
-		{false, "  ", 0, false, false},
-		{false, "Hidden component", 1, false, false},
-		{false, "Update for X", 0, true, false},
+		{true, "", "", 1, true, true}, // MSI products are always kept
+		{false, "Zoom Workplace", "6.2", 0, false, true},
+		{false, "  ", "1.0", 0, false, false},
+		{false, "Hidden component", "", 1, false, false},
+		// WebView2 marks itself SystemComponent=1: kept, it has a version.
+		{false, "Microsoft Edge WebView2 Runtime", "155.0.4283.62", 1, false, true},
+		{false, "Update for X", "1.0", 0, true, false},
 	}
 	for _, c := range cases {
-		if got := keepUninstallEntry(c.msi, c.name, c.sysComp, c.hasParent); got != c.want {
+		if got := keepUninstallEntry(c.msi, c.name, c.version, c.sysComp, c.hasParent); got != c.want {
 			t.Errorf("keepUninstallEntry(%+v) = %v", c, got)
 		}
 	}

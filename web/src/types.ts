@@ -75,7 +75,7 @@ export type Hardware = {
   disks?: { mount: string; total_bytes: number; free_bytes: number }[];
   ip_addresses?: string[]; mac_address?: string; boot_time?: string; logged_in_user?: string; timezone?: string;
 };
-export type InventoryItem = { kind: "kb" | "product" | "pkg" | "app" | "appx" | "agent"; id: string; name: string; version: string; source?: "appstore" | "msstore";
+export type InventoryItem = { kind: "kb" | "product" | "pkg" | "app" | "appx" | "agent"; id: string; name: string; version: string; source?: "appstore" | "msstore"; hidden?: boolean;
   /** P2: "user" = per-user install (one user's profile); empty = whole machine. */
   scope?: "user" | "";
 };

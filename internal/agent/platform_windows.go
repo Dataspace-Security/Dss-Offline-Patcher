@@ -243,8 +243,10 @@ func scanUninstall(root registry.Key, path string, view uint32) ([]store.Invento
 		_, _, perr := sk.GetStringValue("ParentKeyName")
 		sk.Close()
 		// EXE-installed apps (Chrome's EXE setup, Firefox, VLC…) appear under
-		// their own key names; keep those that Apps & features shows.
-		if keepUninstallEntry(isMSI, it.Name, sysComp, perr == nil) {
+		// their own key names; keep those Apps & features shows, and hidden
+		// ones with a version (WebView2), marked Hidden.
+		if keepUninstallEntry(isMSI, it.Name, it.Version, sysComp, perr == nil) {
+			it.Hidden = !isMSI && sysComp == 1
 			items = append(items, it)
 		}
 	}

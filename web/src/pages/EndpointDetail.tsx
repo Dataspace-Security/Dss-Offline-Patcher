@@ -143,7 +143,7 @@ export default function EndpointDetailPage() {
             <tbody>
               {inv.map((i, n) => (
                 <tr key={`${i.kind}-${i.id}-${n}`}>
-                  <td className="nowrap"><span className="tag">{i.kind}</span>{i.source === "appstore" && <span className="tag" title="Installed from the Mac App Store, which keeps it updated">App Store</span>}{i.source === "msstore" && <span className="tag" title="Microsoft Store / MSIX app: listed for completeness; the Store keeps it updated">Microsoft Store</span>}</td>
+                  <td className="nowrap"><span className="tag">{i.kind}</span>{i.source === "appstore" && <span className="tag" title="Installed from the Mac App Store, which keeps it updated">App Store</span>}{i.source === "msstore" && <span className="tag" title="Microsoft Store / MSIX app: listed for completeness; the Store keeps it updated">Microsoft Store</span>}{i.hidden && <span className="tag" title="Marked as a system component, so Apps &amp; features does not list it (e.g. Microsoft Edge WebView2 Runtime); it is patched and verified like any other app">hidden component</span>}</td>
                   <td><Mono>{i.id}</Mono></td>
                   <td>
                     {i.name}

@@ -33,15 +33,21 @@ func isUserHive(name string) bool {
 	return sidRe.MatchString(n)
 }
 
-// keepUninstallEntry is the Apps & features rule shared by the machine and
-// the per-user scans: Windows Installer products (key named by a product
-// code) are always kept; other entries only with a display name, when not a
-// hidden component and not an update of another entry (ParentKeyName).
-func keepUninstallEntry(isMSI bool, displayName string, systemComponent uint64, hasParent bool) bool {
+// keepUninstallEntry is the rule shared by the machine and the per-user
+// scans: Windows Installer products (key named by a product code) are always
+// kept; other entries need a display name and must not be an update of
+// another entry (ParentKeyName). Entries marked SystemComponent (hidden in
+// Apps & features) are kept only with a DisplayVersion: Microsoft Edge
+// WebView2 Runtime marks itself so, and without it an installed update
+// never verifies. Hidden entries without a version are Windows internals.
+func keepUninstallEntry(isMSI bool, displayName, displayVersion string, systemComponent uint64, hasParent bool) bool {
 	if isMSI {
 		return true
 	}
-	return strings.TrimSpace(displayName) != "" && systemComponent != 1 && !hasParent
+	if strings.TrimSpace(displayName) == "" || hasParent {
+		return false
+	}
+	return systemComponent != 1 || strings.TrimSpace(displayVersion) != ""
 }
 
 func inventoryKey(it store.InventoryItem) string { return it.Kind + "\x00" + strings.ToUpper(it.ID) }
