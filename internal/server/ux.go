@@ -109,7 +109,7 @@ func (s *Server) missingFor(ctx context.Context, eps []store.Endpoint) error {
 type fleetStatusEndpoint struct {
 	EndpointID string `json:"endpoint_id"`
 	Hostname   string `json:"hostname"`
-	Status     string `json:"status"` // up_to_date | outdated | being_patched | verified | failed | exception
+	Status     string `json:"status"` // up_to_date | outdated | being_patched | restart_needed | verified | failed | exception
 	Installed  string `json:"installed"`
 }
 
@@ -126,9 +126,12 @@ type fleetStatusRow struct {
 	UpToDate         int    `json:"up_to_date"`
 	Outdated         int    `json:"outdated"`
 	BeingPatched     int    `json:"being_patched"`
-	Verified         int    `json:"verified"`
-	Failed           int    `json:"failed"`
-	Exception        int    `json:"exception"`
+	// RestartNeeded: installed, waiting for the restart the install asked
+	// for (not counted in BeingPatched).
+	RestartNeeded int `json:"restart_needed"`
+	Verified      int `json:"verified"`
+	Failed        int `json:"failed"`
+	Exception     int `json:"exception"`
 	// Uncovered / UncoveredBuilds: as on GET /api/updates (machines needing
 	// it that no catalog package applies to, e.g. 25H2 with only the 24H2
 	// package of a shared KB). Import stays offered for them.
@@ -149,14 +152,18 @@ type fleetStatusCache struct {
 	v    fleetStatus
 }
 
-// endpointStatus applies the precedence exception > failed > being_patched >
-// verified > outdated > up_to_date.
+// endpointStatus applies the precedence exception > failed > restart_needed >
+// being_patched > verified > outdated > up_to_date. An install waiting for
+// its restart is not "being patched": nothing happens until the machine
+// restarts.
 func endpointStatus(st store.TargetStatus, outdated bool) string {
 	switch {
 	case st.Exception:
 		return "exception"
 	case st.Failed:
 		return "failed"
+	case st.RestartNeeded:
+		return "restart_needed"
 	case st.Deploying:
 		return "being_patched"
 	case st.Verified:
@@ -271,6 +278,8 @@ func (s *Server) fleetStatus(ctx context.Context) (fleetStatus, error) {
 				row.Failed++
 			case "being_patched":
 				row.BeingPatched++
+			case "restart_needed":
+				row.RestartNeeded++
 			case "verified":
 				row.Verified++
 			case "outdated":

@@ -329,6 +329,7 @@ export type PackageFleet = {
   not_installed: number; // third-party app not on the endpoint (never targeted)
   up_to_date_ids: string[]; not_installed_ids: string[]; // which endpoints those are
   deploying: number;     // targets pending..installed / pending_reboot in an active or paused deployment
+  restart_needed?: number; // of those deploying: installed, waiting for a restart (pending_reboot)
   verified: number;      // targets verified (any deployment, operation install)
   failed: number;        // targets failed / lost_after_install
   exception: number;     // active exceptions
@@ -343,7 +344,7 @@ export type EndpointMissing = { os: number; apps: number; ready: number; catalog
 /** GET /api/fleet/status (viewer): one row per KB or app across the fleet. */
 export type FleetStatusEndpoint = {
   endpoint_id: string; hostname: string;
-  status: "up_to_date" | "outdated" | "being_patched" | "verified" | "failed" | "exception";
+  status: "up_to_date" | "outdated" | "being_patched" | "restart_needed" | "verified" | "failed" | "exception";
   installed: string; // installed version or OS version
 };
 export type FleetStatusRow = {
@@ -353,6 +354,8 @@ export type FleetStatusRow = {
   /** EXE contract (assumed server fields, same values as the Library): "no" = Import is not offered. */
   importable?: Importable; importable_reason?: string;
   up_to_date: number; outdated: number; being_patched: number; verified: number; failed: number; exception: number;
+  /** Installed, waiting for the restart the install asked for (not in being_patched). */
+  restart_needed: number;
   /** Machines needing it that no catalog package applies to (e.g. 25H2 when only the 24H2 package of a shared KB is imported), and their builds. */
   uncovered?: number; uncovered_builds?: number[];
   endpoints: FleetStatusEndpoint[];

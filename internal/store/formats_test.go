@@ -51,7 +51,7 @@ func TestFormatsMatching(t *testing.T) {
 		if !appInstalled([]InventoryItem{c.old}, c.pkg) {
 			t.Errorf("%s: old version not recognised as the app", c.name)
 		}
-		if need, have, _ := needs(c.pkg, e, []InventoryItem{c.old}, nil); !need || have != c.old.Version {
+		if need, have, _ := needs(c.pkg, e, OSFacts{}, []InventoryItem{c.old}, nil); !need || have != c.old.Version {
 			t.Errorf("%s: needs %v %q", c.name, need, have)
 		}
 		if ok, _, _ := presentOn([]InventoryItem{c.old}, OSFacts{}, c.pkg, nil); ok {
@@ -60,7 +60,7 @@ func TestFormatsMatching(t *testing.T) {
 		if ok, why, ev := presentOn([]InventoryItem{c.new}, OSFacts{}, c.pkg, nil); !ok || !strings.Contains(why, c.new.Version) || ev == "" {
 			t.Errorf("%s: new version not verified: %v %q %q", c.name, ok, why, ev)
 		}
-		if need, _, _ := needs(c.pkg, e, []InventoryItem{c.new}, nil); need {
+		if need, _, _ := needs(c.pkg, e, OSFacts{}, []InventoryItem{c.new}, nil); need {
 			t.Errorf("%s: still needed at the new version", c.name)
 		}
 		if appInstalled(nil, c.pkg) {

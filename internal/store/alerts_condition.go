@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -230,8 +231,24 @@ func (s *Store) sweepResolved(ctx context.Context) error {
 // counts towards the deployment's failure threshold.
 const UnverifiedAfter = 6 * time.Hour
 
-// UnverifiedDetail is the target detail of such an install.
+// UnverifiedDetail starts the target detail of such an install; what
+// inventory lacks follows it (missingProof), e.g. "…after 6 h: inventory
+// shows Microsoft Edge WebView2 Runtime 154.0.1, expected 155.0.4283.62 or
+// later".
 var UnverifiedDetail = fmt.Sprintf("installed but not confirmed by inventory after %d h", int(UnverifiedAfter.Hours()))
+
+// unverifiedLike matches UnverifiedDetail details in SQL (it has no LIKE
+// wildcards of its own).
+var unverifiedLike = UnverifiedDetail + "%"
+
+// IsUnverified reports whether a target detail is an unverified install's.
+func IsUnverified(detail string) bool { return strings.HasPrefix(detail, UnverifiedDetail) }
+
+// unverifiedDetail is the full detail for p on an endpoint with this
+// inventory and Windows revision.
+func unverifiedDetail(p Package, os OSFacts, inv []InventoryItem) string {
+	return UnverifiedDetail + ": " + missingProof(p, os, inv)
+}
 
 // sweepUnverified flags installs that never verified: the target stays
 // "installed" (inventory may still confirm it; check-in verifies it then)
@@ -242,33 +259,49 @@ var UnverifiedDetail = fmt.Sprintf("installed but not confirmed by inventory aft
 func (s *Store) sweepUnverified(ctx context.Context) error {
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		cutoff := s.Now().Add(-UnverifiedAfter).UTC().Format(time.RFC3339Nano)
-		rows, err := tx.QueryContext(ctx, `SELECT t.deployment_id, t.endpoint_id, t.package_id, e.hostname, t.ring, t.state, t.exit_code, t.updated_at
+		rows, err := tx.QueryContext(ctx, `SELECT t.deployment_id, t.endpoint_id, t.package_id, e.hostname, t.ring, t.state, t.exit_code, t.updated_at,
+			e.inventory, e.os_version, e.build, e.arch
 			FROM targets t JOIN endpoints e ON e.endpoint_id=t.endpoint_id JOIN deployments d ON d.deployment_id=t.deployment_id
-			WHERE t.state='installed' AND t.detail != ? AND t.updated_at < ? AND d.state IN ('active','paused') AND d.operation='install' AND e.retired_at=''`,
-			UnverifiedDetail, cutoff)
+			WHERE t.state='installed' AND t.detail NOT LIKE ? AND t.updated_at < ? AND d.state IN ('active','paused') AND d.operation='install' AND e.retired_at=''`,
+			unverifiedLike, cutoff)
 		if err != nil {
 			return err
 		}
-		var found []Target
+		type unverified struct {
+			Target
+			inv []InventoryItem
+			os  OSFacts
+		}
+		var found []unverified
 		for rows.Next() {
-			var t Target
-			if err := rows.Scan(&t.DeploymentID, &t.EndpointID, &t.PackageID, &t.Hostname, &t.Ring, &t.State, &t.ExitCode, &t.UpdatedAt); err != nil {
+			var u unverified
+			var invJSON, osVersion, arch string
+			var build int
+			if err := rows.Scan(&u.DeploymentID, &u.EndpointID, &u.PackageID, &u.Hostname, &u.Ring, &u.State, &u.ExitCode, &u.UpdatedAt, &invJSON, &osVersion, &build, &arch); err != nil {
 				rows.Close()
 				return err
 			}
 			// updated_at is RFC 3339 with varying precision: compare as time.
-			if s.Now().Sub(parseTime(t.UpdatedAt)) > UnverifiedAfter {
-				found = append(found, t)
+			if s.Now().Sub(parseTime(u.UpdatedAt)) > UnverifiedAfter {
+				json.Unmarshal([]byte(invJSON), &u.inv)
+				u.os = s.osFactsFor(osVersion, build, arch)
+				found = append(found, u)
 			}
 		}
 		rows.Close()
 		rings := map[string]map[int]bool{}
-		for _, t := range found {
-			if _, err := tx.Exec(`UPDATE targets SET detail=? WHERE deployment_id=? AND endpoint_id=? AND state='installed'`, UnverifiedDetail, t.DeploymentID, t.EndpointID); err != nil {
+		for _, u := range found {
+			t := u.Target
+			// Say what inventory lacks, so an admin sees why it did not verify.
+			detail := UnverifiedDetail
+			if p, err := getPackage(ctx, tx, t.PackageID); err == nil {
+				detail = unverifiedDetail(p, u.os, u.inv)
+			}
+			if _, err := tx.Exec(`UPDATE targets SET detail=? WHERE deployment_id=? AND endpoint_id=? AND state='installed'`, detail, t.DeploymentID, t.EndpointID); err != nil {
 				return err
 			}
 			if err := s.audit(tx, Ev{Actor: "system:scheduler", Action: "target.install_unverified", ObjectType: "target", ObjectID: t.DeploymentID + "/" + t.EndpointID,
-				PackageID: t.PackageID, Details: map[string]any{"hostname": t.Hostname, "installed_at": t.UpdatedAt, "detail": UnverifiedDetail}}); err != nil {
+				PackageID: t.PackageID, Details: map[string]any{"hostname": t.Hostname, "installed_at": t.UpdatedAt, "detail": detail}}); err != nil {
 				return err
 			}
 			if rings[t.DeploymentID] == nil {
@@ -279,7 +312,7 @@ func (s *Store) sweepUnverified(ctx context.Context) error {
 		// One alert per deployment with every unverified host (new and old).
 		rows, err = tx.QueryContext(ctx, `SELECT t.deployment_id, d.name, d.package_id, t.endpoint_id, e.hostname FROM targets t
 			JOIN endpoints e ON e.endpoint_id=t.endpoint_id JOIN deployments d ON d.deployment_id=t.deployment_id
-			WHERE t.state='installed' AND t.detail=? AND d.state IN ('active','paused')`, UnverifiedDetail)
+			WHERE t.state='installed' AND t.detail LIKE ? AND d.state IN ('active','paused')`, unverifiedLike)
 		if err != nil {
 			return err
 		}

@@ -78,6 +78,17 @@ type EndpointMissing struct {
 // ListEndpoints and GetEndpoint).
 func (e Endpoint) InventoryItems() []InventoryItem { return e.inventory }
 
+// WithInventory returns a copy of e that reports inventory inv (at
+// InventoryAt, or "now" if it has none), for callers that build endpoints
+// themselves rather than loading them.
+func (e Endpoint) WithInventory(inv []InventoryItem) Endpoint {
+	e.inventory = append([]InventoryItem(nil), inv...)
+	if e.InventoryAt == "" {
+		e.InventoryAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	return e
+}
+
 type EndpointDetail struct {
 	Endpoint
 	Inventory []InventoryItem `json:"inventory"`

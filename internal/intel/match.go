@@ -44,6 +44,9 @@ type AppUpdate struct {
 	LatestVersion    string `json:"latest_version"`
 	MatchedBy        string `json:"matched_by"` // product_code | name
 	ProductCode      string `json:"product_code,omitempty"`
+	// Target: the installed version that counts as current (ARPMax when the
+	// index has it, else LatestVersion). Not part of the JSON form.
+	Target string `json:"-"`
 }
 
 // Result is everything the endpoint is missing according to the intelligence.
@@ -181,7 +184,7 @@ func (ix *Index) Match(ep Endpoint) Result {
 		if a.ARPMax != "" {
 			target = a.ARPMax
 		}
-		u := AppUpdate{AppID: a.ID, Name: a.Name, InstalledName: it.Name, InstalledVersion: it.Version, LatestVersion: a.Version, MatchedBy: m.by}
+		u := AppUpdate{AppID: a.ID, Name: a.Name, InstalledName: it.Name, InstalledVersion: it.Version, LatestVersion: a.Version, MatchedBy: m.by, Target: target}
 		if strings.HasPrefix(it.ID, "{") {
 			u.ProductCode = it.ID
 		}
@@ -194,6 +197,22 @@ func (ix *Index) Match(ep Endpoint) Result {
 	}
 	sort.Slice(res.Apps, func(i, j int) bool { return strings.ToLower(res.Apps[i].Name) < strings.ToLower(res.Apps[j].Name) })
 	return res
+}
+
+// ReleaseUBR is the build revision cumulative update kb brings build to on
+// arch (server: Windows Server), 0 when the intelligence does not list it.
+// The store uses it to prove a cumulative update installed by the
+// endpoint's revision when Windows no longer lists the KB.
+func (ix *Index) ReleaseUBR(kb string, build int, arch string, server bool) int {
+	if ix == nil {
+		return 0
+	}
+	for _, w := range ix.windows[build] {
+		if w.Server == server && strings.EqualFold(w.Arch, arch) && strings.EqualFold(w.KB, kb) {
+			return w.UBR
+		}
+	}
+	return 0
 }
 
 // lookup finds the app for an installed item: by product code / registry
@@ -227,11 +246,60 @@ func (ix *Index) lookupSlow(it Item) (int, string) {
 		return -1, ""
 	}
 	if norm != "" {
-		if i := ix.sameAppByName(ix.byName[norm]); i >= 0 {
+		if i := ix.sameAppByName(ix.sameArch(ix.byName[norm], it.Name)); i >= 0 {
 			return i, "name"
 		}
 	}
 	return -1, ""
+}
+
+// archSegments: winget ids of per-architecture packages end in one
+// (Microsoft.VCRedist.2015+.x64 / .x86 / .arm64).
+var archSegments = map[string]string{"x64": "x64", "amd64": "x64", "x86": "x86", "arm64": "arm64"}
+
+// nameArch is the architecture an installed display name mentions ("" if
+// none): "… Redistributable (x86) - 14.44" → x86.
+func nameArch(name string) string {
+	switch m := archRe.FindString(strings.ToLower(name)); m {
+	case "x64", "amd64", "64-bit", "64 bit", "win64":
+		return "x64"
+	case "x86", "32-bit", "32 bit", "win32":
+		return "x86"
+	case "arm64":
+		return "arm64"
+	}
+	return ""
+}
+
+// appArch is the architecture a winget id is for ("" if it names none).
+func appArch(id string) string {
+	segs := strings.Split(strings.ToLower(id), ".")
+	return archSegments[segs[len(segs)-1]]
+}
+
+// sameArch narrows display-name candidates to the architecture the
+// installed name mentions. Normalize drops architecture, so the x86 and
+// x64 VC++ redistributables have the same normalised name; without this
+// both installed copies counted as one app and the newer x86 one hid an
+// outdated x64 one. Candidates not built for one architecture stay.
+func (ix *Index) sameArch(cands []int, installedName string) []int {
+	tag := nameArch(installedName)
+	if tag == "" {
+		return cands
+	}
+	var same, neutral []int
+	for _, i := range cands {
+		switch appArch(ix.Doc.Apps[i].ID) {
+		case tag:
+			same = append(same, i)
+		case "":
+			neutral = append(neutral, i)
+		}
+	}
+	if len(same) > 0 {
+		return same
+	}
+	return neutral
 }
 
 // variantSuffixes mark pre-release or alternative packagings of an app

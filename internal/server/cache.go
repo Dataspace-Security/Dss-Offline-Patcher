@@ -67,6 +67,11 @@ type needsView struct {
 // fleetNeeds returns the cached package needs of the whole fleet (fleetTTL,
 // invalidated by store changes).
 func (s *Server) fleetNeeds(ctx context.Context) (needsView, error) {
+	// Loads (once) the intelligence, whose Windows revisions the store's
+	// verdicts use (SetUBRHint). Without usable intelligence needs still work.
+	if _, _, err := s.intelIndex(ctx); err != nil {
+		return needsView{}, err
+	}
 	return s.needsCache.get(s.store.Generation, fleetTTL, func() (needsView, error) {
 		needs, err := s.store.Needs(ctx)
 		if err != nil {

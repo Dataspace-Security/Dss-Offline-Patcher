@@ -2,6 +2,9 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +40,22 @@ func simHasKB(a *simAgent, kb string) bool {
 		}
 	}
 	return false
+}
+
+// simInstalled puts apps on a simulated endpoint before its first check-in
+// (third-party packages only update apps a machine already has).
+func simInstalled(t *testing.T, a *simAgent, items ...store.InventoryItem) {
+	t.Helper()
+	path := filepath.Join(a.dir, "sim-state.json")
+	st := map[string]any{}
+	if b, err := os.ReadFile(path); err == nil {
+		json.Unmarshal(b, &st)
+	}
+	st["products"] = items
+	b, _ := json.Marshal(st)
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (e *env) intakeApproved(pk map[string]manifest.Package, seq int64) {
@@ -196,6 +215,10 @@ func TestRollback(t *testing.T) {
 	a1 := e.enroll("pc-rb-1", []string{"pilot"}, agent.SimConfig{})
 	a2 := e.enroll("pc-rb-2", []string{"broad"}, agent.SimConfig{FailUninstall: []string{msiGUID}})
 	never := e.enroll("pc-rb-never", []string{"late"}, agent.SimConfig{}) // never got the KB
+	// Acme App 2.0 is installed on both: the MSI updates it.
+	for _, a := range []*simAgent{a1, a2} {
+		simInstalled(t, a, store.InventoryItem{Kind: "product", ID: msiGUID, Name: "Acme App", Version: "2.0"})
+	}
 	rings := []store.Ring{{Name: "pilot", Groups: []string{"pilot"}}, {Name: "broad", Groups: []string{"broad", "late"}}}
 	inst := e.deploy(store.NewDeployment{PackageID: "KB5009201-x64", Name: "install", Rings: []store.Ring{{Name: "all", Groups: []string{"pilot", "broad"}}}})
 	instMSI := e.deploy(store.NewDeployment{PackageID: "AcmeApp-3.0", Name: "install msi", Rings: []store.Ring{{Name: "all", Groups: []string{"pilot", "broad"}}}})

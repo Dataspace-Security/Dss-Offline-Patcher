@@ -367,7 +367,7 @@ func TestInstallUnverified(t *testing.T) {
 	}
 	dd, _ := s.GetDeployment(ctx, d.DeploymentID)
 	for _, tg := range dd.Targets {
-		if tg.EndpointID == "e-1" && (tg.State != "installed" || tg.Detail != UnverifiedDetail) {
+		if tg.EndpointID == "e-1" && (tg.State != "installed" || tg.Detail != UnverifiedDetail+": inventory shows Acme App 2.0.0, expected 3.0.0 or later") {
 			t.Errorf("target: %+v", tg)
 		}
 	}
