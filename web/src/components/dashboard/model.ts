@@ -1,6 +1,6 @@
 // Pure calculations behind the Overview dashboard. No React, no fetching:
 // every function takes data the console already loads and returns new values.
-import type { Deployment, Endpoint, Package, PackageFleet, Summary } from "../../types";
+import type { Deployment, Endpoint, FleetStatusRow, Package, PackageFleet, Summary } from "../../types";
 import { isAgentPackage } from "../patchPlan";
 
 export type Tone = "green" | "amber" | "red" | "blue" | "purple" | "grey";
@@ -78,7 +78,7 @@ export function activeEndpoints(endpoints: Endpoint[] | null | undefined): Endpo
 /**
  * Fully up to date: inventory shows no missing Windows update, no outdated
  * application and no catalog package still needed. Machines without update
- * information are not counted as up to date.
+ * information are left out of the share (neither up to date nor behind).
  */
 export function upToDate(endpoints: Endpoint[] | null, needs: Record<string, PackageFleet> | null) {
   const active = activeEndpoints(endpoints);
@@ -86,7 +86,9 @@ export function upToDate(endpoints: Endpoint[] | null, needs: Record<string, Pac
   const needsPackage = new Set(Object.values(needs ?? {}).flatMap((f) => (f.needed > 0 ? f.endpoint_ids ?? [] : [])));
   const ok = known.filter((e) => e.missing && e.missing.os + e.missing.apps === 0 && !(e.missing.ready > 0)
     && !needsPackage.has(e.endpoint_id)).length;
-  return { total: active.length, ok, unknown: active.length - known.length, pct: pctFloor(ok, active.length) };
+  // Machines without update information are neutral: the share is of machines that have it (null: none has).
+  return { total: active.length, known: known.length, ok, unknown: active.length - known.length,
+    pct: known.length ? pctFloor(ok, known.length) : null };
 }
 
 /** Windows updates vs. application updates still missing, summed over the fleet's inventory. */
@@ -158,4 +160,117 @@ export function scoreTone(pct: number): "green" | "amber" | "red" {
 
 export function plural(n: number, one: string, many = `${one}s`): string {
   return `${n.toLocaleString()} ${n === 1 ? one : many}`;
+}
+
+// ---------------------------------------------------------------------------
+// History, platforms, deployments and applications (Overview charts).
+
+/** One day of fleet history (GET /api/dashboard/trend). */
+export type FleetDay = {
+  day: string; endpoints: number; compliant: number; updates_available: number; failed: number; offline: number;
+  critical_missing: number; important_missing: number; deployments_done: number; deployments_failed: number; taken_at: string;
+};
+export type FleetTrend = { days: number; today: string; rows: FleetDay[] };
+
+/** Days from today back (inclusive), oldest first, as YYYY-MM-DD in local time. */
+export function dayRange(today: string, days: number): string[] {
+  const [y, m, d] = today.split("-").map((x) => parseInt(x, 10));
+  return Array.from({ length: days }, (_, i) => {
+    const t = new Date(y, m - 1, d - (days - 1 - i));
+    return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+  });
+}
+
+/** Trend series aligned to every day of the range (null = no snapshot that day). */
+export function trendSeries(trend: FleetTrend) {
+  const byDay = new Map(trend.rows.map((r) => [r.day, r]));
+  const days = dayRange(trend.today, trend.days);
+  const rows = days.map((d) => byDay.get(d) ?? null);
+  return {
+    days,
+    // A day with no enrolled machine has no compliance share (not 0 %).
+    compliantPct: rows.map((r) => (r && r.endpoints > 0 ? pctFloor(r.compliant, r.endpoints) : null)),
+    updates: rows.map((r) => (r ? r.updates_available : null)),
+    points: trend.rows.length,
+  };
+}
+
+/** Windows 10/11 and Server builds by release name (KB numbers are shared across some of them). */
+export const BUILD_NAMES: Record<number, string> = {
+  19044: "10 21H2", 19045: "10 22H2", 20348: "Server 2022", 22621: "11 22H2", 22631: "11 23H2", 26100: "11 24H2 / Server 2025", 26200: "11 25H2",
+};
+
+/** Windows release of an endpoint, e.g. "Windows 11 23H2"; falls back to the reported version or build. */
+export function windowsRelease(e: Pick<Endpoint, "build" | "os" | "os_version">): string {
+  if (BUILD_NAMES[e.build]) return `Windows ${BUILD_NAMES[e.build]}`;
+  if (e.build > 0) return `${e.os || "Windows"} build ${e.build}`;
+  return e.os_version || e.os || "Unknown";
+}
+
+export type Slice = { key: string; label: string; value: number; builds: number[] };
+
+/** Endpoints per Windows release, biggest first; slices after `named` fold into "Other". */
+export function osSlices(endpoints: Endpoint[] | null, named = 4): Slice[] {
+  const groups = new Map<string, Slice>();
+  for (const e of activeEndpoints(endpoints)) {
+    const label = windowsRelease(e);
+    const g = groups.get(label) ?? { key: label, label, value: 0, builds: [] };
+    groups.set(label, { ...g, value: g.value + 1, builds: g.builds.includes(e.build) ? g.builds : [...g.builds, e.build] });
+  }
+  const sorted = [...groups.values()].sort((a, b) => b.value - a.value || a.label.localeCompare(b.label));
+  if (sorted.length <= named + 1) return sorted;
+  const rest = sorted.slice(named);
+  return [...sorted.slice(0, named), {
+    key: "other", label: `Other (${rest.length} releases)`, value: rest.reduce((a, s) => a + s.value, 0),
+    builds: rest.flatMap((s) => s.builds),
+  }];
+}
+
+export type WeekBucket = { start: Date; label: string; completed: number; failed: number };
+
+function mondayOf(t: Date): Date {
+  const d = new Date(t.getFullYear(), t.getMonth(), t.getDate());
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() - ((d.getDay() + 6) % 7));
+}
+
+/** Deployment had a failed or lost target. */
+function hadFailures(d: Pick<Deployment, "counts">): boolean {
+  const c = (d.counts ?? {}) as Record<string, number | undefined>;
+  return (c.failed ?? 0) + (c.lost_after_install ?? 0) > 0;
+}
+
+/**
+ * Deployments finished in the last `days` days, per calendar week (Monday
+ * first): completed without failures vs. with failed targets or cancelled.
+ * The finish time is the deployment's last update.
+ */
+export function weeklyDeployments(deployments: Deployment[] | null, now: Date, days = 30): WeekBucket[] {
+  const from = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (days - 1));
+  const weeks: WeekBucket[] = [];
+  for (let w = mondayOf(from); w <= now; w = new Date(w.getFullYear(), w.getMonth(), w.getDate() + 7)) {
+    weeks.push({ start: w, label: w.toLocaleDateString(undefined, { month: "short", day: "numeric" }), completed: 0, failed: 0 });
+  }
+  return (deployments ?? []).reduce((acc, d) => {
+    if (d.state !== "completed" && d.state !== "cancelled") return acc;
+    const t = new Date(d.updated_at);
+    if (Number.isNaN(t.getTime()) || t < from || t > now) return acc;
+    const i = acc.findIndex((b, j) => t >= b.start && (j === acc.length - 1 || t < acc[j + 1].start));
+    if (i < 0) return acc;
+    const bad = d.state === "cancelled" || hadFailures(d);
+    return acc.map((b, j) => (j === i ? { ...b, completed: b.completed + (bad ? 0 : 1), failed: b.failed + (bad ? 1 : 0) } : b));
+  }, weeks);
+}
+
+export type OutdatedApp = { key: string; name: string; latest: string; outdated: number; failed: number; seen: number };
+
+/** Applications most machines run an old version of (fleet status rows kind=app). */
+export function topOutdatedApps(rows: FleetStatusRow[] | null | undefined, n = 10): OutdatedApp[] {
+  return (rows ?? [])
+    .filter((r) => r.kind === "app" && r.outdated + r.failed > 0)
+    .map((r) => ({
+      key: r.key, name: r.name || r.key, latest: r.latest, outdated: r.outdated + r.failed, failed: r.failed,
+      seen: r.up_to_date + r.outdated + r.being_patched + r.verified + r.failed + r.exception,
+    }))
+    .sort((a, b) => b.outdated - a.outdated || a.name.localeCompare(b.name))
+    .slice(0, n);
 }

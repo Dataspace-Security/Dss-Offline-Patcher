@@ -13,13 +13,17 @@ import { Rollouts } from "../components/dashboard/Rollouts";
 import { SupplyChain, type AcquisitionOverview } from "../components/dashboard/SupplyChain";
 import { RecentActivity } from "../components/dashboard/RecentActivity";
 import { NeedsApproval } from "../components/dashboard/NeedsApproval";
-import type { AcquisitionRequestRecord, Alert, AuditEvent, Deployment, Endpoint, Package, Summary } from "../types";
+import { ComplianceTrend, DeploymentHistory } from "../components/dashboard/Trends";
+import { OutdatedApps, WindowsVersions } from "../components/dashboard/FleetMix";
+import type { FleetTrend } from "../components/dashboard/model";
+import type { AcquisitionRequestRecord, Alert, AuditEvent, Deployment, Endpoint, FleetStatus, Package, Summary } from "../types";
 import { isOpenAlert } from "./Alerts";
 import { useLoad } from "../util";
 import "../dashboard.css";
 
 const SUMMARY_MS = 10000;
 const AUDIT_LIMIT = 8;
+const TREND_DAYS = 30;
 
 /** Overview dashboard: one screen that says how patched the bank is and what to do next. */
 export default function Overview() {
@@ -41,6 +45,8 @@ export default function Overview() {
     [visible, canPatch], canPatch ? every(5 * 60000) : undefined);
   const requests = useLoad(() => (canPatch ? api.get<AcquisitionRequestRecord[]>("/api/acquisition-requests") : Promise.resolve(null)),
     [visible, canPatch], canPatch ? every(5 * 60000) : undefined);
+  const trend = useLoad(() => api.get<FleetTrend>(`/api/dashboard/trend?days=${TREND_DAYS}`), [visible], every(5 * 60000));
+  const fleetStatus = useLoad(() => api.get<FleetStatus>("/api/fleet/status"), [visible], every(5 * 60000));
   const audit = useLoad(() => api.get<AuditEvent[]>(`/api/audit?limit=${AUDIT_LIMIT}`).then((l) => (l ?? []).slice(0, AUDIT_LIMIT)), [visible], every(30000));
 
   const s = summary.data;
@@ -75,14 +81,19 @@ export default function Overview() {
       <HeroRow summary={s} endpoints={eps.data} needs={needs.data} alerts={alerts.data} />
       <NeedsApproval packages={packages.data} deployments={deployments.data} policy={policy.data} />
 
+      {/* Named grid areas (dashboard.css): every row is filled at every width, so the grid has no holes. */}
       <div className="dash-grid">
+        <ComplianceTrend trend={trend.data} error={trend.error} className="dash-a-trend" />
         <FleetHealth summary={s} isOperator={canPatch} />
         <PatchExposure packages={packages.data} needs={needs.data} endpoints={eps.data} canPatch={canPatch} onChanged={reloadPatches} />
-        <SupplyChain summary={s} acquisition={acquisition.data} acquisitionError={acquisition.error} requests={requests.data} showImports={canPatch} />
+        <WindowsVersions endpoints={eps.data} className="dash-a-os" />
+        <DeploymentHistory deployments={deployments.data} className="dash-a-deploy" />
+        <OutdatedApps rows={fleetStatus.data?.rows ?? (fleetStatus.data ? [] : null)} error={fleetStatus.error} className="dash-a-apps" />
         {s
-          ? <YourWork summary={s} endpoints={eps.data} className="dash-span-2 dash-wide-3" />
-          : <DashCard title="Your work" className="dash-span-2 dash-wide-3"><Skeleton lines={4} /></DashCard>}
+          ? <YourWork summary={s} endpoints={eps.data} className="dash-a-work" />
+          : <DashCard title="Your work" className="dash-a-work"><Skeleton lines={4} /></DashCard>}
         <Rollouts deployments={deployments.data} policy={policy.data} canPlan={canPatch} />
+        <SupplyChain summary={s} acquisition={acquisition.data} acquisitionError={acquisition.error} requests={requests.data} showImports={canPatch} />
         <RecentActivity events={audit.data} error={audit.error} summary={s} />
       </div>
     </div>

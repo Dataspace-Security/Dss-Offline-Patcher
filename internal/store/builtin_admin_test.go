@@ -115,3 +115,22 @@ func TestDefaultPasswordForcedChangeOnOpen(t *testing.T) {
 		s.Close()
 	}
 }
+
+// GetLocalProfile.DefaultPassword follows the stored hash: true for the
+// built-in default, false for an account created with its own password.
+func TestLocalProfileDefaultPassword(t *testing.T) {
+	s := openTest(t)
+	withTestDefault(t, s)
+	ctx := context.Background()
+	p, err := s.GetLocalProfile(ctx, DefaultSuperAdminEmail)
+	if err != nil || !p.DefaultPassword {
+		t.Fatalf("built-in with default: %+v %v", p, err)
+	}
+	if _, err := s.CreateLocalUser(ctx, Manager{Actor: "system:test", Role: RoleSuperAdmin},
+		NewLocalUser{Email: "own@bank.example", Role: RoleSuperAdmin, Password: "a long enough password"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := s.GetLocalProfile(ctx, "own@bank.example"); err != nil || p.DefaultPassword {
+		t.Fatalf("own password: %+v %v", p, err)
+	}
+}

@@ -78,7 +78,7 @@ type Props = { events: AuditEvent[] | null; error: string | null; summary: Summa
 /** Recent activity: the last audit events in plain words, newest first. */
 export function RecentActivity({ events, error, summary }: Props) {
   return (
-    <DashCard title="Recent activity" className="dash-span-2 dash-wide-3"
+    <DashCard title="Recent activity" className="dash-a-recent"
               sub={summary ? (summary.audit.ok
                 ? <>Audit trail intact · <span className="num">{summary.audit.count.toLocaleString()}</span> events</>
                 : <span className="text-red"><b>Audit trail check failed.</b> Open the audit trail.</span>) : undefined}

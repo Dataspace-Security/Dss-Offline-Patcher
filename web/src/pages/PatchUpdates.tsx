@@ -98,7 +98,8 @@ export default function PatchUpdates() {
   const status = useLoad(() => api.get<FleetStatus>("/api/fleet/status"), [], POLL_MS);
   const needed = useLoad(() => api.get<FleetUpdates>("/api/updates"), [], POLL_MS);
   const fleet = useLoad(fetchFleet, [], POLL_MS);
-  const [q, setQ] = useState("");
+  // ?q= pre-fills the search (links from the Overview charts).
+  const [q, setQ] = useState(() => sp.get("q") ?? "");
   const [open, setOpen] = useState<{ key: string; status: FleetEndpointStatus | "" } | null>(null);
   const [patching, setPatching] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
