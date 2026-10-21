@@ -246,6 +246,17 @@ func (s *Store) RetireEndpoint(ctx context.Context, actor, id, reason string) (E
 	}
 	var out Endpoint
 	err := s.txChanged(ctx, func(tx *sql.Tx) error {
+		var err error
+		out, err = s.retireEndpointTx(ctx, tx, actor, id, reason)
+		return err
+	})
+	return out, err
+}
+
+// retireEndpointTx is RetireEndpoint inside tx.
+func (s *Store) retireEndpointTx(ctx context.Context, tx *sql.Tx, actor, id, reason string) (Endpoint, error) {
+	var out Endpoint
+	err := func() error {
 		e, err := getEndpoint(ctx, tx, id)
 		if err != nil {
 			return err
@@ -277,6 +288,6 @@ func (s *Store) RetireEndpoint(ctx context.Context, actor, id, reason string) (E
 		out, err = getEndpoint(ctx, tx, id)
 		out.Status = "retired"
 		return err
-	})
+	}()
 	return out, err
 }
