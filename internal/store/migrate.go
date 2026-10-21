@@ -120,6 +120,8 @@ var tableMigrations = []string{
 	deploymentScopeSchema,
 	// One-time setup codes of the built-in super admin (setupcode.go).
 	setupCodesSchema,
+	// Daily fleet history for the dashboard trend charts (fleet_daily.go).
+	fleetDailySchema,
 }
 
 // The role names operator and approver were removed: stored users and

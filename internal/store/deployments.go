@@ -1101,6 +1101,9 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 			if _, err := tx.Exec(`UPDATE endpoints SET hardware=? WHERE endpoint_id=?`, mustJSON(r.Hardware.clean()), endpointID); err != nil {
 				return err
 			}
+			if err := s.retireReplaced(ctx, tx, endpointID, r.Hostname, r.Hardware.clean()); err != nil {
+				return err
+			}
 		}
 		e, err := getEndpoint(ctx, tx, endpointID)
 		if err != nil {

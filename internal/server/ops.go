@@ -184,6 +184,9 @@ func (s *Server) RunAlerts(ctx context.Context, every time.Duration) {
 		if err := s.SweepIntelAlerts(ctx); err != nil {
 			s.log.Error("update intelligence alert sweep", "err", err)
 		}
+		if _, err := s.SnapshotFleetDay(ctx, FleetSnapshotEvery); err != nil {
+			s.log.Error("daily fleet snapshot", "err", err)
+		}
 		select { // deliver what the sweep raised; never wait for delivery
 		case kick <- struct{}{}:
 		default:

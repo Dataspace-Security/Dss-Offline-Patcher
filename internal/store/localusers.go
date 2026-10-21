@@ -633,6 +633,9 @@ type LocalProfile struct {
 	MustChangePassword bool
 	PasswordChangedAt  string // "" until the user changed their password
 	Builtin            bool   // the installer-created super admin
+	// DefaultPassword: the stored hash is still the built-in default one
+	// (the server's truth for "change the installation password").
+	DefaultPassword bool
 }
 
 // GetLocalProfile returns the profile of local user email (ErrNotFound if
@@ -640,11 +643,13 @@ type LocalProfile struct {
 func (s *Store) GetLocalProfile(ctx context.Context, email string) (LocalProfile, error) {
 	var p LocalProfile
 	var must, builtin int
-	err := s.db.QueryRowContext(ctx, `SELECT display_name, must_change_password, password_changed_at, builtin FROM local_users WHERE email=?`, email).
-		Scan(&p.DisplayName, &must, &p.PasswordChangedAt, &builtin)
+	var hash string
+	err := s.db.QueryRowContext(ctx, `SELECT display_name, must_change_password, password_changed_at, builtin, password_hash FROM local_users WHERE email=?`, email).
+		Scan(&p.DisplayName, &must, &p.PasswordChangedAt, &builtin, &hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, Errf(ErrNotFound, "local user %s", email)
 	}
 	p.MustChangePassword, p.Builtin = must == 1, builtin == 1
+	p.DefaultPassword = hash != "" && hash == defaultPasswordHash
 	return p, err
 }

@@ -245,7 +245,10 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
                 <button className="btn btn-danger" onClick={() => setAction("reject")}>Reject…</button>
               </>
             )}
-            {p.state === "approved" && canDeploy && (
+            {p.state === "approved" && canDeploy && need && (need.needed ?? 0) === 0 && !need.active_deployment_id && (
+              <span className="muted small" title="No machine needs this package: up to date, app not installed or not applicable everywhere">nothing to install</span>
+            )}
+            {p.state === "approved" && canDeploy && !(need && (need.needed ?? 0) === 0 && !need.active_deployment_id) && (
               <button className="btn btn-primary" onClick={() => setPatching(true)}
                       title="Guided deployment: Standard (test machines first, then all machines), Emergency, or the full form">
                 Patch this…

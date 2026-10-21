@@ -20,6 +20,10 @@ type InventoryItem struct {
 	// (HKU\<SID>\...\Uninstall), empty for a machine-wide install. Both
 	// count the same for needs, targeting and verification.
 	Scope string `json:"scope,omitempty"`
+	// Hidden: the entry is marked SystemComponent (not shown in Apps &
+	// features), e.g. Microsoft Edge WebView2 Runtime. It counts like any
+	// other entry for needs and verification.
+	Hidden bool `json:"hidden,omitempty"`
 }
 
 type Endpoint struct {

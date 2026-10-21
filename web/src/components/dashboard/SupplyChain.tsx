@@ -26,7 +26,7 @@ const OPEN_ITEM = new Set(["requested", "seen", "stale", "failed"]);
 /** Supply chain: last download run, age of the update information, imports waiting, bundles received. */
 export function SupplyChain({ summary, acquisition, acquisitionError, requests, showImports = true }: Props) {
   return (
-    <DashCard title="Supply chain" className="dash-span-1" sub="How updates reach this offline network"
+    <DashCard title="Supply chain" className="dash-a-supply" sub="How updates reach this offline network"
               action={showImports ? <Link to={paths.imports} className="dash-link">Imports →</Link> : undefined}>
       {!summary ? <Skeleton lines={5} /> : (
         <ul className="dash-facts">

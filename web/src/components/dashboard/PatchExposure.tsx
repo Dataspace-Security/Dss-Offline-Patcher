@@ -30,21 +30,21 @@ export function PatchExposure({ packages, needs, endpoints, canPatch, onChanged 
 
   return (
     <>
-      <DashCard title="Missing updates" className="dash-span-1"
+      <DashCard title="Missing updates" className="dash-a-sev"
                 sub="Machine-patches still to install"
                 action={<Link to={paths.needed()} className="dash-link">Needed →</Link>}>
         {loading ? <Skeleton lines={5} /> : (
           <>
             <div className="dash-subhead">By severity <span className="muted">· catalog packages</span></div>
-            {list.length === 0
-              ? <EmptyState title="No catalog package is needed">Updates that are not in the catalog yet show under Windows and applications below.</EmptyState>
-              : (
-                <HBars label="Missing machine-patches by severity" unit="machine-patches"
-                       bars={SEVERITIES.map((s) => ({
-                         key: s, value: sev[s].missing, fill: SEVERITY_FILL[s],
-                         label: <span className={`sev-${s}`}>{SEV_LABEL[s]}</span>,
-                       }))} />
-              )}
+            <HBars label="Missing machine-patches by severity" unit="machine-patches"
+                   bars={SEVERITIES.map((s) => ({
+                     key: s, value: sev[s].missing, fill: SEVERITY_FILL[s],
+                     label: <span className={`sev-${s}`}>{SEV_LABEL[s]}</span>,
+                     sub: sev[s].packages > 0 ? plural(sev[s].packages, "package") : undefined,
+                   }))} />
+            {list.length === 0 && (
+              <div className="dash-note">No catalog package is needed. Updates not in the catalog yet show under Windows and applications below.</div>
+            )}
             <div className="dash-subhead">By kind <span className="muted">· from inventory</span></div>
             {noIntel
               ? <EmptyState title="No update information yet">It arrives through the transfer from the acquisition zone.</EmptyState>
@@ -59,7 +59,7 @@ export function PatchExposure({ packages, needs, endpoints, canPatch, onChanged 
         )}
       </DashCard>
 
-      <DashCard title="Most needed patches" className="dash-span-2"
+      <DashCard title="Most needed patches" className="dash-a-needed"
                 sub="Catalog packages, by how many machines still need them"
                 action={<Link to={paths.catalog()} className="dash-link">Catalog →</Link>}>
         {loading ? <Skeleton lines={5} /> : top.length === 0 ? (

@@ -86,7 +86,7 @@ export type Hardware = {
   disks?: { mount: string; total_bytes: number; free_bytes: number }[];
   ip_addresses?: string[]; mac_address?: string; boot_time?: string; logged_in_user?: string; timezone?: string;
 };
-export type InventoryItem = { kind: "kb" | "product" | "pkg" | "app" | "appx" | "agent"; id: string; name: string; version: string; source?: "appstore" | "msstore";
+export type InventoryItem = { kind: "kb" | "product" | "pkg" | "app" | "appx" | "agent"; id: string; name: string; version: string; source?: "appstore" | "msstore"; hidden?: boolean;
   /** P2: "user" = per-user install (one user's profile); empty = whole machine. */
   scope?: "user" | "";
 };
@@ -200,8 +200,10 @@ export type Me = {
   display_name?: string; source?: string; mfa?: boolean;
   /** Authenticator-app MFA: set up for this account / required for its role (bank roles yes, super admin optional). */
   mfa_enrolled?: boolean; mfa_required?: boolean;
-  /** Assumed: "" / absent while the built-in super admin still has the installer's password; `builtin` marks that account. */
+  /** "" until the user changed their password; `builtin` marks the installer-created super admin. */
   password_changed_at?: string; builtin?: boolean;
+  /** The stored password is still the built-in default from the installation (server-side check). */
+  default_password?: boolean;
 };
 export type AuthConfig = { sso: boolean; require_mfa: boolean; /** Server version, when the server reports it. */ version?: string };
 export type LogoutResponse = { end_session_url?: string };

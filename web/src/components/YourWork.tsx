@@ -7,7 +7,6 @@ import type { ComplianceReport, Deployment, DeploymentDetail, Endpoint, Package,
 import { useLoad } from "../util";
 import { exhaustedInCurrentRing, isLiveDeployment, readyToAdvance } from "./rollout";
 import { approvedBy, fetchPolicy, isAgentPackage } from "./patchPlan";
-import { waitingText } from "./DeploymentApproval";
 import { usePageVisible } from "./usePageVisible";
 import "../ops.css";
 
@@ -63,35 +62,25 @@ export function YourWork({ summary, endpoints, className = "" }: { summary: Summ
       : <>The catalog is empty. A User or Admin imports patches from <Link to={paths.needed()}>Needed</Link>.</>);
   }
 
-  if (approvesDeployments && me) {
-    const toApprove = (live.data?.pending ?? []).filter((d) => deploymentApprovalStatus(d, me, policy.data).canApprove);
-    items.push({
-      key: "approve-deployments", count: toApprove.length, tone: "amber",
-      to: toApprove.length === 1 ? `/deployments/${enc(toApprove[0].deployment_id)}` : "/deployments",
-      label: "deployments waiting for your approval",
-      detail: toApprove.slice(0, 3).map((d) => (
-        <Link key={d.deployment_id} className="tag" to={`/deployments/${enc(d.deployment_id)}`}
-              title={waitingText(d, policy.data)}>{d.name || d.deployment_id}{d.operation === "rollback" ? " (rollback)" : ""}</Link>
-      )),
-    });
-  }
   if (isOperator && me) {
     const waitingMine = (live.data?.pending ?? []).filter((d) => deploymentApprovalStatus(d, me, policy.data).mine);
     items.push({
       key: "my-pending", count: waitingMine.length, tone: "grey",
       to: waitingMine.length === 1 ? `/deployments/${enc(waitingMine[0].deployment_id)}` : "/deployments",
-      label: "of your deployments are waiting for other people to approve",
-      detail: waitingMine.slice(0, 3).map((d) => (
-        <Link key={d.deployment_id} className="tag" to={`/deployments/${enc(d.deployment_id)}`}>{d.name || d.deployment_id} · {waitingText(d, policy.data)}</Link>
-      )),
+      label: <>of your deployments are waiting for other people to approve<span className="muted"> · listed under <b>Needs approval</b> at the top</span></>,
     });
   }
+  // Approvals are listed one by one in the "Needs approval" banner at the
+  // top of the Overview; here they are one line that points there.
   if (isApprover && me) {
-    const mine = (quarantined.data ?? []).filter((p) => mineToHandle(p) && !approvedBy(p, me));
+    const deps = approvesDeployments ? (live.data?.pending ?? []).filter((d) => deploymentApprovalStatus(d, me, policy.data).canApprove) : [];
+    const pkgs = (quarantined.data ?? []).filter((p) => mineToHandle(p) && !approvedBy(p, me));
+    const parts = [pkgs.length && `${pkgs.length} package${pkgs.length === 1 ? "" : "s"}`, deps.length && `${deps.length} deployment${deps.length === 1 ? "" : "s"}`]
+      .filter(Boolean).join(" and ");
     items.push({
-      key: "approve", count: mine.length, tone: "amber", to: `${paths.catalog()}?state=quarantined`,
-      label: "packages awaiting your approval",
-      detail: mine.slice(0, 3).map((p) => <Link key={p.package_id} className="tag" to={paths.catalog(p.package_id)}>{p.title || p.package_id}</Link>),
+      key: "approve", count: pkgs.length + deps.length, tone: "amber",
+      to: pkgs.length === 0 && deps.length > 0 ? "/deployments" : `${paths.catalog()}?state=quarantined`,
+      label: <>waiting for your approval{parts && <span className="muted"> · {parts}, listed under <b>Needs approval</b> at the top</span>}</>,
     });
   }
   if (isOperator) {

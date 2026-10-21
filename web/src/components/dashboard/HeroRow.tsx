@@ -17,7 +17,7 @@ const SILENT = ["offline", "stale"];
 export function HeroRow({ summary, endpoints, needs, alerts }: Props) {
   return (
     <div className="dash-hero">
-      <ComplianceTile summary={summary} />
+      <ComplianceTile summary={summary} endpoints={endpoints} needs={needs} />
       <UpToDateTile endpoints={endpoints} needs={needs} />
       <AttentionTile summary={summary} />
       <CriticalAlertsTile alerts={alerts} />
@@ -25,25 +25,32 @@ export function HeroRow({ summary, endpoints, needs, alerts }: Props) {
   );
 }
 
-function ComplianceTile({ summary }: { summary: Summary | null }) {
+function ComplianceTile({ summary, endpoints, needs }: {
+  summary: Summary | null; endpoints: Endpoint[] | null; needs: Record<string, PackageFleet> | null;
+}) {
   if (!summary) return <div className="dash-tile dash-tile-gauge"><Skeleton chart="gauge" lines={2} /></div>;
   const s = complianceScore(summary);
+  const noInfo = endpoints ? upToDate(endpoints, needs).unknown : 0;
   const by = summary.endpoints.by_status as Record<string, number>;
   const silent = SILENT.reduce((a, k) => a + (by?.[k] ?? 0), 0);
   const waiting = by?.awaiting_checkin ?? 0;
   const tone = s.total ? scoreTone(s.pct) : "grey";
   return (
     <Link to={paths.reports} className="dash-tile dash-tile-gauge dash-tile-link"
-          title="Compliant = checking in, nothing missing and no deployment problem. Offline, stale and machines waiting for their first check-in are not counted as compliant.">
+          title="Compliant = checking in, no known missing update and no deployment problem. Offline, stale and machines waiting for their first check-in are not counted as compliant.">
       <div className="dash-tile-label">Patch compliance</div>
+      <div className="dash-tile-caption">Machines with no known missing patch and no failed install</div>
       <RadialGauge pct={s.total ? s.pct : null} tone={tone} label="Patch compliance"
                    caption={<span className="num">{s.compliant.toLocaleString()} of {s.total.toLocaleString()}</span>} />
       <div className="dash-tile-foot">
         {s.total === 0
           ? "No endpoints enrolled yet."
           : silent + waiting > 0
-            ? <>{plural(silent + waiting, "machine")} with no recent information {silent + waiting === 1 ? "counts" : "count"} against the score.</>
+            ? <>{plural(silent + waiting, "machine")} not reporting {silent + waiting === 1 ? "counts" : "count"} against the score.</>
             : "Every machine is reporting."}
+        {s.total > 0 && noInfo > 0 && (
+          <div className="dash-tile-note">{plural(noInfo, "machine")} without update information yet: judged on deployments only.</div>
+        )}
       </div>
     </Link>
   );
@@ -52,18 +59,25 @@ function ComplianceTile({ summary }: { summary: Summary | null }) {
 function UpToDateTile({ endpoints, needs }: { endpoints: Endpoint[] | null; needs: Record<string, PackageFleet> | null }) {
   if (!endpoints) return <div className="dash-tile"><Skeleton lines={3} /></div>;
   const u = upToDate(endpoints, needs);
-  const tone = u.total ? scoreTone(u.pct) : "grey";
+  const tone = u.pct === null ? "grey" : scoreTone(u.pct);
   return (
     <Link to="/endpoints?outdated=1" className={`dash-tile dash-tile-link dash-tone-${tone}`}
-          title="Up to date = no missing Windows update, no outdated application and no catalog package still needed. Machines without update information count against it.">
+          title="Fully up to date = Windows and every application at the latest version the update information knows, and no catalog package still needed. Machines without update information are left out, not counted as behind.">
       <div className="dash-tile-label">Fully up to date</div>
-      <div className="dash-stat-value">{u.total ? `${u.pct}%` : "—"}</div>
-      <div className="dash-meter" role="img" aria-label={`${u.ok} of ${u.total} machines fully up to date`}>
-        <span className="dash-meter-fill" style={{ width: `${u.pct}%` }} />
-      </div>
+      <div className="dash-tile-caption">Windows and all applications at the latest known version</div>
+      <div className="dash-stat-value">{u.pct === null ? "—" : `${u.pct}%`}</div>
+      {u.pct !== null && (
+        <div className="dash-meter" role="img" aria-label={`${u.ok} of ${u.known} machines with update information fully up to date`}>
+          <span className="dash-meter-fill" style={{ width: `${u.pct}%` }} />
+        </div>
+      )}
       <div className="dash-tile-foot">
-        <span className="num">{u.ok.toLocaleString()}</span> of <span className="num">{u.total.toLocaleString()}</span> machines
-        {u.unknown > 0 && <> · <span className="num">{u.unknown}</span> without update information</>}
+        {u.total === 0 ? "No endpoints enrolled yet."
+          : u.known === 0 ? <>No update information yet for any machine. It arrives with the transfer from the acquisition zone.</>
+            : <>
+              <span className="num">{u.ok.toLocaleString()}</span> of <span className="num">{u.known.toLocaleString()}</span> machines with update information
+              {u.unknown > 0 && <> · <span className="num">{u.unknown}</span> not checked yet</>}
+            </>}
       </div>
     </Link>
   );
