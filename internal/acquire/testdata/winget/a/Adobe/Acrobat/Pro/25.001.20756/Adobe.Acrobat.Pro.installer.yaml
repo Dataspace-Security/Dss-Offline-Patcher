@@ -1,0 +1,33 @@
+# Not a recording: written after the winget-pkgs Adobe.Acrobat.Pro manifest
+# and the public installer schema (1.10.0). Its zip holds setup.exe next to
+# the AcroPro.msi, cabinets, patches and setup.ini setup.exe runs.
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.10.0.schema.json
+
+PackageIdentifier: Adobe.Acrobat.Pro
+PackageVersion: 25.001.20756
+InstallerType: zip
+NestedInstallerType: exe
+NestedInstallerFiles:
+- RelativeFilePath: Adobe Acrobat\setup.exe
+InstallModes:
+- interactive
+- silent
+- silentWithProgress
+InstallerSwitches:
+  Silent: /sAll /rs /msi EULA_ACCEPT=YES
+  SilentWithProgress: /sAll /rs /msi EULA_ACCEPT=YES
+UpgradeBehavior: install
+ProductCode: '{AC76BA86-1033-FFFF-7760-BC15014EA700}'
+AppsAndFeaturesEntries:
+- DisplayName: Adobe Acrobat (64-bit)
+  Publisher: Adobe
+  ProductCode: '{AC76BA86-1033-FFFF-7760-BC15014EA700}'
+  UpgradeCode: '{AC76BA86-0000-0000-0000-6028747ADE01}'
+  InstallerType: msi
+Installers:
+- Architecture: x64
+  Scope: machine
+  InstallerUrl: https://trials.adobe.com/AdobeProducts/APRO/Acrobat_HelpX/win32/Acrobat_DC_Web_x64_WWMUI.zip
+  InstallerSha256: 0F7A3CE0B9F14A3B0CD1B2D6B1A2E1C7F4F3E5D2A1B0C9D8E7F6A5B4C3D2E1F0
+ManifestType: installer
+ManifestVersion: 1.10.0

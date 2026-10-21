@@ -20,6 +20,12 @@ import (
 //     switch (the manifest's, or the type's default for inno, nullsoft and
 //     burn). MSI wins over EXE. pmctl still verifies the Authenticode
 //     signature after download (kind exe requires a verified signer).
+//   - A zip (winget InstallerType zip) whose NestedInstallerType is one of
+//     those types and that names its installer (NestedInstallerFiles) is
+//     judged like that installer, with an https URL and a SHA-256 of the
+//     zip required; a plain installer is preferred over one in a zip.
+//     pmctl downloads the zip, checks it and extracts only that file (see
+//     acquire.ExtractNested). A zip with a portable app is not importable.
 //   - "no" with a reason: resolved, but no installer qualifies, e.g.
 //     "installs per user only" or "no MSI or EXE installer (msix)".
 //   - "unknown": not resolved yet (no Resolved entry).
@@ -39,6 +45,14 @@ const (
 	ReasonExeNoHTTPS  = "EXE installer URL is not HTTPS"
 )
 
+// Reasons for zip installers that cannot be imported (shared with pmctl).
+const (
+	ReasonZipPortable = "zip with a portable app (no installer)"
+	ReasonZipNoFile   = "zip without a named installer file (NestedInstallerFiles)"
+	ReasonZipNoSHA    = "zip without a SHA-256 in the winget manifest"
+	ReasonZipNoHTTPS  = "zip URL is not HTTPS"
+)
+
 // msiTypes are winget InstallerType values offpatch imports as msi packages.
 var msiTypes = map[string]bool{"msi": true, "wix": true}
 
@@ -50,9 +64,43 @@ var exeDefaultSilent = map[string]bool{"inno": true, "nullsoft": true, "burn": t
 
 var sha256Hex = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
 
-// ExeReason returns why an EXE-type installer cannot be imported, or "".
+// InstallType is the type of installer offpatch would run: for a zip
+// naming an MSI or EXE installer (NestedType, NestedPath), the nested
+// type and inZip true; otherwise Type (lower case).
+func InstallType(in ResolvedInstaller) (t string, inZip bool) {
+	t = strings.ToLower(in.Type)
+	if t != "zip" {
+		return t, false
+	}
+	if nt := strings.ToLower(in.NestedType); (msiTypes[nt] || exeTypes[nt]) && in.NestedPath != "" {
+		return nt, true
+	}
+	return t, false
+}
+
+// ZipReason returns why a zip installer cannot be imported, or "" (the
+// nested installer is then judged by its own type's rule).
+func ZipReason(in ResolvedInstaller) string {
+	nt := strings.ToLower(in.NestedType)
+	switch {
+	case nt == "portable":
+		return ReasonZipPortable
+	case !msiTypes[nt] && !exeTypes[nt]:
+		return ""
+	case in.NestedPath == "":
+		return ReasonZipNoFile
+	case !strings.HasPrefix(strings.ToLower(in.URL), "https://"):
+		return ReasonZipNoHTTPS
+	case !sha256Hex.MatchString(in.SHA256):
+		return ReasonZipNoSHA
+	}
+	return ""
+}
+
+// ExeReason returns why an EXE-type installer (also one in a zip) cannot
+// be imported, or "".
 func ExeReason(in ResolvedInstaller) string {
-	t := strings.ToLower(in.Type)
+	t, _ := InstallType(in)
 	switch {
 	case strings.EqualFold(in.Scope, "user"):
 		return ReasonPerUser
@@ -85,7 +133,8 @@ func Importable(r *Resolved, arches []string, canReadMSI bool) (status, reason s
 	// its x86 EXE installed on x64 Windows too, as pmctl does (PickEXE).
 	native := false
 	for _, in := range r.Installers {
-		a, t := strings.ToLower(in.Arch), strings.ToLower(in.Type)
+		a := strings.ToLower(in.Arch)
+		t, _ := InstallType(in)
 		if (msiTypes[t] || exeTypes[t]) && (want[a] || (a == "neutral" || a == "") && !want["arm64"]) {
 			native = true
 		}
@@ -104,31 +153,50 @@ func Importable(r *Resolved, arches []string, canReadMSI bool) (status, reason s
 	}
 	var types, otherArches, exeReasons []string
 	noCode := false
-	exeYes := ""
+	exeYes, zipMSIYes := "", ""
 	for _, in := range r.Installers {
-		t := strings.ToLower(in.Type)
+		t, inZip := InstallType(in)
 		if !archOK(in.Arch, msiTypes[t]) {
 			otherArches = appendUnique(otherArches, strings.ToLower(in.Arch))
 			continue
 		}
+		where := ""
+		if inZip {
+			where = " in a zip"
+		}
+		if strings.EqualFold(in.Type, "zip") {
+			if why := ZipReason(in); why != "" {
+				exeReasons = appendUnique(exeReasons, why)
+				types = appendUnique(types, zipLabel(in))
+				continue
+			}
+		}
 		switch {
 		case msiTypes[t]:
 			if in.ProductCode != "" || canReadMSI {
-				return ImportableYes, "MSI installer (" + archLabel(in.Arch) + ")"
+				if !inZip {
+					return ImportableYes, "MSI installer (" + archLabel(in.Arch) + ")"
+				}
+				if zipMSIYes == "" {
+					zipMSIYes = "MSI installer in a zip (" + archLabel(in.Arch) + ")"
+				}
+				continue
 			}
 			noCode = true
 		case exeTypes[t]:
 			if why := ExeReason(in); why != "" {
 				exeReasons = appendUnique(exeReasons, why)
-			} else if exeYes == "" {
-				exeYes = "EXE installer (" + t + ")"
+			} else if exeYes == "" || !inZip && strings.Contains(exeYes, " in a zip") {
+				exeYes = "EXE installer" + where + " (" + t + ")"
 			}
 			types = appendUnique(types, t)
 		default:
-			types = appendUnique(types, t)
+			types = appendUnique(types, zipLabel(in))
 		}
 	}
 	switch {
+	case zipMSIYes != "":
+		return ImportableYes, zipMSIYes
 	case exeYes != "":
 		return ImportableYes, exeYes
 	case noCode:
@@ -145,9 +213,20 @@ func Importable(r *Resolved, arches []string, canReadMSI bool) (status, reason s
 	return ImportableNo, "no MSI or EXE installer (" + strings.Join(types, ", ") + ")"
 }
 
-// bestExeReason: the most telling reason when several EXE installers fail.
+// zipLabel: "zip/msix" for a zip of another installer type, else the type.
+func zipLabel(in ResolvedInstaller) string {
+	t := strings.ToLower(in.Type)
+	if nt := strings.ToLower(in.NestedType); t == "zip" && nt != "" {
+		return t + "/" + nt
+	}
+	return t
+}
+
+// bestExeReason: the most telling reason when several EXE (or zip)
+// installers fail.
 func bestExeReason(rs []string) string {
-	for _, want := range []string{ReasonExeNoSilent, ReasonPerUser, ReasonExeNoSHA, ReasonExeNoHTTPS} {
+	for _, want := range []string{ReasonExeNoSilent, ReasonPerUser, ReasonExeNoSHA, ReasonExeNoHTTPS,
+		ReasonZipNoFile, ReasonZipNoSHA, ReasonZipNoHTTPS, ReasonZipPortable} {
 		for _, r := range rs {
 			if r == want {
 				return r

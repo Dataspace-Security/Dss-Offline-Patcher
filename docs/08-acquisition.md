@@ -423,6 +423,22 @@ Trust anchors are the host's system roots plus the code-signing roots shipped in
   - per-user entries do not count.
 - A target is verified when the `DisplayVersion` reaches `detect.display_version` (else the package version).
 
+### Installers inside a zip
+
+Some winget apps ship their installer in a zip (`InstallerType: zip`). pmctl imports them when the manifest says what is inside: `NestedInstallerType` msi or wix (an MSI package) or exe, inno, nullsoft or burn (an EXE package), and exactly one `NestedInstallerFiles[].RelativeFilePath` (root or per installer; `PortableCommandAlias` is ignored). The rest of the rule is the plain installer's (architecture, machine scope, silent switch), plus an https URL and a `InstallerSha256` for the zip. A plain MSI or EXE for the same architecture is preferred over one in a zip. The Library shows e.g. "MSI installer in a zip (x64)" or "EXE installer in a zip (inno)"; a zip with a portable app shows "Can't import: zip with a portable app (no installer)" (portable apps are not supported).
+
+**What pmctl does** (`cmd/pmctl/requests_zip.go`, `internal/acquire/zipnested.go`):
+
+1. Downloads the zip over HTTPS and accepts it only if it matches the manifest's SHA-256.
+2. Checks every entry before writing anything: no absolute paths, drive letters, `..` or `.` elements, symbolic links or other special files, encrypted entries, or names that differ only in case (Windows would merge them). Caps: 4 GB uncompressed in total, 20,000 entries, and a compression ratio of 200:1 for any entry over 1 MiB (zip bombs).
+3. Extracts only the named file, matched case-insensitively, into a private temporary directory, checking the CRC-32 and the declared size. It becomes `downloads/<package id>.msi|.exe`; the zip is then deleted.
+4. Handles that file exactly like a downloaded MSI or EXE: ProductCode read from the MSI when the manifest has none, Authenticode verification, signer pin and revocation check. The package's file and SHA-256 are the extracted installer's; agents need no change.
+5. Records the origin: `source_url` is the zip's URL, and the spec's `acquired` block has `method: "zip"`, `zip_sha256`, `zip_size` and `zip_path`, and `verified` reads e.g. `sha256(winget manifest URL)+unzipped(Tool/setup.exe)+authenticode(Contoso Ltd)`.
+
+**Limit: one file per package.** A bundle package is a single file, so an installer that needs the zip's other files cannot be packaged on its own. If the zip holds any file besides the installer (documentation such as `.txt`, `.md`, `.pdf`, `.rtf`, `.htm(l)`, `.url` and macOS metadata excepted), the item is unsupported with "installer needs other files from the zip" and the run's warnings name them. This is checked after download, so the Library may show such an app as importable. Adobe Acrobat (`Adobe.Acrobat.Pro`) is the typical case: its zip holds `Adobe Acrobat\setup.exe` next to `AcroPro.msi`, cabinets, patches and `setup.ini`, which setup.exe needs. Deploy such apps with the vendor's own enterprise tooling, or repackage them as a single MSI and import it with `pmctl fetch-url`.
+
+Intelligence documents carry the zip's contents in two optional fields of each resolved installer (`nested_type`, `nested_path`). Servers before this change refuse documents that contain them, so update the server before pmctl.
+
 ### The request file
 
 Unsigned JSON, at most 1 MB and 500 items. `pmctl` parses it strictly: unknown fields are refused, and winget ids, versions, KBs, architectures and product codes are checked against fixed patterns.

@@ -423,6 +423,18 @@ type FetchURLOptions struct {
 	// time (signer, pin, revocation); pmctl build keeps it.
 	VendorSignature *manifest.VendorSignature
 	Progress        func(done, total int64)
+	// FromZip: OutDir/FileName was already extracted from the zip at URL
+	// (ExtractNested, after the zip matched its SHA-256); SHA256 is the
+	// extracted file's. Nothing is downloaded: the file is hashed in place,
+	// and the zip is recorded in the provenance.
+	FromZip *ZipOrigin
+}
+
+// ZipOrigin is the zip an installer was extracted from.
+type ZipOrigin struct {
+	SHA256 string // the zip's, as checked against the winget manifest
+	Size   int64
+	Path   string // the installer's path in the zip
 }
 
 // FetchURL downloads a vendor file over HTTPS, requires it to match the
@@ -485,9 +497,14 @@ func FetchURL(ctx context.Context, o FetchURLOptions) (*FetchResult, error) {
 	if err := ValidateEntry(e, 1, o.SHA256); err != nil {
 		return nil, err
 	}
-	dl, err := Download(ctx, o.HTTP, DownloadRequest{
-		URL: o.URL, DestDir: o.OutDir, FileName: o.FileName, SHA256: o.SHA256, Progress: o.Progress,
-	})
+	var dl *DownloadResult
+	if o.FromZip != nil {
+		dl, err = verifyFile(filepath.Join(o.OutDir, o.FileName), DownloadRequest{SHA256: o.SHA256})
+	} else {
+		dl, err = Download(ctx, o.HTTP, DownloadRequest{
+			URL: o.URL, DestDir: o.OutDir, FileName: o.FileName, SHA256: o.SHA256, Progress: o.Progress,
+		})
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -499,6 +516,9 @@ func FetchURL(ctx context.Context, o FetchURLOptions) (*FetchResult, error) {
 	e.Acquired = &Provenance{
 		At: time.Now().UTC().Format(time.RFC3339), Method: "url",
 		SHA1: dl.SHA1, SHA256: dl.SHA256, Size: dl.Size, Verified: verifiedOr(o.Verified, "sha256(operator)"),
+	}
+	if z := o.FromZip; z != nil {
+		e.Acquired.Method, e.Acquired.ZipSHA256, e.Acquired.ZipSize, e.Acquired.ZipPath = "zip", z.SHA256, z.Size, z.Path
 	}
 	if err := ValidateEntry(e, dl.Size, dl.SHA256); err != nil {
 		return nil, err

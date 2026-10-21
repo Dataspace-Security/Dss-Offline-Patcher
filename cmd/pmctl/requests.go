@@ -262,19 +262,19 @@ func (r *requestRun) fetchWinget(a acqrequest.App, arch string) error {
 		ver = v // what Apps & features will show, compared with endpoint inventory
 	}
 	file := wingetPackageID(a.WingetID, m.Version, arch) + ".msi"
-	dl, err := acquire.Download(r.ctx, r.hc, acquire.DownloadRequest{URL: in.URL, DestDir: r.downloads, FileName: file, SHA256: in.SHA256})
+	got, err := r.installerFile(a, m, in, file)
 	if err != nil {
 		return err
 	}
 	if code == "" {
-		if code, err = readMSICode(dl.Path); err != nil || !acqrequest.ValidProductCode(code) {
+		if code, err = readMSICode(got.path); err != nil || !acqrequest.ValidProductCode(code) {
 			return unsupportedItem("MSI has no ProductCode",
 				fmt.Sprintf("%s %s: could not read ProductCode from the MSI: %v", a.WingetID, m.Version, err))
 		}
 	}
-	vs, err := r.pinWingetMSI(a, m, in, dl.Path)
+	vs, err := r.pinWingetMSI(a, m, in, got.path)
 	if err != nil {
-		os.Remove(dl.Path)
+		os.Remove(got.path)
 		return err
 	}
 	name := msiDisplayName(in, a, m)
@@ -292,10 +292,10 @@ func (r *requestRun) fetchWinget(a acqrequest.App, arch string) error {
 	if title == "" {
 		title = a.WingetID
 	}
-	_, err = acquire.FetchURL(r.ctx, acquire.FetchURLOptions{URL: in.URL, SHA256: in.SHA256, FileName: file, PackageID: wingetPackageID(a.WingetID, a.Version, arch),
+	_, err = acquire.FetchURL(r.ctx, acquire.FetchURLOptions{URL: in.URL, SHA256: got.sha256, FileName: file, PackageID: wingetPackageID(a.WingetID, a.Version, arch),
 		Title: title + " " + ver, Vendor: wingetPublisher(in, m), Kind: "msi", ProductCode: code, PackageName: name, OS: "windows",
 		Version: ver, Severity: "important", ReleaseDate: rel, Arch: arch, OutDir: r.downloads, SpecPath: r.spec, HTTP: r.hc,
-		Verified: "sha256(winget manifest " + murl + ")", VendorSignature: vs})
+		Verified: "sha256(winget manifest " + murl + ")" + zipVerified(got.zip), VendorSignature: vs, FromZip: got.zip})
 	return err
 }
 

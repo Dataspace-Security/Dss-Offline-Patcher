@@ -29,13 +29,13 @@ func (r *requestRun) fetchWingetExe(a acqrequest.App, arch string, m *acquire.Wi
 		ver = v
 	}
 	file := wingetPackageID(a.WingetID, m.Version, arch) + ".exe"
-	dl, err := acquire.Download(r.ctx, r.hc, acquire.DownloadRequest{URL: in.URL, DestDir: r.downloads, FileName: file, SHA256: in.SHA256})
+	got, err := r.installerFile(a, m, in, file)
 	if err != nil {
 		return err
 	}
-	res, err := verifyExeResult(dl.Path)
+	res, err := verifyExeResult(got.path)
 	if err != nil {
-		os.Remove(dl.Path) // never left where a later run could pick it up
+		os.Remove(got.path) // never left where a later run could pick it up
 		return unsupportedItem(shortReason("the installer's Authenticode signature is not valid: "+strings.TrimPrefix(err.Error(), "Authenticode: ")),
 			fmt.Sprintf("%s %s (%s): %v", a.WingetID, m.Version, in.URL, err))
 	}
@@ -54,7 +54,7 @@ func (r *requestRun) fetchWingetExe(a acqrequest.App, arch string, m *acquire.Wi
 	// Revocation, and the signer pinned for this winget id (signerpin.go).
 	vs, err := pinInstaller(r.ctx, r.c, r.pins, pinKeyWinget(a.WingetID), m.Version, pub, infoFromResult(res))
 	if err != nil {
-		os.Remove(dl.Path)
+		os.Remove(got.path)
 		return err
 	}
 	ex, err := in.ExeInstall(acquire.ExeInstallOptions{Signer: signer, DisplayName: name, Publisher: arpPublisher(in, pub)})
@@ -79,10 +79,10 @@ func (r *requestRun) fetchWingetExe(a acqrequest.App, arch string, m *acquire.Wi
 	if title == "" {
 		title = a.WingetID
 	}
-	_, err = acquire.FetchURL(r.ctx, acquire.FetchURLOptions{URL: in.URL, SHA256: in.SHA256, FileName: file, PackageID: wingetPackageID(a.WingetID, a.Version, arch),
+	_, err = acquire.FetchURL(r.ctx, acquire.FetchURLOptions{URL: in.URL, SHA256: got.sha256, FileName: file, PackageID: wingetPackageID(a.WingetID, a.Version, arch),
 		Title: title + " " + ver, Vendor: pub, Kind: manifest.KindExe, PackageName: name, OS: "windows",
-		Version: ver, Severity: "important", ReleaseDate: rel, Arch: arch, OutDir: r.downloads, SpecPath: r.spec, HTTP: r.hc, Exe: ex,
-		Verified: "sha256(winget manifest " + murl + ")+authenticode(" + signer + ")", VendorSignature: &vs,
+		Version: ver, Severity: "important", ReleaseDate: rel, Arch: arch, OutDir: r.downloads, SpecPath: r.spec, HTTP: r.hc, Exe: ex, FromZip: got.zip,
+		Verified: "sha256(winget manifest " + murl + ")" + zipVerified(got.zip) + "+authenticode(" + signer + ")", VendorSignature: &vs,
 		VerifyPayload: func(p string) error {
 			got, err := verifyExeSigner(p)
 			if err == nil && got != signer {

@@ -243,7 +243,7 @@ func httpsURL(s string) bool {
 func (m *WingetManifest) PickEXE(arch string) (WingetInstaller, error) {
 	var ok []WingetInstaller
 	var reasons, types []string
-	for _, in := range m.Installers {
+	for _, in := range m.zipped() {
 		if !in.IsEXE() || !exeArchFits(in, arch) {
 			continue
 		}
@@ -258,7 +258,7 @@ func (m *WingetManifest) PickEXE(arch string) (WingetInstaller, error) {
 		// Published for x86 only (e.g. the x86 VC++ redistributable): its
 		// 32-bit installer is what x64 Windows runs too, unless the manifest
 		// says it is not for x64.
-		for _, in := range m.Installers {
+		for _, in := range m.zipped() {
 			if !in.IsEXE() || !exeArchFits(in, "x86") || slices.Contains(in.UnsupportedArch, "x64") {
 				continue
 			}
@@ -292,6 +292,9 @@ func (m *WingetManifest) PickEXE(arch string) (WingetInstaller, error) {
 		if in.Architecture == "neutral" {
 			r++
 		}
+		if in.ZipPath != "" {
+			r += 8 // a plain installer over one in a zip
+		}
 		return r
 	}
 	sort.SliceStable(ok, func(i, j int) bool { return rank(ok[i]) < rank(ok[j]) })
@@ -311,7 +314,8 @@ func firstReason(rs []string) string {
 }
 
 // PickInstaller picks what pmctl imports for arch: an MSI when there is one
-// (PickMSI), else an EXE installer (PickEXE). The error explains both.
+// (PickMSI), else an EXE installer (PickEXE); either may be inside a zip
+// (ZipPath set). The error explains both.
 func (m *WingetManifest) PickInstaller(arch string) (WingetInstaller, error) {
 	in, err := m.PickMSI(arch)
 	if err == nil {
@@ -328,6 +332,9 @@ func (m *WingetManifest) PickInstaller(arch string) (WingetInstaller, error) {
 	var un *UnsupportedError
 	if errors.As(exErr, &un) && strings.Contains(un.Reason, "is not importable") {
 		return WingetInstaller{}, exErr // the EXE reason is the useful one
+	}
+	if why := m.zipUnsupported(arch); why != "" {
+		return WingetInstaller{}, unsupported("%s %s: zip installer for %s is not importable: %s", m.ID, m.Version, arch, why)
 	}
 	return WingetInstaller{}, &UnsupportedError{Reason: strings.Replace(msiErr.Reason, "has no MSI installer", "has no MSI or EXE installer", 1)}
 }

@@ -40,6 +40,21 @@ func TestImportable(t *testing.T) {
 		{"32-bit-only exe on x64", &Resolved{Installers: []ResolvedInstaller{{Arch: "x86", Type: "burn", URL: "https://x/a.exe", SHA256: sha}}}, []string{"x64"}, true, ImportableYes, "EXE installer (burn)"},
 		{"32-bit exe not for arm64", &Resolved{Installers: []ResolvedInstaller{{Arch: "x86", Type: "burn", URL: "https://x/a.exe", SHA256: sha}}}, []string{"arm64"}, true, ImportableNo, "no installer for arm64"},
 		{"none listed", &Resolved{}, nil, true, ImportableNo, "no installers listed"},
+		// Installers inside a zip (NestedInstallerType, NestedInstallerFiles).
+		{"msi in zip", &Resolved{Installers: []ResolvedInstaller{zipped("wix", "a/b.msi", sha)}}, []string{"x64"}, true, ImportableYes, "MSI installer in a zip (x64)"},
+		{"msi in zip, no code, cannot read", &Resolved{Installers: []ResolvedInstaller{zipped("msi", "b.msi", sha)}}, nil, false, ImportableNo, "MSI installer without a ProductCode"},
+		{"exe in zip", &Resolved{Installers: []ResolvedInstaller{{Arch: "x64", Type: "zip", NestedType: "exe", NestedPath: "Adobe Acrobat/setup.exe", URL: "https://x/a.zip", SHA256: sha, Silent: true, Scope: "machine"}}}, []string{"x64"}, true, ImportableYes, "EXE installer in a zip (exe)"},
+		{"inno in zip", &Resolved{Installers: []ResolvedInstaller{zipped("inno", "setup.exe", sha)}}, nil, true, ImportableYes, "EXE installer in a zip (inno)"},
+		{"plain exe in zip without switch", &Resolved{Installers: []ResolvedInstaller{zipped("exe", "setup.exe", sha)}}, nil, true, ImportableNo, ReasonExeNoSilent},
+		{"msi in zip without sha", &Resolved{Installers: []ResolvedInstaller{zipped("msi", "b.msi", "")}}, nil, true, ImportableNo, ReasonZipNoSHA},
+		{"msi in zip over http", &Resolved{Installers: []ResolvedInstaller{{Arch: "x64", Type: "zip", NestedType: "msi", NestedPath: "b.msi", URL: "http://x/a.zip", SHA256: sha}}}, nil, true, ImportableNo, ReasonZipNoHTTPS},
+		{"zip naming no file", &Resolved{Installers: []ResolvedInstaller{zipped("msi", "", sha)}}, nil, true, ImportableNo, ReasonZipNoFile},
+		{"portable in zip", &Resolved{Installers: []ResolvedInstaller{zipped("portable", "tool.exe", sha)}}, nil, true, ImportableNo, "zip with a portable app (no installer)"},
+		{"msix in zip", &Resolved{Installers: []ResolvedInstaller{zipped("msix", "a.msix", sha)}}, nil, true, ImportableNo, "no MSI or EXE installer (zip/msix)"},
+		{"zip msi for another arch", &Resolved{Installers: []ResolvedInstaller{{Arch: "arm64", Type: "zip", NestedType: "msi", NestedPath: "b.msi", URL: "https://x/a.zip", SHA256: sha}}}, []string{"x64"}, true, ImportableNo, "no installer for x64 (only arm64)"},
+		{"plain msi over zip", &Resolved{Installers: []ResolvedInstaller{zipped("msi", "b.msi", sha), msi}}, nil, true, ImportableYes, "MSI installer (x64)"},
+		{"plain exe over zip", &Resolved{Installers: []ResolvedInstaller{zipped("inno", "s.exe", sha), {Arch: "x64", Type: "nullsoft", URL: "https://x/a.exe", SHA256: sha}}}, nil, true, ImportableYes, "EXE installer (nullsoft)"},
+		{"zip msi over plain exe", &Resolved{Installers: []ResolvedInstaller{{Arch: "x64", Type: "nullsoft", URL: "https://x/a.exe", SHA256: sha}, zipped("msi", "b.msi", sha)}}, nil, true, ImportableYes, "MSI installer in a zip (x64)"},
 	}
 	for _, c := range cases {
 		got, why := Importable(c.r, c.arches, c.canRead)
@@ -47,6 +62,11 @@ func TestImportable(t *testing.T) {
 			t.Errorf("%s: %s %q, want %s %q", c.name, got, why, c.want, c.why)
 		}
 	}
+}
+
+// zipped is an x64 zip installer of nested type nt at path p.
+func zipped(nt, p, sha string) ResolvedInstaller {
+	return ResolvedInstaller{Arch: "x64", Type: "zip", NestedType: nt, NestedPath: p, URL: "https://x/a.zip", SHA256: sha}
 }
 
 // Resolved travels inside the signed document; documents without it

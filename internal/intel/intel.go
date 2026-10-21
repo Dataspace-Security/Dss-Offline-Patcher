@@ -79,6 +79,12 @@ type ResolvedInstaller struct {
 	// installer (InstallerSwitches.Silent). Matters for type "exe" only;
 	// inno, nullsoft and burn have well-known defaults.
 	Silent bool `json:"silent,omitempty"`
+	// NestedType and NestedPath: for Type "zip", the installer inside the
+	// archive (winget NestedInstallerType, e.g. msi|exe|inno|portable, and
+	// NestedInstallerFiles[0].RelativeFilePath with forward slashes). URL
+	// and SHA256 are the zip's.
+	NestedType string `json:"nested_type,omitempty"`
+	NestedPath string `json:"nested_path,omitempty"`
 }
 
 // WindowsRelease is the newest cumulative update for one Windows build.
