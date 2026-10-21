@@ -2134,7 +2134,8 @@ PY
      Upgrade: previous binaries are in $PREFIX/bin.prev and the pre-upgrade backup in $BACKUP_DIR/pre-upgrade-*
      (roll back: runbook 05, restore that backup with the previous pmserver, then start offpatch-server)")"
   if [ -n "$CONSOLE_PROXY_PORT" ]; then
-    if curl -fs -o /dev/null -H 'X-Forwarded-Proto: https' "http://127.0.0.1:$CONSOLE_PROXY_PORT/"; then
+    # As the proxy would: the listener refuses requests that name no client address.
+    if curl -fs -o /dev/null -H 'X-Forwarded-Proto: https' -H 'X-Forwarded-For: 127.0.0.1' "http://127.0.0.1:$CONSOLE_PROXY_PORT/"; then
       ok "console reverse-proxy listener answers on http://127.0.0.1:$CONSOLE_PROXY_PORT"
     else
       warn "the console reverse-proxy listener http://127.0.0.1:$CONSOLE_PROXY_PORT does not answer (journalctl -u offpatch-server)"
