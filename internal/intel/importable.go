@@ -81,13 +81,22 @@ func Importable(r *Resolved, arches []string, canReadMSI bool) (status, reason s
 	}
 	// As pmctl fetches (acquire.archFits / exeArchFits): a neutral installer
 	// fits x64 and x86 machines, and a 32-bit MSI also installs on x64.
+	// An app published for x86 only (the x86 VC++ redistributable) has
+	// its x86 EXE installed on x64 Windows too, as pmctl does (PickEXE).
+	native := false
+	for _, in := range r.Installers {
+		a, t := strings.ToLower(in.Arch), strings.ToLower(in.Type)
+		if (msiTypes[t] || exeTypes[t]) && (want[a] || (a == "neutral" || a == "") && !want["arm64"]) {
+			native = true
+		}
+	}
 	archOK := func(a string, isMSI bool) bool {
 		a = strings.ToLower(a)
 		if len(want) == 0 || want[a] {
 			return true
 		}
 		for w := range want {
-			if (a == "neutral" || a == "") && w != "arm64" || isMSI && a == "x86" && w == "x64" {
+			if (a == "neutral" || a == "") && w != "arm64" || (isMSI || !native) && a == "x86" && w == "x64" {
 				return true
 			}
 		}

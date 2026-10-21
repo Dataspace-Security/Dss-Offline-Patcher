@@ -213,3 +213,23 @@ func TestResolveWingetExe(t *testing.T) {
 		t.Errorf("locale: %v %+v", err, loc)
 	}
 }
+
+// An app published for x86 only (the x86 VC++ redistributable) gets its
+// 32-bit EXE on x64 machines; one that says it is not for x64 does not.
+func TestPickEXEx86OnlyOnX64(t *testing.T) {
+	sha := strings.Repeat("AB", 32)
+	m, err := ParseWingetManifest([]byte("PackageIdentifier: Microsoft.VCRedist.2015+.x86\nPackageVersion: 14.51\nInstallerType: burn\nInstallers:\n- Architecture: x86\n  InstallerUrl: https://c.example/vc_redist.x86.exe\n  InstallerSha256: " + sha + "\nManifestType: installer\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in, err := m.PickInstaller("x64"); err != nil || in.Architecture != "x86" {
+		t.Fatalf("x86-only on x64: %v %+v", err, in)
+	}
+	if _, err := m.PickInstaller("arm64"); err == nil {
+		t.Fatal("x86-only EXE picked for arm64")
+	}
+	m.Installers[0].UnsupportedArch = []string{"x64"}
+	if _, err := m.PickEXE("x64"); err == nil {
+		t.Fatal("x86 entry that is not for x64 was picked")
+	}
+}

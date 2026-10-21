@@ -36,7 +36,9 @@ func TestImportable(t *testing.T) {
 		{"msi neutral", &Resolved{Installers: []ResolvedInstaller{{Arch: "neutral", Type: "msi"}}}, []string{"x64"}, true, ImportableYes, "MSI installer (neutral)"},
 		{"32-bit msi on x64", &Resolved{Installers: []ResolvedInstaller{{Arch: "x86", Type: "msi"}}}, []string{"x64"}, true, ImportableYes, "MSI installer (x86)"},
 		{"neutral not for arm64", &Resolved{Installers: []ResolvedInstaller{{Arch: "neutral", Type: "msi"}}}, []string{"arm64"}, true, ImportableNo, "no installer for arm64"},
-		{"32-bit exe not for x64", &Resolved{Installers: []ResolvedInstaller{{Arch: "x86", Type: "exe"}}}, []string{"x64"}, true, ImportableNo, "no installer for x64"},
+		// Published for x86 only (the x86 VC++ redistributable): x64 Windows runs it.
+		{"32-bit-only exe on x64", &Resolved{Installers: []ResolvedInstaller{{Arch: "x86", Type: "burn", URL: "https://x/a.exe", SHA256: sha}}}, []string{"x64"}, true, ImportableYes, "EXE installer (burn)"},
+		{"32-bit exe not for arm64", &Resolved{Installers: []ResolvedInstaller{{Arch: "x86", Type: "burn", URL: "https://x/a.exe", SHA256: sha}}}, []string{"arm64"}, true, ImportableNo, "no installer for arm64"},
 		{"none listed", &Resolved{}, nil, true, ImportableNo, "no installers listed"},
 	}
 	for _, c := range cases {

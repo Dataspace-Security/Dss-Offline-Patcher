@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -252,6 +253,22 @@ func (m *WingetManifest) PickEXE(arch string) (WingetInstaller, error) {
 			continue
 		}
 		ok = append(ok, in)
+	}
+	if len(ok) == 0 && len(types) == 0 && arch == "x64" {
+		// Published for x86 only (e.g. the x86 VC++ redistributable): its
+		// 32-bit installer is what x64 Windows runs too, unless the manifest
+		// says it is not for x64.
+		for _, in := range m.Installers {
+			if !in.IsEXE() || !exeArchFits(in, "x86") || slices.Contains(in.UnsupportedArch, "x64") {
+				continue
+			}
+			types = append(types, in.InstallerType)
+			if r := in.ExeUnsupportedReason(); r != "" {
+				reasons = append(reasons, r)
+				continue
+			}
+			ok = append(ok, in)
+		}
 	}
 	if len(ok) == 0 {
 		if len(reasons) == 0 {
