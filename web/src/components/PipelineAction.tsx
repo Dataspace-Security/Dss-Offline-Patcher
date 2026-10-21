@@ -158,6 +158,17 @@ export function PipelineAction({ link, requested, fleet, onPatch, onRequest, req
       </div>
     );
   }
+  // No machine needs it (up to date, app not installed or not applicable):
+  // nothing to install, so no Patch this.
+  if (link.state === "approved" && fleet && (fleet.needed ?? 0) === 0 && !fleet.active_deployment_id) {
+    return (
+      <div className="row-action">
+        <Link to={paths.catalog(link.package_id)} title="No machine needs this package: up to date, app not installed or not applicable everywhere">
+          <Pill state="approved" label="nothing to install" />
+        </Link>
+      </div>
+    );
+  }
   if (link.state === "approved") {
     return (
       <div className="row-action">

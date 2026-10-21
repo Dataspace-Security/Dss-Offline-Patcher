@@ -69,6 +69,8 @@ cat > "$DEMO/mgmt/pmserver.json" <<EOF
   "data_dir": "data",
   "trusted_keys": [{"public_key_file": "bundle.pub", "sources": ["acq-zone-1"]}],
   "deployment_approvals": 1,
+  "approval_policy": {"critical": 1, "important": 1},
+  "require_mfa": false,
   "intake_interval": "1s",
   "checkin_interval_seconds": 15
 }
