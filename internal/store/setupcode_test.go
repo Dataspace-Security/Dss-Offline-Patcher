@@ -23,6 +23,7 @@ func withTestDefault(t *testing.T, s *Store) {
 	old := defaultPasswordHash
 	defaultPasswordHash = h
 	t.Cleanup(func() { defaultPasswordHash = old })
+	s.Policy.RequireSetupCode = true
 	if _, err := s.createLocalUserHash(context.Background(), Manager{Actor: "system:cli", Role: RoleSuperAdmin},
 		NewLocalUser{Email: DefaultSuperAdminEmail, Role: RoleSuperAdmin}, h, true, true); err != nil {
 		t.Fatal(err)
@@ -221,5 +222,17 @@ func TestSetupCodeOtherUsersUnaffected(t *testing.T) {
 	}
 	if _, _, err := s.CreateSetupCode(ctx, "uma@bank.example"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("setup code for a normal user: %v", err)
+	}
+}
+
+// Off by default (require_setup_code): the default password alone signs in
+// (then the forced password change and MFA set-up follow).
+func TestSetupCodeOffByDefault(t *testing.T) {
+	s := openTest(t)
+	withTestDefault(t, s)
+	s.Policy.RequireSetupCode = false
+	l, err := s.LoginSetupCodeFrom(context.Background(), DefaultSuperAdminEmail, testDefaultPW, "", "", time.Hour)
+	if err != nil || !l.MustChangePassword {
+		t.Fatalf("default password without a code (codes off): %+v %v", l, err)
 	}
 }

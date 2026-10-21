@@ -32,9 +32,9 @@ single-server deployment. Then:
    default `dsspatcher.local`, which the server announces by mDNS so admin PCs on the same
    network segment find it with no setup; from other subnets use internal DNS or the hosts-file
    line the installer prints, see §5.5) as
-   `superadmin@dataspacesecurity.com` with the default password (vendor handbook) **and the
-   one-time setup code** the installer prints in a box at the end of its summary (the console shows
-   a "Setup code" field for this email). The first sign-in requires a new password and MFA
+   `superadmin@dataspacesecurity.com` with the default password (vendor handbook); with
+   `"require_setup_code": true` also the **one-time setup code** the installer prints (console: "I
+   have a setup code"). The first sign-in requires a new password and MFA
    enrolment (authenticator app). This account is created
    on a **fresh install only** (no database yet); upgrades never create or re-enable accounts.
 3. **Settings → Users**: create the bank's Admin.
@@ -260,8 +260,10 @@ is HTTP 403 and audited `access.denied`). The full matrix is in
   handbook; only its hash is in `pmserver`). The server forces a password change at the first
   sign-in (nothing else works until then), then the authenticator set-up; pmserver logs a warning at
   every start while the default is in use.
-- **One-time setup code.** The default password is the same everywhere, so on its own it does not
-  sign in: while the account still has it, the sign-in also needs a setup code (12 characters,
+- **One-time setup code** (off by default; `"require_setup_code": true` in `pmserver.json` turns it
+  on, recommended where the console is reachable before the operator signs in). The default
+  password is the same everywhere; with this on it does not sign in alone: while the account still
+  has it, the sign-in also needs a setup code (12 characters,
   `XXXX-XXXX-XXXX`), which only someone with root on the server can get. The installer prints one
   in a box at the end of its summary on a fresh install, and again on every upgrade while the
   default password is still in use (a new code replaces the old one). A lost or expired code:

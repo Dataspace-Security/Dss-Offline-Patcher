@@ -383,6 +383,13 @@ func setupCodeCmd(args []string, out io.Writer) error {
 		return err
 	}
 	defer st.Close()
+	if !cfg.RequireSetupCode {
+		if *ifNeeded {
+			fmt.Fprintln(out, "no setup code needed: not required (require_setup_code is off)")
+			return nil
+		}
+		return fmt.Errorf("setup codes are off: set \"require_setup_code\": true in %s first", *cfgPath)
+	}
 	emailSet := false
 	fs.Visit(func(f *flag.Flag) { emailSet = emailSet || f.Name == "email" })
 	if !emailSet {

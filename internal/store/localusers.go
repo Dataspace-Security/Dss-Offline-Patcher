@@ -424,7 +424,7 @@ func (s *Store) LoginSetupCodeFrom(ctx context.Context, email, password, setupCo
 	// The default password alone is not enough: the setup code is checked
 	// here, after the same slow work, and a missing or wrong one is a wrong
 	// password to the caller (no oracle for the default password).
-	needsCode := hash == defaultPasswordHash
+	needsCode := s.Policy.RequireSetupCode && hash == defaultPasswordHash
 	codeWrong := false
 	var lockReason, lockedUntil string
 	var lockedNow bool

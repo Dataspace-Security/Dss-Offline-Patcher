@@ -122,11 +122,10 @@ function Spinner() {
  * and the server answers a missing or wrong code exactly like a wrong
  * password, so nobody learns whether the default password alone was right.
  * After the password has been changed the code is not needed and ignored.
- * An install whose built-in account has another e-mail (--admin-email)
- * opens the field with "I have a setup code"; a typed code is always sent
- * (the server ignores it for other accounts).
+ * Setup codes are off unless the server sets "require_setup_code", so the
+ * field stays hidden until "I have a setup code" is clicked; a typed code
+ * is always sent (the server ignores it for other accounts).
  */
-const BUILTIN_SUPER_ADMIN_EMAIL = "superadmin@dataspacesecurity.com";
 
 function PasswordForm({ onLogin, onMfa }: { onLogin: (me: Me) => void; onMfa: () => void }) {
   const [email, setEmail] = useState("");
@@ -174,10 +173,10 @@ function PasswordForm({ onLogin, onMfa }: { onLogin: (me: Me) => void; onMfa: ()
         <PasswordInput name="password" autoComplete="current-password" aria-invalid={error ? true : undefined}
                        value={password} onChange={(e) => setPassword(e.target.value)} />
       </label>
-      {normalizeEmail(email) !== BUILTIN_SUPER_ADMIN_EMAIL && !wantCode && (
+      {!wantCode && (
         <button type="button" className="btn-link small" onClick={() => setWantCode(true)}>I have a setup code (first sign-in)</button>
       )}
-      {(normalizeEmail(email) === BUILTIN_SUPER_ADMIN_EMAIL || wantCode) && (
+      {wantCode && (
         <label className="field">
           <span>Setup code <em className="muted">first sign-in only</em></span>
           <input name="setup_code" autoComplete="one-time-code" autoCapitalize="characters" spellCheck={false}

@@ -205,6 +205,10 @@ type Policy struct {
 	// required for every local user, super admins included (bank roles
 	// always need it). Only an explicit "require_mfa": false clears it.
 	RequireMFA bool
+	// RequireSetupCode (config require_setup_code, default false): while the
+	// built-in super admin still has the default password, its sign-in also
+	// needs the one-time setup code the installer prints (setupcode.go).
+	RequireSetupCode bool
 }
 
 // DefaultDeploymentApprovals is the approval count when none is configured.

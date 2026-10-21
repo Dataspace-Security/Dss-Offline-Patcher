@@ -17,11 +17,11 @@ import (
 
 func init() { store.PasswordIterations = 1000 }
 
-func labConfig(t *testing.T) (cfgPath, dataDir string) {
+func labConfig(t *testing.T, extra ...string) (cfgPath, dataDir string) {
 	t.Helper()
 	dir := t.TempDir()
 	pub, _, _ := manifest.GenerateKey()
-	cfg := fmt.Sprintf(`{"insecure_http": true, "data_dir": "data", "trusted_keys":[{"public_key": %q, "sources":["s"]}]}`, manifest.EncodePublic(pub))
+	cfg := fmt.Sprintf(`{`+strings.Join(extra, "")+`"insecure_http": true, "data_dir": "data", "trusted_keys":[{"public_key": %q, "sources":["s"]}]}`, manifest.EncodePublic(pub))
 	cfgPath = filepath.Join(dir, "pmserver.json")
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
@@ -55,6 +55,7 @@ func TestCreateAdminUsesEmbeddedDefault(t *testing.T) {
 		t.Fatalf("profile %+v", lp)
 	}
 	if plain := os.Getenv("OFFPATCH_TEST_DEFAULT_SA_PW"); plain != "" {
+		st.Policy.RequireSetupCode = true
 		if _, err := st.LoginPassword(ctx, store.DefaultSuperAdminEmail, plain, time.Hour); err == nil {
 			t.Fatal("the default password signed in without the setup code")
 		}
@@ -178,7 +179,7 @@ func TestCreateAdminRandomPassword(t *testing.T) {
 // password (printed once, stored hashed); -if-needed is quiet once the
 // account has its own password, without it that is an error.
 func TestSetupCodeCmd(t *testing.T) {
-	cfg, data := labConfig(t)
+	cfg, data := labConfig(t, `"require_setup_code": true,`)
 	var out bytes.Buffer
 	if err := runAdminCmd("create-admin", []string{"-config", cfg, "-if-fresh"}, &out); err != nil {
 		t.Fatal(err)

@@ -43,17 +43,21 @@ const (
 )
 
 type Config struct {
-	Listen                 string         `json:"listen"`
-	DataDir                string         `json:"data_dir"`
-	TLSCert                string         `json:"tls_cert"`
-	TLSKey                 string         `json:"tls_key"`
-	PKIDir                 string         `json:"pki_dir"`
-	InsecureHTTP           bool           `json:"insecure_http"`
-	TrustedKeys            []KeyConfig    `json:"trusted_keys"`
-	RootPublicKeyFile      string         `json:"root_public_key_file"`
-	OIDC                   *oidc.Config   `json:"oidc"`
-	SessionTTL             Duration       `json:"session_ttl"`
-	RequireMFA             bool           `json:"require_mfa"`
+	Listen            string       `json:"listen"`
+	DataDir           string       `json:"data_dir"`
+	TLSCert           string       `json:"tls_cert"`
+	TLSKey            string       `json:"tls_key"`
+	PKIDir            string       `json:"pki_dir"`
+	InsecureHTTP      bool         `json:"insecure_http"`
+	TrustedKeys       []KeyConfig  `json:"trusted_keys"`
+	RootPublicKeyFile string       `json:"root_public_key_file"`
+	OIDC              *oidc.Config `json:"oidc"`
+	SessionTTL        Duration     `json:"session_ttl"`
+	RequireMFA        bool         `json:"require_mfa"`
+	// RequireSetupCode: the built-in super admin's sign-in with the default
+	// password also needs the one-time setup code (pmserver setup-code).
+	// Off by default.
+	RequireSetupCode       bool           `json:"require_setup_code"`
 	ApprovalPolicy         map[string]int `json:"approval_policy"`
 	SeparationOfDuties     bool           `json:"separation_of_duties"`
 	OfflineAfter           Duration       `json:"offline_after"`

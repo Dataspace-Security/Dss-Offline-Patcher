@@ -2101,8 +2101,9 @@ PY
     ok "existing database: users are kept as they are (an upgrade creates no accounts)"
     [ "$ADMIN_EMAIL_SET" = 0 ] || warn "--admin-email is used on a fresh install only; this database already exists, nothing was created"
   fi
-  # One-time setup code (S-1): while the built-in account still has the default password, its first
-  # sign-in also needs this code, so the shared default alone cannot take the account over. A new
+  # One-time setup code (S-1, only with "require_setup_code": true in pmserver.json; off by default):
+  # while the built-in account still has the default password, its first sign-in also needs this
+  # code, so the shared default alone cannot take the account over. A new
   # code on every run (fresh install, or an upgrade while the default is still in use); only its hash
   # is stored and it ends when the password is changed. Shown once, in the summary.
   setup_email_args=()
@@ -2112,7 +2113,7 @@ PY
     ADMIN_SETUP_EMAIL=$(printf '%s\n' "$out" | awk '/^email:/{print $2}')
     ADMIN_SETUP_EXPIRES=$(printf '%s\n' "$out" | awk '/^expires_at:/{print $2}')
     if [ -n "$ADMIN_SETUP_CODE" ]; then ok "one-time setup code issued for $ADMIN_SETUP_EMAIL (shown in the summary)"
-    else ok "built-in super admin: no setup code needed (it has its own password)"; fi
+    else ok "built-in super admin: no setup code needed"; fi
   else
     die "could not issue the setup code for the built-in super admin: $out"
   fi
@@ -2596,8 +2597,8 @@ if [ $IS_SERVER = 1 ]; then
   cat <<EOF
 
   Next steps (in the console, $URL_PUBLIC):
-    1. Sign in (built-in account: default password + the setup code above), then set a new password
-       and enrol MFA when asked.
+    1. Sign in (built-in account: default password$( [ -n "$ADMIN_SETUP_CODE" ] && printf ' + the setup code above')), then set a new
+       password and enrol MFA when asked.
     2. Settings → Users: create the bank's Admin.
     3. Endpoints → Create enrollment token → run the PowerShell line on each PC
        (Windows PowerShell as Administrator; the PC needs TCP $PORT to ${IP:-this server}).
