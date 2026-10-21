@@ -18,7 +18,7 @@ export function Rollouts({ deployments, policy, canPlan }: Props) {
   const live = (deployments ?? []).filter(isLiveDeployment);
   const pending = (deployments ?? []).filter((d) => d.state === "pending_approval");
   return (
-    <DashCard title="Rollouts" className="dash-span-2 dash-wide-3"
+    <DashCard title="Rollouts" className="dash-a-roll"
               sub={deployments ? <>{plural(live.length, "running")} · {pending.length.toLocaleString()} waiting for approval</> : undefined}
               action={<Link to={paths.deployments} className="dash-link">Deployments →</Link>}>
       {!deployments ? <Skeleton lines={5} /> : (

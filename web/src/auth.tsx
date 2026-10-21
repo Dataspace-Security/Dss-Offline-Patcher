@@ -74,14 +74,13 @@ export function samePerson(recorded: string | null | undefined, me: Me | null): 
 }
 
 /**
- * The built-in super admin (vendor) still uses the password the installer
- * printed: recommend changing it. Assumed signals: `builtin`, or an empty
- * `password_changed_at` on a password-signed-in super admin.
+ * The account still has the built-in default password from the
+ * installation: recommend changing it. The server decides (`default_password`:
+ * the stored hash is the default one), so an account created with its own
+ * password never sees the warning.
  */
 export function shouldRecommendPasswordChange(me: Me | null): boolean {
-  if (!me || me.auth !== "password" || me.role !== "super_admin") return false;
-  if (me.password_changed_at) return false;
-  return me.builtin !== false;
+  return !!me && me.auth === "password" && me.default_password === true;
 }
 
 /** Display name of a recorded actor: "user:alice" → "alice". */

@@ -7,6 +7,7 @@ import { stageIndexFor } from "./patchPlan";
 import { Pill } from "./ui";
 import { stageLabel } from "./deployLabels";
 import { isExePackage } from "./exeParts";
+import { BUILD_NAMES } from "./dashboard/model";
 
 type RingDraft = { name: string; groups: string };
 
@@ -36,10 +37,6 @@ function olderVersion(a: string, b: string): boolean {
   return false;
 }
 
-/** Windows 10/11 and Server builds by release name (KB numbers are shared across some of them). */
-const BUILD_NAMES: Record<number, string> = {
-  19044: "10 21H2", 19045: "10 22H2", 20348: "Server 2022", 22621: "11 22H2", 22631: "11 23H2", 26100: "11 24H2 / Server 2025", 26200: "11 25H2",
-};
 function buildName(b: number): string {
   return BUILD_NAMES[b] ? `${BUILD_NAMES[b]} (build ${b})` : `build ${b}`;
 }

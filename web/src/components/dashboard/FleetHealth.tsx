@@ -7,7 +7,7 @@ import { endpointsLink, fleetGroups, pctFloor } from "./model";
 /** Fleet health: one part-to-whole bar of endpoint statuses; every slice and legend row opens the filtered list. */
 export function FleetHealth({ summary, isOperator }: { summary: Summary | null; isOperator: boolean }) {
   if (!summary) {
-    return <DashCard title="Fleet health" className="dash-span-2"><Skeleton chart="bar" lines={4} /></DashCard>;
+    return <DashCard title="Fleet health" className="dash-a-fleet"><Skeleton chart="bar" lines={4} /></DashCard>;
   }
   const groups = fleetGroups(summary);
   const total = summary.endpoints.total;
@@ -15,7 +15,7 @@ export function FleetHealth({ summary, isOperator }: { summary: Summary | null; 
   return (
     <DashCard
       title="Fleet health"
-      className="dash-span-2"
+      className="dash-a-fleet"
       sub={<>{total.toLocaleString()} machines{summary.endpoints.retired ? <> · <Link to="/endpoints?status=retired">{summary.endpoints.retired} retired</Link> (not counted)</> : null}</>}
       action={<Link to={paths.endpoints} className="dash-link">All endpoints →</Link>}
     >

@@ -140,10 +140,10 @@ export function Swatch({ fill, hatch }: { fill: string; hatch?: boolean }) {
 
 export type HBar = { key: string; label: ReactNode; value: number; fill: string; sub?: ReactNode };
 
-export function HBars({ bars, label, unit }: { bars: HBar[]; label: string; unit: string }) {
+export function HBars({ bars, label, unit, wide }: { bars: HBar[]; label: string; unit: string; wide?: boolean }) {
   const max = Math.max(1, ...bars.map((b) => b.value));
   return (
-    <div className="dash-hbars" role="group" aria-label={label}>
+    <div className={`dash-hbars ${wide ? "dash-hbars-wide" : ""}`} role="group" aria-label={label}>
       {bars.map((b) => {
         const pct = (b.value / max) * 100;
         return (
@@ -152,7 +152,7 @@ export function HBars({ bars, label, unit }: { bars: HBar[]; label: string; unit
             <div className="dash-hbar-track" aria-hidden="true">
               <svg width="100%" height="14" className="dash-hbar-svg">
                 {b.value > 0 && (
-                  <rect x={0} y={0} height={14} rx={4} width={`${Math.max(pct, 1.5)}%`} fill={tok(b.fill)} className="dash-hbar-fill" />
+                  <rect x={0} y={0} height={14} rx={4} width={`${Math.max(pct, 1.5)}%`} fill={tok(b.fill)} className="dash-hbar-fill"><title>{`${b.value.toLocaleString()} ${unit}`}</title></rect>
                 )}
               </svg>
             </div>
@@ -191,6 +191,185 @@ export function ProgressBar({ done, working, failed, waiting, label }: { done: n
           {parts.map((p, i) => (
             <rect key={p.k} x={xsW[i].x} y={0} width={xsW[i].w} height={h} rx={i === 0 ? 4 : 1} fill={tok(p.fill)} className="dash-progress-fill" />
           ))}
+        </svg>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Line / area over days (one series per chart: small multiples, never two
+// y-axes). Missing days break the line. Hover shows a crosshair and the value.
+
+export type LinePoint = { x: string; label: string; value: number | null };
+
+export function LineArea({ points, label, fill, max, unit, height = 132, format = (v) => v.toLocaleString() }: {
+  points: LinePoint[]; label: string; fill: string; max?: number; unit: string; height?: number; format?: (v: number) => string;
+}) {
+  const [ref, width] = useWidth<HTMLDivElement>();
+  const [hover, setHover] = useState<number | null>(null);
+  const gradId = useSvgId("area");
+  const padL = 34, padR = 8, padT = 8, padB = 20;
+  const vals = points.map((p) => p.value).filter((v): v is number => v !== null);
+  const top = max ?? niceMax(Math.max(1, ...vals));
+  const w = Math.max(0, width - padL - padR);
+  const h = height - padT - padB;
+  const n = points.length;
+  const x = (i: number) => padL + (n <= 1 ? w / 2 : (i / (n - 1)) * w);
+  const y = (v: number) => padT + h - (Math.max(0, Math.min(top, v)) / top) * h;
+  // Runs of consecutive days with a value.
+  const runs = points.reduce<number[][]>((acc, p, i) => {
+    if (p.value === null) return acc;
+    const last = acc[acc.length - 1];
+    if (last && last[last.length - 1] === i - 1) return [...acc.slice(0, -1), [...last, i]];
+    return [...acc, [i]];
+  }, []);
+  const line = (run: number[]) => run.map((i, k) => `${k ? "L" : "M"}${x(i).toFixed(1)},${y(points[i].value ?? 0).toFixed(1)}`).join(" ");
+  const area = (run: number[]) => `${line(run)} L${x(run[run.length - 1]).toFixed(1)},${padT + h} L${x(run[0]).toFixed(1)},${padT + h} Z`;
+  const ticks = [0, top / 2, top];
+  const xTicks = n > 1 ? [0, Math.floor((n - 1) / 2), n - 1] : [0];
+  const hp = hover !== null ? points[hover] : null;
+  const colW = n > 1 ? w / (n - 1) : w;
+  return (
+    <div className="dash-line" ref={ref}>
+      {width > 0 && (
+        <svg width={width} height={height} role="img" aria-label={label} onMouseLeave={() => setHover(null)}>
+          <defs>
+            <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={tok(fill)} stopOpacity={0.28} />
+              <stop offset="100%" stopColor={tok(fill)} stopOpacity={0.02} />
+            </linearGradient>
+          </defs>
+          {ticks.map((t) => (
+            <g key={t}>
+              <line x1={padL} x2={padL + w} y1={y(t)} y2={y(t)} className="dash-grid-line" />
+              <text x={padL - 6} y={y(t)} className="dash-axis" textAnchor="end" dominantBaseline="middle">{format(Math.round(t))}</text>
+            </g>
+          ))}
+          {xTicks.map((i) => (
+            <text key={i} x={x(i)} y={height - 4} className="dash-axis"
+                  textAnchor={n > 1 && i === 0 ? "start" : n > 1 && i === n - 1 ? "end" : "middle"}>{points[i]?.label}</text>
+          ))}
+          {runs.map((r) => <path key={`a${r[0]}`} d={area(r)} fill={`url(#${gradId})`} />)}
+          {runs.map((r) => <path key={`l${r[0]}`} d={line(r)} fill="none" stroke={tok(fill)} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />)}
+          {runs.filter((r) => r.length === 1).map((r) => (
+            <circle key={`d${r[0]}`} cx={x(r[0])} cy={y(points[r[0]].value ?? 0)} r={4} fill={tok(fill)} stroke={tok("--surface")} strokeWidth={2} />
+          ))}
+          {hover !== null && hp && hp.value !== null && (
+            <g aria-hidden="true">
+              <line x1={x(hover)} x2={x(hover)} y1={padT} y2={padT + h} className="dash-crosshair" />
+              <circle cx={x(hover)} cy={y(hp.value)} r={4.5} fill={tok(fill)} stroke={tok("--surface")} strokeWidth={2} />
+            </g>
+          )}
+          {points.map((p, i) => (
+            <rect key={p.x} x={x(i) - colW / 2} y={padT} width={Math.max(4, colW)} height={h} fill="transparent"
+                  onMouseEnter={() => setHover(i)}>
+              <title>{`${p.label}: ${p.value === null ? "no snapshot" : `${format(p.value)} ${unit}`}`}</title>
+            </rect>
+          ))}
+        </svg>
+      )}
+      {hover !== null && hp && (
+        <div className="dash-tip" role="presentation"
+             style={{ left: Math.min(Math.max(x(hover), 80), Math.max(80, width - 80)) }}>
+          <b>{hp.label}</b>
+          <span className="num">{hp.value === null ? "No snapshot that day" : `${format(hp.value)} ${unit}`}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A round upper bound for an axis: 1, 2, 5 × 10^n. */
+export function niceMax(v: number): number {
+  const p = Math.pow(10, Math.floor(Math.log10(Math.max(1, v))));
+  const m = [1, 2, 5, 10].find((k) => k * p >= v) ?? 10;
+  return m * p;
+}
+
+// ---------------------------------------------------------------------------
+// Donut (part-to-whole for a few categories; the legend carries the numbers).
+
+export type DonutSlice = { key: string; label: string; value: number; fill: string; title?: string };
+
+export function Donut({ slices, label, center, size = 148 }: { slices: DonutSlice[]; label: string; center: ReactNode; size?: number }) {
+  const [hover, setHover] = useState<string | null>(null);
+  const shown = slices.filter((s) => s.value > 0);
+  const total = shown.reduce((a, s) => a + s.value, 0);
+  const stroke = 22;
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const gap = shown.length > 1 ? 2 : 0;
+  const arcs = shown.reduce<{ s: DonutSlice; off: number; len: number }[]>((acc, s) => {
+    const off = acc.length ? acc[acc.length - 1].off + acc[acc.length - 1].len + gap : 0;
+    return [...acc, { s, off, len: Math.max(1, (s.value / total) * c - gap) }];
+  }, []);
+  return (
+    <figure className="dash-donut" style={{ width: size, height: size }}>
+      <svg viewBox={`0 0 ${size} ${size}`} width={size} height={size} role="img" aria-label={label}>
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={tok("--surface-3")} strokeWidth={stroke} />
+        <g transform={`rotate(-90 ${size / 2} ${size / 2})`}>
+          {arcs.map(({ s, off, len }) => (
+            <circle key={s.key} cx={size / 2} cy={size / 2} r={r} fill="none" stroke={tok(s.fill)} strokeWidth={stroke}
+                    strokeDasharray={`${len} ${c - len}`} strokeDashoffset={-off}
+                    className={`dash-seg ${hover && hover !== s.key ? "dash-seg-dim" : ""}`}
+                    onMouseEnter={() => setHover(s.key)} onMouseLeave={() => setHover(null)}>
+              <title>{s.title ?? `${s.label}: ${s.value.toLocaleString()} of ${total.toLocaleString()} (${Math.round((s.value / total) * 100)}%)`}</title>
+            </circle>
+          ))}
+        </g>
+      </svg>
+      <div className="dash-donut-center">{center}</div>
+    </figure>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Stacked columns per bucket (several series, one shared y-axis).
+
+export type ColumnPart = { key: string; label: string; value: number; fill: string };
+export type ColumnBucket = { key: string; label: string; parts: ColumnPart[] };
+
+export function Columns({ buckets, label, height = 150 }: { buckets: ColumnBucket[]; label: string; height?: number }) {
+  const [ref, width] = useWidth<HTMLDivElement>();
+  const padL = 26, padB = 20, padT = 8;
+  const totals = buckets.map((b) => b.parts.reduce((a, p) => a + p.value, 0));
+  const top = niceMax(Math.max(1, ...totals));
+  const w = Math.max(0, width - padL);
+  const h = height - padB - padT;
+  const slot = buckets.length ? w / buckets.length : w;
+  const barW = Math.max(8, Math.min(44, slot * 0.56));
+  const y = (v: number) => (v / top) * h;
+  const ticks = top <= 2 ? [0, top] : [0, top / 2, top];
+  return (
+    <div className="dash-cols" ref={ref}>
+      {width > 0 && (
+        <svg width={width} height={height} role="img" aria-label={label}>
+          {ticks.map((t) => (
+            <g key={t}>
+              <line x1={padL} x2={width} y1={padT + h - y(t)} y2={padT + h - y(t)} className="dash-grid-line" />
+              <text x={padL - 6} y={padT + h - y(t)} className="dash-axis" textAnchor="end" dominantBaseline="middle">{Math.round(t)}</text>
+            </g>
+          ))}
+          {buckets.map((b, i) => {
+            const cx = padL + slot * i + slot / 2;
+            const stack = b.parts.filter((p) => p.value > 0).reduce<{ p: ColumnPart; y0: number; hh: number }[]>((acc, p) => {
+              const y0 = acc.length ? acc[acc.length - 1].y0 + acc[acc.length - 1].hh + 2 : 0;
+              return [...acc, { p, y0, hh: Math.max(2, y(p.value) - (acc.length ? 2 : 0)) }];
+            }, []);
+            return (
+              <g key={b.key}>
+                <title>{`${b.label}: ${b.parts.map((p) => `${p.value} ${p.label.toLowerCase()}`).join(", ")}`}</title>
+                <rect x={cx - slot / 2} y={padT} width={slot} height={h} fill="transparent" />
+                {stack.map(({ p, y0, hh }, k) => (
+                  <rect key={p.key} x={cx - barW / 2} y={padT + h - y0 - hh} width={barW} height={hh}
+                        rx={k === stack.length - 1 ? 4 : 0} fill={tok(p.fill)} className="dash-col" />
+                ))}
+                {totals[i] === 0 && <line x1={cx - barW / 2} x2={cx + barW / 2} y1={padT + h} y2={padT + h} stroke={tok("--border-strong")} strokeWidth={2} />}
+                <text x={cx} y={height - 4} className="dash-axis" textAnchor="middle">{b.label}</text>
+              </g>
+            );
+          })}
         </svg>
       )}
     </div>

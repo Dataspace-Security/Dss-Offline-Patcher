@@ -191,6 +191,7 @@ func (s *Server) Handler() http.Handler {
 
 	admin(viewer, "GET /api/me", s.me)
 	admin(viewer, "GET /api/summary", s.summary)
+	admin(viewer, "GET /api/dashboard/trend", s.dashboardTrend)
 	// Imports (what was asked for, downloaded and received): user and up.
 	admin(user, "GET /api/bundles", s.listBundles)
 	admin(user, "GET /api/bundles/{id}", s.getBundle)
@@ -456,7 +457,7 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(keyPrincipal).(*principal)
 	v := map[string]any{"user": p.User, "role": p.Role, "auth": p.Source, "source": p.Source, "mfa": p.MFA,
 		"email": "", "display_name": "", "must_change_password": p.MustChangePassword, "password_changed_at": "", "builtin": false,
-		"mfa_enrolled": false, "mfa_required": s.cfg.RequireMFA}
+		"default_password": false, "mfa_enrolled": false, "mfa_required": s.cfg.RequireMFA}
 	switch p.Source {
 	case "password":
 		lp, err := s.store.GetLocalProfile(r.Context(), p.User)
@@ -470,6 +471,7 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v["email"], v["display_name"], v["password_changed_at"], v["builtin"] = p.User, lp.DisplayName, lp.PasswordChangedAt, lp.Builtin
+		v["default_password"] = lp.DefaultPassword
 		v["mfa_enrolled"], v["mfa_required"] = enrolled, s.store.MFARequired(p.Role)
 	case "sso":
 		email, err := s.store.UserEmail(r.Context(), p.User)
