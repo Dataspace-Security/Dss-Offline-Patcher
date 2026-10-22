@@ -9,7 +9,7 @@ import { fmtTime, useLoad } from "../util";
 import { REBOOT_LABELS, STAGES_HINT, stageLabel } from "./deployLabels";
 import {
   approvalsRequired, approvedBy, buildPreset, customHref, fetchEndpoints, fetchFleet, fetchPolicy, fetchWindows,
-  groupSize, humanDuration, isFirstWavePlan, pickFirstWave, policyDeadline, ringCounts, windowsAllowReboot, type PresetKind,
+  groupSize, humanDuration, isFirstWavePlan, pickFirstWave, policyDeadline, ringCounts, windowsAllowReboot, type ChosenTarget, type PresetKind,
 } from "./patchPlan";
 import { TargetPreview, nothingToDo, type TargetSummary } from "./TargetPreview";
 import { CopyBox, ErrorBanner, Modal, Mono, Pill } from "./ui";
@@ -47,6 +47,7 @@ const PRESETS: { kind: PresetKind; label: string; hint: string }[] = [
   { kind: "one_ring", label: "Every compatible machine that needs it", hint: "policy deadline; pauses above 10 % failures" },
   { kind: "standard", label: "Test machines first, then all", hint: "group pilot installs first; you check it, then start the rest" },
   { kind: "endpoint", label: "This endpoint only", hint: "just this machine" },
+  { kind: "chosen", label: "Chosen machines", hint: "a group, a site or one endpoint you pick" },
   { kind: "emergency", label: "Emergency", hint: "all machines now, ignores windows, 24 h deadline" },
 ];
 
@@ -103,6 +104,7 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
   const [runningFromServer, setRunningFromServer] = useState("");
   const [justification, setJustification] = useState("");
   const [atOnce, setAtOnce] = useState("0");
+  const [chosen, setChosen] = useState<ChosenTarget>({ by: "group", value: "" });
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -175,7 +177,7 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
   // No window lets machines restart: don't promise restarts that never happen.
   const rebootInWindow = winL.data ? windowsAllowReboot(winL.data) : true;
   const atOnceN = Math.max(0, Math.floor(Number(atOnce) || 0));
-  const draft = { ...buildPreset(preset, pkg, { policy, endpointId: endpoint?.id, hostname: endpoint?.hostname, justification, firstWave, rebootInWindow }), max_concurrent: atOnceN };
+  const draft = { ...buildPreset(preset, pkg, { policy, endpointId: endpoint?.id, hostname: endpoint?.hostname, justification, firstWave, rebootInWindow, chosen, endpoints: eps }), max_concurrent: atOnceN };
   const counts = ringCounts(draft.rings, eps);
   const dl = policyDeadline(pkg, policy);
   const deployApprovals = deploymentApprovalsRequired(policy);
@@ -184,6 +186,7 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
   if (!approved) problems.push("The package must be approved first.");
   if (preset === "standard" && pilotEmpty) problems.push("No test machines: no endpoint is in group pilot. Choose Every compatible machine that needs it, or put 2–5 machines in group pilot first.");
   if (preset === "emergency" && !justification.trim()) problems.push("Emergency deployments require a justification.");
+  if (preset === "chosen" && !chosen.value) problems.push(`Choose the ${chosen.by} to deploy to.`);
   if (epsL.data && counts.every((c) => c === 0)) problems.push("No endpoint is in these stages.");
   else if (nothingToDo(summary)) problems.push(notApplicableToAll(summary)
     ? `This package doesn't apply to any machine in these stages (${summary!.naReasons?.join("; ") || "not applicable"}). Nothing can be installed: import the update built for their Windows version from Patches → Needed.`
@@ -321,6 +324,7 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
                   <div className="hint">Loading the policy and the endpoint list…</div>
                 ))}
                 {preset === "standard" && <div className="hint">{STAGES_HINT}</div>}
+                {preset === "chosen" && <ChosenPicker value={chosen} onChange={setChosen} endpoints={eps} />}
                 {isFirstWavePlan(draft) && <div className="banner banner-info">{firstWaveText(firstWave.length)}</div>}
                 <PlanSummary draft={draft} counts={epsL.data ? counts : null} policyDeadline={policy?.deadlines?.[pkg.severity]}
                              policyMissing={!!policyL.error} dlFromPolicy={dl} endpoints={eps}
@@ -438,5 +442,37 @@ function PlanSummary({ draft, counts, policyDeadline: policyDur, policyMissing, 
         </tr>
       </tbody>
     </table>
+  );
+}
+
+/** Pick the machines for "Chosen machines": a group, a site or one endpoint. */
+function ChosenPicker({ value, onChange, endpoints }: { value: ChosenTarget; onChange: (c: ChosenTarget) => void; endpoints: Endpoint[] }) {
+  const live = endpoints.filter((e) => !e.retired_at);
+  const groups = [...new Set(live.flatMap((e) => e.groups ?? []))].sort();
+  const sites = [...new Set(live.map((e) => e.site).filter(Boolean))].sort();
+  const count = (by: ChosenTarget["by"], v: string) =>
+    by === "group" ? live.filter((e) => (e.groups ?? []).includes(v)).length : live.filter((e) => e.site === v).length;
+  return (
+    <div className="chosen-picker form-row">
+      <label className="field">
+        <span>Deploy to</span>
+        <select value={value.by} onChange={(e) => onChange({ by: e.target.value as ChosenTarget["by"], value: "" })}>
+          <option value="group">a group</option>
+          <option value="site">a site</option>
+          <option value="endpoint">one endpoint</option>
+        </select>
+      </label>
+      <label className="field">
+        <span>{value.by === "group" ? "Group" : value.by === "site" ? "Site" : "Endpoint"}</span>
+        <select value={value.value} onChange={(e) => onChange({ ...value, value: e.target.value })}>
+          <option value="">Choose…</option>
+          {value.by === "group" && groups.map((g) => <option key={g} value={g}>{g} ({count("group", g)})</option>)}
+          {value.by === "site" && sites.map((s) => <option key={s} value={s}>{s} ({count("site", s)})</option>)}
+          {value.by === "endpoint" && [...live].sort((a, b) => a.hostname.localeCompare(b.hostname)).map((e) => (
+            <option key={e.endpoint_id} value={e.endpoint_id}>{e.hostname}{e.site ? ` · ${e.site}` : ""}</option>
+          ))}
+        </select>
+      </label>
+    </div>
   );
 }

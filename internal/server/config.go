@@ -204,17 +204,12 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	c.dir = filepath.Dir(path)
 	c.mfaOptOut = explicitFalse(b, "require_mfa")
-	// Bank default (security review S-3): critical and important packages
-	// need two approvers unless approval_policy says otherwise. Separation
-	// of duties stays off unless set (owner decision: whoever approved a
-	// package may also deploy it; the deployment needs its own approvals).
+	// One reviewer approves a package unless approval_policy asks for more
+	// (owner decision 2026-10-22; the deployment then needs its creator and
+	// one other person). Separation of duties stays off unless set (whoever
+	// approved a package may also deploy it).
 	if c.ApprovalPolicy == nil {
 		c.ApprovalPolicy = map[string]int{}
-	}
-	for _, sev := range []string{"critical", "important"} {
-		if _, set := c.ApprovalPolicy[sev]; !set {
-			c.ApprovalPolicy[sev] = 2
-		}
 	}
 	if c.Listen == "" {
 		c.Listen = "127.0.0.1:8080"

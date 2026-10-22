@@ -51,10 +51,10 @@ export function Rollouts({ deployments, policy, canPlan }: Props) {
                             {d.name || d.deployment_id}{d.operation === "rollback" && <span className="muted"> (rollback)</span>}
                           </Link>
                           <div className="dash-row-meta">
-                            <span className="num"><b>{got}</b> of <b>{required}</b> approvals</span>
+                            <span className="num"><b>{got + 1}</b> of <b>{required + 1}</b> people</span>
                             <span className="muted"> · by {personName(d.created_by)} · <RelTime value={d.created_at} /></span>
                           </div>
-                          <ApprovalDots got={got} required={required} />
+                          <ApprovalDots got={got + 1} required={required + 1} />
                         </div>
                         <div className="dash-row-act">
                           {st.canApprove

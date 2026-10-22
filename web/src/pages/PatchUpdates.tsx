@@ -13,6 +13,7 @@ import { fetchFleet } from "../components/patchPlan";
 import { CatalogState, IntelSource } from "../components/UpdatesAvailable";
 import { IntelStaleBanner } from "../components/IntelStaleBanner";
 import { Empty, ErrorBanner, Mono, PageHeader, RelTime, expandRowProps } from "../components/ui";
+import { Severity } from "./Catalog";
 import { paths } from "../paths";
 import type { FleetStatus, FleetStatusRow, FleetUpdates } from "../types";
 import { useLoad } from "../util";
@@ -171,7 +172,7 @@ export default function PatchUpdates() {
     setSelected((cur) => new Set([...cur].filter((k) => !sent.has(k))));
   };
 
-  const cols = canRequest ? 6 : 5;
+  const cols = canRequest ? 7 : 6;
 
   return (
     <>
@@ -241,7 +242,7 @@ export default function PatchUpdates() {
                          aria-label="Select all importable updates" title="Select every update shown that can be imported (not in the catalog yet, or rejected); updates that can't be imported are left out" />
                 </th>
               )}
-              <th>Update / application</th><th>Endpoints</th><th>Catalog</th><th style={{ width: 120 }}>Fleet</th><th className="right">Next step</th>
+              <th>Update / application</th><th>Severity</th><th>Endpoints</th><th>Catalog</th><th style={{ width: 120 }}>Fleet</th><th className="right">Next step</th>
             </tr>
           </thead>
           <tbody>
@@ -265,6 +266,11 @@ export default function PatchUpdates() {
                       <div className="cell-sub"><Mono>{r.key}</Mono>{r.latest && <> · latest <Mono>{r.latest}</Mono></>}</div>
                     </td>
                     <td>
+                      {r.catalog?.severity
+                        ? <Severity s={r.catalog.severity} />
+                        : <span className="muted" title="The severity comes with the imported package">—</span>}
+                    </td>
+                    <td>
                       <StatusCounts r={r} active={isOpen ? open?.status ?? "" : null} onPick={(s) => toggleOpen(key, s)} />
                       {names.length > 0 && (
                         <div className="cell-sub fs-names" onClick={(e) => e.stopPropagation()}>
@@ -278,7 +284,7 @@ export default function PatchUpdates() {
                     </td>
                     <td onClick={(e) => e.stopPropagation()}>
                       <div className="fs-catalog">
-                        <CatalogState link={r.catalog} />
+                        <CatalogState link={r.catalog} latest={r.kind === "app" ? r.latest : undefined} />
                         {r.requested && r.catalog && <div><RequestedPill r={r.requested} /></div>}
                         {r.catalog && (r.uncovered ?? 0) > 0 && <UncoveredNote r={r} />}
                       </div>

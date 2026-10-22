@@ -5,10 +5,10 @@ import type { Deployment, Policy } from "../types";
 import { fmtTime } from "../util";
 import { Pill, ReasonModal, Time } from "./ui";
 
-/** "Waiting for approval (0 of 1)". */
+/** "Waiting for approval (1 of 2 people)": the creator counts as the first person. */
 export function waitingText(d: Deployment, policy?: Policy | null): string {
   const n = (d.approvals ?? []).length;
-  return `Waiting for approval (${n} of ${deploymentApprovalsRequired(policy, d)})`;
+  return `Waiting for approval (${n + 1} of ${deploymentApprovalsRequired(policy, d) + 1} people)`;
 }
 
 /** State pill for lists: amber "Waiting for approval (N of M)" with who approved, or the plain state. */
@@ -69,8 +69,8 @@ export function ApprovalPanel({ d, policy, onChanged }: { d: Deployment; policy?
     <section className="approval-box">
       <h2>{waitingText(d, policy)}</h2>
       <div>
-        This {what} does not start until <b>{st.required}</b> different {st.required === 1 ? "person approves" : "people approve"} it
-        {" "}(not the person who created it). {left > 0 && <>{left} more needed.</>}
+        This {what} needs <b>{st.required + 1} people</b>: <b>{personName(d.created_by)}</b> created it (the first person), and
+        {" "}{st.required === 1 ? "one other person approves it" : `${st.required} other people approve it`} before it starts. {left > 0 && <>{left} more needed.</>}
       </div>
       <ApprovalList d={d} />
       {st.canApprove ? (
@@ -79,7 +79,7 @@ export function ApprovalPanel({ d, policy, onChanged }: { d: Deployment; policy?
           <button className="btn btn-primary" onClick={() => setDecision("approve")}>Approve…</button>
         </div>
       ) : st.mine ? (
-        <div className="small"><b>You created this — {st.required} other {st.required === 1 ? "person" : "people"} must approve.</b></div>
+        <div className="small"><b>You created this, so you are the first person. {st.required === 1 ? "Another person" : `${st.required} other people`} must approve.</b></div>
       ) : st.iApproved ? (
         <div className="small"><b>You approved this.</b> Waiting for someone else.</div>
       ) : me && me.role !== "viewer" ? (
@@ -109,9 +109,10 @@ export function ApprovalPanel({ d, policy, onChanged }: { d: Deployment; policy?
 
 function ApprovalList({ d }: { d: Deployment }) {
   const approvals = d.approvals ?? [];
-  if (approvals.length === 0) return <div className="small muted">No approvals yet.</div>;
   return (
     <ul className="small">
+      <li>Created by <b>{personName(d.created_by)}</b> <span className="muted">{fmtTime(d.created_at)}</span> <span className="muted">(first person)</span></li>
+      {approvals.length === 0 && <li className="muted">No other approval yet.</li>}
       {approvals.map((a, i) => (
         <li key={`${a.by}-${i}`}>
           Approved by <b>{personName(a.by)}</b> <span className="muted">{fmtTime(a.at)}</span>{a.reason && <> — {a.reason}</>}

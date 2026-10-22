@@ -168,7 +168,7 @@ func TestApprovalDefaults(t *testing.T) {
 		return c
 	}
 	c := load("")
-	if c.SeparationOfDuties || c.ApprovalPolicy["critical"] != 2 || c.ApprovalPolicy["important"] != 2 || c.ApprovalPolicy["moderate"] != 0 {
+	if c.SeparationOfDuties || c.ApprovalPolicy["critical"] != 0 || c.ApprovalPolicy["important"] != 0 || c.ApprovalPolicy["moderate"] != 0 {
 		t.Fatalf("defaults: sod %v policy %v", c.SeparationOfDuties, c.ApprovalPolicy)
 	}
 	c = load(`"separation_of_duties": true, "approval_policy": {"critical": 3, "important": 1},`)

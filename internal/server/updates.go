@@ -151,6 +151,17 @@ func toIntelEndpoint(e store.Endpoint, inv []store.InventoryItem) intel.Endpoint
 type catalogLink struct {
 	PackageID string `json:"package_id"`
 	State     string `json:"state"` // quarantined | approved | rejected | revoked
+	// Version: the package's version (what its Catalog page shows), so a
+	// row can say which version the link opens.
+	Version string `json:"version,omitempty"`
+	// Severity: the package's severity (critical | important | moderate | low).
+	Severity string `json:"severity,omitempty"`
+	want     string // the version inventory shows once it is installed
+}
+
+// linkOf is the catalog link to p.
+func linkOf(p store.Package) catalogLink {
+	return catalogLink{PackageID: p.PackageID, State: p.State, Version: p.Version, Severity: p.Severity, want: store.AppWantVersion(p)}
 }
 
 // catalogIndex finds catalog packages for available updates: Windows updates
@@ -217,7 +228,7 @@ func newCatalogIndex(pkgs []store.Package, st *store.Store) *catalogIndex {
 		cur, ok := m[k]
 		if v := store.AppWantVersion(p); !ok || !store.VersionAtLeast(cur.version, v) ||
 			(cur.version == v && cur.link.State != "approved" && p.State == "approved") {
-			m[k] = namedPackage{link: catalogLink{PackageID: p.PackageID, State: p.State}, version: store.AppWantVersion(p)}
+			m[k] = namedPackage{link: linkOf(p), version: store.AppWantVersion(p)}
 		}
 	}
 	if st != nil {
@@ -226,12 +237,12 @@ func newCatalogIndex(pkgs []store.Package, st *store.Store) *catalogIndex {
 	}
 	for _, p := range pkgs {
 		ci.pkgs[p.PackageID] = p
-		ci.byID[p.PackageID] = catalogLink{PackageID: p.PackageID, State: p.State}
+		ci.byID[p.PackageID] = linkOf(p)
 		if p.KB != "" {
 			if cur, ok := ci.byKB[strings.ToUpper(p.KB)]; !ok || cur.State != "approved" {
-				ci.byKB[strings.ToUpper(p.KB)] = catalogLink{PackageID: p.PackageID, State: p.State}
+				ci.byKB[strings.ToUpper(p.KB)] = linkOf(p)
 			}
-			ci.kbPkgs[strings.ToUpper(p.KB)] = append(ci.kbPkgs[strings.ToUpper(p.KB)], kbPackage{catalogLink{PackageID: p.PackageID, State: p.State}, p})
+			ci.kbPkgs[strings.ToUpper(p.KB)] = append(ci.kbPkgs[strings.ToUpper(p.KB)], kbPackage{linkOf(p), p})
 		}
 		if p.ProductCode != "" {
 			keep(ci.byCode, strings.ToLower(p.ProductCode), p)
@@ -481,10 +492,13 @@ func releaseKey(arch string, build int) string {
 	return strings.ToLower(arch) + "/" + strconv.Itoa(build)
 }
 
-// linkCatalog sets the row's package and its uncovered endpoints. Windows
-// rows link to the package that applies to most endpoints needing the KB
-// (approved first), so "Patch this" never offers a package that applies to
-// none of them; app rows keep the package forApp found.
+// linkCatalog sets the row's package and its uncovered endpoints. Rows link
+// to the package that serves most endpoints needing the update (approved
+// first), so "Patch this" never offers a package that applies to none of
+// them. An app row none of whose endpoints a package serves keeps its link
+// only if the package is the version the row names: the package of an older
+// version (one the machines already run) is no offer for it, and opening it
+// from a row that says "latest 300" showed version 200.
 func (u *fleetUpdate) linkCatalog(ci *catalogIndex) {
 	builds := map[int]bool{}
 	u.Uncovered, u.UncoveredBuilds = 0, nil
@@ -498,7 +512,10 @@ func (u *fleetUpdate) linkCatalog(ci *catalogIndex) {
 		}
 	}
 	sort.Ints(u.UncoveredBuilds)
-	if u.Kind != "os" || len(u.Endpoints) == 0 {
+	if len(u.Endpoints) == 0 {
+		if !u.offers(u.Catalog) {
+			u.Catalog = nil
+		}
 		return
 	}
 	count := map[string]int{}
@@ -507,19 +524,32 @@ func (u *fleetUpdate) linkCatalog(ci *catalogIndex) {
 			count[n.PackageID]++
 		}
 	}
-	u.Catalog = nil
+	var best *catalogLink
 	for id, c := range count {
 		l := ci.byID[id]
-		if u.Catalog == nil {
-			u.Catalog = &l
+		if best == nil {
+			best = &l
 			continue
 		}
-		best := count[u.Catalog.PackageID]
-		better := (l.State == "approved") != (u.Catalog.State == "approved") && l.State == "approved"
-		if better || ((l.State == "approved") == (u.Catalog.State == "approved") && (c > best || (c == best && id < u.Catalog.PackageID))) {
-			u.Catalog = &l
+		bc := count[best.PackageID]
+		better := (l.State == "approved") != (best.State == "approved") && l.State == "approved"
+		if better || ((l.State == "approved") == (best.State == "approved") && (c > bc || (c == bc && id < best.PackageID))) {
+			best = &l
 		}
 	}
+	if best != nil || u.Kind == "os" || !u.offers(u.Catalog) {
+		u.Catalog = best
+	}
+}
+
+// offers: l (nil: none) is a package for the version the row names. Windows
+// rows are keyed by KB, so any package of the KB is; an app row needs a
+// package at least its latest version (a link without a version is trusted).
+func (u *fleetUpdate) offers(l *catalogLink) bool {
+	if l == nil || u.Kind != "app" || u.Latest == "" || (l.want == "" && l.Version == "") {
+		return true
+	}
+	return store.VersionAtLeast(l.want, u.Latest) || store.VersionAtLeast(l.Version, u.Latest)
 }
 
 // statusCatalog is the package whose targets decide fleet status.
@@ -530,6 +560,11 @@ func (u *fleetUpdate) statusCatalog() *catalogLink {
 	if u.Kind == "os" && len(u.Endpoints) > 0 {
 		// Machines need the KB but no package applies to their build: the
 		// package other builds installed is no offer for them.
+		return nil
+	}
+	if !u.offers(u.currentCat) {
+		// The package of an older version than the row's latest (linked by
+		// name whatever the version): not the update the row shows.
 		return nil
 	}
 	return u.currentCat

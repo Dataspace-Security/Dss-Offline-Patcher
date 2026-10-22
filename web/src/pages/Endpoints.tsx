@@ -14,11 +14,16 @@ const STATUSES: EndpointStatus[] = [
   "updates_available", "awaiting_checkin", "compliant", "retired",
 ];
 
+/** Site filter value for endpoints without a site. */
+const NO_SITE = "(none)";
+
 export default function Endpoints() {
   const canEdit = useCan("user");
   const [sp, setSp] = useSearchParams();
   const statusFilter = splitList(sp.get("status") ?? "");
   const outdatedOnly = sp.get("outdated") === "1";
+  const groupFilter = sp.get("group") ?? "";
+  const siteFilter = sp.get("site") ?? "";
   const [q, setQ] = useState("");
   const [showToken, setShowToken] = useState(sp.get("enroll") === "1");
   const [showRetired, setShowRetired] = useState(false);
@@ -36,9 +41,16 @@ export default function Endpoints() {
       .filter((e) => includeRetired || e.status !== "retired")
       .filter((e) => statusFilter.length === 0 || statusFilter.includes(e.status))
       .filter((e) => !outdatedOnly || missingTotal(e) > 0)
+      .filter((e) => !groupFilter || (e.groups ?? []).includes(groupFilter))
+      .filter((e) => !siteFilter || (siteFilter === NO_SITE ? !e.site : e.site === siteFilter))
       .filter((e) => !needle || [e.hostname, e.site, e.owner, ...(e.groups ?? [])].join(" ").toLowerCase().includes(needle))
       .sort((a, b) => STATUSES.indexOf(a.status) - STATUSES.indexOf(b.status) || a.hostname.localeCompare(b.hostname));
-  }, [data, q, statusFilter.join(","), includeRetired, outdatedOnly]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [data, q, statusFilter.join(","), includeRetired, outdatedOnly, groupFilter, siteFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const live = (data ?? []).filter((e) => e.status !== "retired");
+  const groupOptions = [...new Set(live.flatMap((e) => e.groups ?? []))].sort();
+  const siteOptions = [...new Set(live.map((e) => e.site).filter(Boolean))].sort();
+  const hasNoSite = live.some((e) => !e.site);
 
   const counts = useMemo(() => {
     const c: Record<string, number> = {};
@@ -48,11 +60,13 @@ export default function Endpoints() {
   const activeCount = (data ?? []).filter((e) => e.status !== "retired").length;
   const outdatedCount = (data ?? []).filter((e) => e.status !== "retired" && missingTotal(e) > 0).length;
 
-  // Keep the other filter when one changes.
-  const setFilters = (status: string[], outdated: boolean) => {
+  // Keep the other filters when one changes.
+  const setFilters = (status: string[], outdated: boolean, group = groupFilter, site = siteFilter) => {
     const next: Record<string, string> = {};
     if (status.length) next.status = status.join(",");
     if (outdated) next.outdated = "1";
+    if (group) next.group = group;
+    if (site) next.site = site;
     setSp(next);
   };
 
@@ -89,7 +103,16 @@ export default function Endpoints() {
                 title="Endpoints missing at least one Windows update or application update (from update intelligence)">
           <Pill state="noncompliant" label="outdated only" /> <b>{outdatedCount}</b>
         </button>
-        {(statusFilter.length > 0 || outdatedOnly) && <button className="btn btn-sm" onClick={() => setSp({})}>Clear</button>}
+        <select className="chip-select" aria-label="Group" value={groupFilter} onChange={(e) => setFilters(statusFilter, outdatedOnly, e.target.value, siteFilter)}>
+          <option value="">All groups</option>
+          {groupOptions.map((g) => <option key={g} value={g}>Group: {g}</option>)}
+        </select>
+        <select className="chip-select" aria-label="Site" value={siteFilter} onChange={(e) => setFilters(statusFilter, outdatedOnly, groupFilter, e.target.value)}>
+          <option value="">All sites</option>
+          {siteOptions.map((s) => <option key={s} value={s}>Site: {s}</option>)}
+          {hasNoSite && <option value={NO_SITE}>No site</option>}
+        </select>
+        {(statusFilter.length > 0 || outdatedOnly || groupFilter || siteFilter) && <button className="btn btn-sm" onClick={() => setSp({})}>Clear</button>}
         <span className="spacer" />
         <label className="check small">
           <input type="checkbox" checked={includeRetired} disabled={statusFilter.includes("retired")}

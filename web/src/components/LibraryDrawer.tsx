@@ -113,7 +113,7 @@ function DrawerBody({ it, canImport, arch, setArch, onImport, busy, busyKey }: {
         ["Publisher", it.publisher || <span className="muted">—</span>],
         ["Latest version", it.latest_version ? <Mono>{it.latest_version}</Mono> : <span className="muted">—</span>],
         ["On your machines", <InstalledCount installed={it.installed} />],
-        ["Catalog", <CatalogState link={it.catalog} />],
+        ["Catalog", <CatalogState link={it.catalog} latest={it.kind === "app" ? it.latest_version : undefined} />],
         ["Import request", it.requested ? <RequestedPill r={it.requested} /> : <span className="muted">not requested</span>],
         ["Details checked", it.resolved_at ? <RelTime value={it.resolved_at} /> : <span className="muted">not yet</span>],
       ]} />

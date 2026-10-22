@@ -162,7 +162,7 @@ export default function Library() {
                     <td><ImportableBadge item={it} /></td>
                     {!openKey && (
                       <td>
-                        {it.catalog ? <CatalogState link={it.catalog} /> : !it.requested && <span className="muted small">not imported</span>}
+                        {it.catalog ? <CatalogState link={it.catalog} latest={it.kind === "app" ? it.latest_version : undefined} /> : !it.requested && <span className="muted small">not imported</span>}
                         {it.requested && <div><RequestedPill r={it.requested} /></div>}
                       </td>
                     )}

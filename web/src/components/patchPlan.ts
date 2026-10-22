@@ -6,7 +6,10 @@ import { api } from "../api";
 import { samePerson } from "../auth";
 import type { Endpoint, MaintenanceWindow, Me, NewDeployment, Package, PackageFleet, Policy, RebootPolicy, Ring } from "../types";
 
-export type PresetKind = "standard" | "one_ring" | "emergency" | "endpoint";
+export type PresetKind = "standard" | "one_ring" | "emergency" | "endpoint" | "chosen";
+
+/** "Chosen machines": a group, a site or one endpoint. */
+export type ChosenTarget = { by: "group" | "site" | "endpoint"; value: string };
 
 export const STANDARD_MAX_FAILURE_PCT = 10;
 export const STANDARD_MAX_RETRIES = 2;
@@ -183,7 +186,25 @@ type PresetOpts = {
   firstWave?: string[];
   /** False when no maintenance window allows restarts: machines are then never restarted automatically. */
   rebootInWindow?: boolean;
+  /** Chosen machines (preset "chosen") and the endpoint list a site is resolved from. */
+  chosen?: ChosenTarget; endpoints?: Endpoint[];
 };
+
+/** Ring groups for chosen machines: a group as is, a site as its endpoints, one endpoint. */
+export function chosenGroups(c: ChosenTarget | undefined, endpoints: Endpoint[]): string[] {
+  if (!c || !c.value) return [];
+  switch (c.by) {
+    case "group": return [c.value];
+    case "endpoint": return [`endpoint:${c.value}`];
+    case "site": return endpoints.filter((e) => e.site === c.value && !e.retired_at).map((e) => `endpoint:${e.endpoint_id}`);
+  }
+}
+
+export function chosenLabel(c: ChosenTarget | undefined, endpoints: Endpoint[]): string {
+  if (!c || !c.value) return "chosen machines";
+  if (c.by === "endpoint") return endpoints.find((e) => e.endpoint_id === c.value)?.hostname ?? c.value;
+  return `${c.by} ${c.value}`;
+}
 
 /** Builds the deployment body for a preset (Custom is the form, see customHref). */
 export function buildPreset(kind: PresetKind, pkg: Package, o: PresetOpts): NewDeployment {
@@ -211,6 +232,11 @@ export function buildPreset(kind: PresetKind, pkg: Package, o: PresetOpts): NewD
       return { ...base, name: autoName(pkg, "emergency"), rings: [{ name: "all", groups: ["all"] }],
         emergency: true, justification: (o.justification ?? "").trim(), ignore_windows: true,
         deadline: toRFC(new Date(now + EMERGENCY_DEADLINE_HOURS * HOUR_MS)), reboot_policy: "at_deadline" };
+    case "chosen": {
+      const eps = o.endpoints ?? [];
+      return { ...base, name: `${pkg.kb || pkg.title || pkg.package_id} → ${chosenLabel(o.chosen, eps)}`,
+        deadline: dl ? toRFC(dl) : "", rings: [{ name: "chosen", groups: chosenGroups(o.chosen, eps) }] };
+    }
     case "endpoint":
       return { ...base, name: `${pkg.kb || pkg.title || pkg.package_id} → ${o.hostname || o.endpointId}`,
         deadline: dl ? toRFC(dl) : "", rings: [{ name: "endpoint", groups: [`endpoint:${o.endpointId ?? ""}`] }] };

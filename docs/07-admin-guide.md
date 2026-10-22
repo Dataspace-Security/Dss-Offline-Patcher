@@ -387,9 +387,9 @@ and the `metrics_token` for `GET /metrics` are unchanged.
 3. **Approve…** with a reason (mandatory), for example your change number: `CHG-1042 tested on
    reference images`. Use **Reject…** with a reason for content you will not deploy.
 
-**Two-person approval.** `approval_policy` sets the number of approvals per severity (1–5). Default:
-2 for `critical` and `important`, 1 for `moderate` and `low`; set a severity in the file to change
-it, for example `{"critical": 3}`. The first approval is recorded
+**Package approval.** `approval_policy` sets the number of approvals per severity (1–5). Default:
+1 for every severity (one reviewer); set a severity in the file to require more, for example
+`{"critical": 2}`. The first approval is recorded
 (`package.approval_recorded`) and the package stays `quarantined` showing "Approvals · 1 of 2". A
 second, **different** approver must approve. The same person approving twice gets HTTP 409. Only
 the last required approval publishes the content to the repository.

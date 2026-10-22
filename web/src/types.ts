@@ -279,7 +279,8 @@ export type IntelSummary = {
   windows: number; apps: number; apps_source?: string; warnings?: string[];
   error?: string; // set when the stored document cannot be used (e.g. its key was revoked)
 };
-export type CatalogLink = { package_id: string; state: string };
+/** version: the linked package's version (what its Catalog page shows); may be older than the row's latest. */
+export type CatalogLink = { package_id: string; state: string; version?: string; severity?: string };
 export type OSUpdate = {
   product: string; build: number; server?: boolean; arch: string; kb: string; ubr?: number;
   release_date?: string; title: string; size_mb?: number; installed_ubr: number; catalog: CatalogLink | null;
