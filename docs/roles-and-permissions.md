@@ -19,7 +19,7 @@ These four are the only roles (the old names `operator` and `approver` were remo
 ## Two rules that are not just "higher role can do more"
 
 1. **Deployment and rollback approval (two-person rule).** A new deployment or
-   rollback waits for approval (default: 2 approvals). Only a **User or Admin**
+   rollback waits for approval (default: the creator plus one other person). Only a **User or Admin**
    can approve or reject it, and only if they **did not create it** and **have
    not approved it already**. The Super admin and Viewers cannot approve.
    **Agent versions** (packages of kind `agent`, `offpatch-agent-*`) are the

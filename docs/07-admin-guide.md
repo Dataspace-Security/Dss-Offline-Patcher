@@ -754,7 +754,7 @@ The full commands are in [runbooks/02-acquisition-zone-setup-and-monthly-run.md]
 | 3 | Acquisition | acquisition operator + second person | Review `acq/spec.json`. `pmctl build -key … -spec acq/spec.json -out acq/out/2026-11.pmb -state acq/state.json`. `pmctl inspect -bundle … -pub bundle.pub`. |
 | 4 | Boundary | acquisition operator | `pmctl send -bundle acq/out/2026-11.pmb -to <drop dir> -key <bundle key>` (or `-via command` for a gateway). Keep `sent.jsonl`. |
 | 5 | Isolated | user | Intake page: bundle `validated`, every check green. Transfer reconciliation: receipt matched. |
-| 6 | Isolated | user(s) | Catalog: review and approve each package with the change reference. Critical patches may need two approvals by different people. |
+| 6 | Isolated | user(s) | Catalog: review and approve each package with the change reference. One approval by default; `approval_policy` can require more per severity. |
 | 7 | Isolated | user (not a package approver, if SoD is on) | Create the deployment: rings `pilot` → `broad`, deadline from your policy, `max_failure_pct`, `max_retries`, reboot policy, health checks for the business services on pilot machines. |
 | 7a | Isolated | another bank user / admin | Approve the deployment with the change reference (two-person rule: creator + approver; nothing installs before). |
 | 8 | Isolated | user | Watch the pilot ring. Fix failures. Get sign-off from pilot owners. |

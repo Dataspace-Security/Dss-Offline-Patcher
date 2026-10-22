@@ -40,7 +40,7 @@ Then, in the console (the summary prints the URL with the real IP):
 1. Sign in and change the password.
 2. **Settings → Users**: create the bank's Admin.
 3. **Endpoints → Create enrollment token** → run the PowerShell line on each PC (Windows PowerShell as Administrator). PCs need **TCP 8443 to the server's IP**; nothing connects to the PCs. The line pins the server's CA by SHA-256 fingerprint, downloads and verifies `pmagent.exe`, enrolls the PC and starts the `offpatch-agent` service. Use *max uses* for several PCs. Re-running it with a new token repairs the install.
-4. **Patches → Needed → Import**, **Catalog → Approve**, **Patch this** (2 approvals).
+4. **Patches → Needed → Import**, **Catalog → Approve**, **Patch this** (the creator plus one other person approves).
 
 First-install options: `--hosts "pm.bank.local,10.20.0.5"` (names and IPs for the certificate), `--port`, `--allow-from CIDR`, `--audit-dir /mnt/worm/offpatch` (off-box / WORM audit export; it warns when it is on the data filesystem), `--backup-dir`, `--backup-keep`, `--root-pubkey`, `--with-agent` (also enroll this server as an endpoint). From a release tarball nothing is downloaded or compiled. From a repository checkout it builds from source and installs Go (SHA-256 verified) if needed.
 

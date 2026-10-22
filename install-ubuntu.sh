@@ -2602,7 +2602,7 @@ if [ $IS_SERVER = 1 ]; then
     2. Settings → Users: create the bank's Admin.
     3. Endpoints → Create enrollment token → run the PowerShell line on each PC
        (Windows PowerShell as Administrator; the PC needs TCP $PORT to ${IP:-this server}).
-    4. Patches → Needed → Import, Catalog → Approve, Patch this (2 approvals).
+    4. Patches → Needed → Import, Catalog → Approve, Patch this (the creator plus one other person approves).
 
   Ubuntu endpoints: sudo ./install-ubuntu.sh --role agent --server $AGENT_URL_NOW --token <enr_…> \\
                          --ca ca.pem --pubkey bundle.pub --root-pubkey root.pub
