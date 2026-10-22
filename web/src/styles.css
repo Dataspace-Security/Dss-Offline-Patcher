@@ -548,8 +548,13 @@ a.tile:hover, button.tile:hover { text-decoration: none; color: var(--text); box
   border-radius: 999px; font: inherit; font-size: 12px; cursor: pointer;
 }
 .chip-select:hover { border-color: var(--border-strong); }
-.chosen-picker { display: flex; gap: 12px; flex-wrap: wrap; margin: 8px 0; }
-.chosen-picker .field { min-width: 200px; }
+.chosen-picker { margin: 8px 0; }
+.chosen-row { display: flex; gap: 12px; flex-wrap: wrap; }
+.chosen-row .field { min-width: 200px; }
+.chosen-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0; }
+.chosen-tools .spacer { flex: 1; }
+.chosen-scroll { max-height: 280px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; }
+.chosen-scroll thead th { position: sticky; top: 0; background: var(--surface); z-index: 1; }
 .tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
 .tab {
   border: 0; background: none; font: inherit; padding: 9px 12px; cursor: pointer; color: var(--text-2); border-bottom: 2px solid transparent;

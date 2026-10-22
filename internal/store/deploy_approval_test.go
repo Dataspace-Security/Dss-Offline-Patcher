@@ -91,7 +91,7 @@ func TestDeploymentNeedsTwoApprovals(t *testing.T) {
 		}
 	}
 	d, err = s.ApproveDeployment(ctx, "user:alice", RoleUser, id, "tested in the lab")
-	if err != nil || d.State != "pending_approval" || len(d.Approvals) != 1 || d.Approvals[0].By != "user:alice" || !strings.Contains(d.StateReason, "1 of 2") {
+	if err != nil || d.State != "pending_approval" || len(d.Approvals) != 1 || d.Approvals[0].By != "user:alice" || !strings.Contains(d.StateReason, "2 of 3 people") {
 		t.Fatalf("first approval: %v %+v", err, d)
 	}
 	if _, err := s.ApproveDeployment(ctx, "user:alice", RoleAdmin, id, "again"); !errors.Is(err, ErrConflict) {
@@ -278,7 +278,7 @@ func TestApplyDeploymentApprovalPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err = s.GetDeployment(ctx, b.DeploymentID)
-	if err != nil || got.State != "pending_approval" || got.ApprovalsRequired != 1 || got.StateReason != "waiting for approval (0 of 1)" {
+	if err != nil || got.State != "pending_approval" || got.ApprovalsRequired != 1 || got.StateReason != "waiting for approval (1 of 2 people)" {
 		t.Fatalf("no approvals, policy now 1: %v %+v", err, got)
 	}
 }

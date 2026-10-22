@@ -264,7 +264,7 @@ export function NewDeploymentPage() {
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (problems.length || runningId || busy) return;
+    if (problems.length || busy) return;
     setBusy(true);
     setError(null);
     setConflict(false);
@@ -294,7 +294,7 @@ export function NewDeploymentPage() {
       const is409 = err instanceof ApiError && err.status === 409;
       const running = is409 ? runningDeploymentFrom(msg) : "";
       setRefused(running ? { key: refusedKey, deploymentId: running } : null);
-      setError(running ? null : msg);
+      setError(msg);
       setConflict(is409 && !running);
       setBusy(false);
     }
@@ -552,22 +552,21 @@ export function NewDeploymentPage() {
             )}
           </div>
         )}
-        {!runningId && (
+        {(
           <div className="banner banner-warn">
             <b>{needsApprovalsText(deploymentApprovalsRequired(policy.data))}.</b> {othersMustApprove(deploymentApprovalsRequired(policy.data))}{" "}
             Nothing is {rollback ? "removed" : "installed"} until then.
           </div>
         )}
-        {runningId ? <AlreadyRunning deploymentId={runningId} /> : problems.length > 0 && (
+        {runningId && <AlreadyRunning deploymentId={runningId} />}
+        {problems.length > 0 && (
           <ul className="problems">{problems.map((p) => <li key={p}>{p}</li>)}</ul>
         )}
         <div className="form-actions">
           <Link to="/deployments" className="btn">Cancel</Link>
-          {!runningId && (
-            <button className={`btn ${emergency || rollback ? "btn-danger" : "btn-primary"}`} disabled={problems.length > 0 || busy}>
-              {busy ? "Creating…" : rollback ? "Create rollback deployment" : emergency ? "Create emergency deployment" : "Create deployment"}
-            </button>
-          )}
+          <button className={`btn ${emergency || rollback ? "btn-danger" : "btn-primary"}`} disabled={problems.length > 0 || busy}>
+            {busy ? "Creating…" : rollback ? "Create rollback deployment" : emergency ? "Create emergency deployment" : "Create deployment"}
+          </button>
         </div>
       </form>
     </>

@@ -8,8 +8,8 @@ import type { Endpoint, MaintenanceWindow, Me, NewDeployment, Package, PackageFl
 
 export type PresetKind = "standard" | "one_ring" | "emergency" | "endpoint" | "chosen";
 
-/** "Chosen machines": a group, a site or one endpoint. */
-export type ChosenTarget = { by: "group" | "site" | "endpoint"; value: string };
+/** "Chosen machines": a group, a site, or the endpoints ticked in a list (ids). */
+export type ChosenTarget = { by: "group" | "site" | "endpoints"; value: string; ids: string[] };
 
 export const STANDARD_MAX_FAILURE_PCT = 10;
 export const STANDARD_MAX_RETRIES = 2;
@@ -190,19 +190,27 @@ type PresetOpts = {
   chosen?: ChosenTarget; endpoints?: Endpoint[];
 };
 
-/** Ring groups for chosen machines: a group as is, a site as its endpoints, one endpoint. */
+/** Ring groups for chosen machines: a group as is, a site as its endpoints, ticked endpoints. */
 export function chosenGroups(c: ChosenTarget | undefined, endpoints: Endpoint[]): string[] {
-  if (!c || !c.value) return [];
+  if (!c) return [];
   switch (c.by) {
-    case "group": return [c.value];
-    case "endpoint": return [`endpoint:${c.value}`];
-    case "site": return endpoints.filter((e) => e.site === c.value && !e.retired_at).map((e) => `endpoint:${e.endpoint_id}`);
+    case "group": return c.value ? [c.value] : [];
+    case "endpoints": return c.ids.map((id) => `endpoint:${id}`);
+    case "site": return c.value ? endpoints.filter((e) => e.site === c.value && !e.retired_at).map((e) => `endpoint:${e.endpoint_id}`) : [];
   }
 }
 
+/** True when something is chosen. */
+export function chosenSet(c: ChosenTarget): boolean {
+  return c.by === "endpoints" ? c.ids.length > 0 : !!c.value;
+}
+
 export function chosenLabel(c: ChosenTarget | undefined, endpoints: Endpoint[]): string {
-  if (!c || !c.value) return "chosen machines";
-  if (c.by === "endpoint") return endpoints.find((e) => e.endpoint_id === c.value)?.hostname ?? c.value;
+  if (!c || !chosenSet(c)) return "chosen machines";
+  if (c.by === "endpoints") {
+    if (c.ids.length === 1) return endpoints.find((e) => e.endpoint_id === c.ids[0])?.hostname ?? c.ids[0];
+    return `${c.ids.length} machines`;
+  }
   return `${c.by} ${c.value}`;
 }
 

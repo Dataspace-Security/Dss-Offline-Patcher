@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, ApiError, enc, errMsg } from "../api";
 import { deploymentApprovalsRequired, needsApprovalsText, othersMustApprove, useCan, useMe } from "../auth";
@@ -9,7 +9,7 @@ import { fmtTime, useLoad } from "../util";
 import { REBOOT_LABELS, STAGES_HINT, stageLabel } from "./deployLabels";
 import {
   approvalsRequired, approvedBy, buildPreset, customHref, fetchEndpoints, fetchFleet, fetchPolicy, fetchWindows,
-  groupSize, humanDuration, isFirstWavePlan, pickFirstWave, policyDeadline, ringCounts, windowsAllowReboot, type ChosenTarget, type PresetKind,
+  groupSize, humanDuration, isFirstWavePlan, pickFirstWave, policyDeadline, ringCounts, windowsAllowReboot, chosenSet, type ChosenTarget, type PresetKind,
 } from "./patchPlan";
 import { TargetPreview, nothingToDo, type TargetSummary } from "./TargetPreview";
 import { CopyBox, ErrorBanner, Modal, Mono, Pill } from "./ui";
@@ -47,7 +47,7 @@ const PRESETS: { kind: PresetKind; label: string; hint: string }[] = [
   { kind: "one_ring", label: "Every compatible machine that needs it", hint: "policy deadline; pauses above 10 % failures" },
   { kind: "standard", label: "Test machines first, then all", hint: "group pilot installs first; you check it, then start the rest" },
   { kind: "endpoint", label: "This endpoint only", hint: "just this machine" },
-  { kind: "chosen", label: "Chosen machines", hint: "a group, a site or one endpoint you pick" },
+  { kind: "chosen", label: "Chosen machines", hint: "tick the machines, or pick a group or a site" },
   { kind: "emergency", label: "Emergency", hint: "all machines now, ignores windows, 24 h deadline" },
 ];
 
@@ -66,18 +66,21 @@ function willInstallText(s: TargetSummary): string {
   return `${n} machine${n === 1 ? "" : "s"}`;
 }
 
-/** Server 409 for a second deployment of the same package: "deployment <id> of this package is already running; ...". */
+/** Server 409 when a running deployment of the package already covers some of the machines: "deployment <id> (...) of this package already covers N ...". */
 export function runningDeploymentFrom(message: string): string {
-  return /deployment (\S+) of this package is already running/.exec(message)?.[1] ?? "";
+  return /deployment (\S+) .*of this package already covers/.exec(message)?.[1] ?? "";
 }
 
-/** "A deployment of this package is already running -> Open it" (instead of offering Create). */
+/** "A deployment of this package is already running -> Open it"; other machines can still get their own deployment. */
 export function AlreadyRunning({ deploymentId, onOpen }: { deploymentId: string; onOpen?: () => void }) {
   return (
     <div className="banner banner-info">
       <b>A deployment of this package is already running</b> (<Mono>{deploymentId}</Mono>) →{" "}
       <Link className="btn btn-sm btn-primary" to={`/deployments/${enc(deploymentId)}`} onClick={onOpen}>Open it</Link>
-      <div className="small">It already targets every machine that needs the package. Wait for it to finish, or cancel it there first.</div>
+      <div className="small">
+        You can still deploy it to machines that deployment does not cover, for example another group, site or endpoint
+        with <b>Chosen machines</b>. Machines it already covers are refused until it finishes or is cancelled.
+      </div>
     </div>
   );
 }
@@ -104,7 +107,7 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
   const [runningFromServer, setRunningFromServer] = useState("");
   const [justification, setJustification] = useState("");
   const [atOnce, setAtOnce] = useState("0");
-  const [chosen, setChosen] = useState<ChosenTarget>({ by: "group", value: "" });
+  const [chosen, setChosen] = useState<ChosenTarget>({ by: "endpoints", value: "", ids: [] });
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -146,7 +149,7 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
       const is409 = e instanceof ApiError && e.status === 409;
       const running = is409 ? runningDeploymentFrom(msg) : "";
       setRunningFromServer(running);
-      setErr(running ? null : msg);
+      setErr(msg);
       setConflict(is409 && !running);
       setBusy(false);
     }
@@ -172,6 +175,10 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
   const pilotN = groupSize("pilot", eps);
   const pilotEmpty = !!epsL.data && pilotN === 0;
   const runningId = fleet?.active_deployment_id || runningFromServer;
+  // While one runs (usually for everyone who needs it), the next one is for other machines.
+  useEffect(() => {
+    if (fleet?.active_deployment_id) setPreset((p) => (p === "one_ring" ? "chosen" : p));
+  }, [fleet?.active_deployment_id]);
   // Many machines need it: start on a few first, the rest follow by themselves.
   const firstWave = preset === "one_ring" && fleet && epsL.data ? pickFirstWave(fleet.endpoint_ids ?? [], epsL.data) : [];
   // No window lets machines restart: don't promise restarts that never happen.
@@ -186,7 +193,7 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
   if (!approved) problems.push("The package must be approved first.");
   if (preset === "standard" && pilotEmpty) problems.push("No test machines: no endpoint is in group pilot. Choose Every compatible machine that needs it, or put 2–5 machines in group pilot first.");
   if (preset === "emergency" && !justification.trim()) problems.push("Emergency deployments require a justification.");
-  if (preset === "chosen" && !chosen.value) problems.push(`Choose the ${chosen.by} to deploy to.`);
+  if (preset === "chosen" && !chosenSet(chosen)) problems.push(chosen.by === "endpoints" ? "Tick the machines to deploy to." : `Choose the ${chosen.by} to deploy to.`);
   if (epsL.data && counts.every((c) => c === 0)) problems.push("No endpoint is in these stages.");
   else if (nothingToDo(summary)) problems.push(notApplicableToAll(summary)
     ? `This package doesn't apply to any machine in these stages (${summary!.naReasons?.join("; ") || "not applicable"}). Nothing can be installed: import the update built for their Windows version from Patches → Needed.`
@@ -200,7 +207,7 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
   const planLoaded = !!policyL.data && !!epsL.data && (!!winL.data || !!winL.error) && (!!fleetL.data || !!fleetL.error);
   const planError = [policyL.error && `policy: ${policyL.error}`, epsL.error && `endpoints: ${epsL.error}`].filter(Boolean).join(" · ");
   const retryPlan = () => { void policyL.reload(); void epsL.reload(); void winL.reload(); void fleetL.reload(); };
-  const canCreate = approved && canDeploy && !sodBlocks && !runningId && planLoaded && problems.length === 0;
+  const canCreate = approved && canDeploy && !sodBlocks && planLoaded && problems.length === 0;
 
   const visiblePresets = PRESETS.filter((p) => p.kind !== "endpoint" || endpoint);
   const ringsForPreview = draft.rings.map((r) => ({ name: r.name, groups: r.groups.join(", ") }));
@@ -209,13 +216,10 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
   const footer: ReactNode = (
     <>
       <button className="btn" onClick={onClose} disabled={busy}>Cancel</button>
-      {approved && canDeploy && !sodBlocks && runningId && (
-        <Link className="btn btn-primary" to={`/deployments/${enc(runningId)}`} onClick={onClose}>Open the running deployment</Link>
-      )}
-      {approved && canDeploy && !sodBlocks && !runningId && !nothingToDo(summary) && (
+      {approved && canDeploy && !sodBlocks && !nothingToDo(summary) && (
         <span className="reason-hint" title={othersMustApprove(deployApprovals)}>{needsApprovalsText(deployApprovals)}</span>
       )}
-      {approved && canDeploy && !sodBlocks && !runningId && !nothingToDo(summary) && (
+      {approved && canDeploy && !sodBlocks && !nothingToDo(summary) && (
         <button className={`btn ${preset === "emergency" ? "btn-danger" : "btn-primary"}`} disabled={!canCreate || busy}
                 onClick={() => void create(draft)}>
           {busy ? "Creating…" : preset === "emergency" ? "Create emergency deployment" : "Create deployment"}
@@ -290,8 +294,6 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
               </div>
             ) : !canDeploy ? (
               <div className="banner banner-info">Only Users and Admins can deploy.</div>
-            ) : runningId ? (
-              <div className="hint">No new deployment is offered while one is running: open it to follow it.</div>
             ) : (
               <>
                 <div className="preset-row" role="radiogroup" aria-label="How to roll it out">
@@ -324,7 +326,7 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
                   <div className="hint">Loading the policy and the endpoint list…</div>
                 ))}
                 {preset === "standard" && <div className="hint">{STAGES_HINT}</div>}
-                {preset === "chosen" && <ChosenPicker value={chosen} onChange={setChosen} endpoints={eps} />}
+                {preset === "chosen" && <ChosenPicker value={chosen} onChange={setChosen} endpoints={eps} needIds={fleet?.endpoint_ids ?? []} />}
                 {isFirstWavePlan(draft) && <div className="banner banner-info">{firstWaveText(firstWave.length)}</div>}
                 <PlanSummary draft={draft} counts={epsL.data ? counts : null} policyDeadline={policy?.deadlines?.[pkg.severity]}
                              policyMissing={!!policyL.error} dlFromPolicy={dl} endpoints={eps}
@@ -445,34 +447,97 @@ function PlanSummary({ draft, counts, policyDeadline: policyDur, policyMissing, 
   );
 }
 
-/** Pick the machines for "Chosen machines": a group, a site or one endpoint. */
-function ChosenPicker({ value, onChange, endpoints }: { value: ChosenTarget; onChange: (c: ChosenTarget) => void; endpoints: Endpoint[] }) {
+/** Pick the machines for "Chosen machines": tick endpoints (multi-select), or a whole group or site. */
+function ChosenPicker({ value, onChange, endpoints, needIds }: {
+  value: ChosenTarget; onChange: (c: ChosenTarget) => void; endpoints: Endpoint[]; needIds: string[];
+}) {
+  const [q, setQ] = useState("");
+  const [needOnly, setNeedOnly] = useState(needIds.length > 0);
   const live = endpoints.filter((e) => !e.retired_at);
+  const needs = new Set(needIds);
   const groups = [...new Set(live.flatMap((e) => e.groups ?? []))].sort();
   const sites = [...new Set(live.map((e) => e.site).filter(Boolean))].sort();
-  const count = (by: ChosenTarget["by"], v: string) =>
+  const count = (by: "group" | "site", v: string) =>
     by === "group" ? live.filter((e) => (e.groups ?? []).includes(v)).length : live.filter((e) => e.site === v).length;
+  const needle = q.trim().toLowerCase();
+  const shown = live
+    .filter((e) => !needOnly || needs.has(e.endpoint_id))
+    .filter((e) => !needle || [e.hostname, e.site, ...(e.groups ?? [])].join(" ").toLowerCase().includes(needle))
+    .sort((a, b) => Number(needs.has(b.endpoint_id)) - Number(needs.has(a.endpoint_id)) || a.hostname.localeCompare(b.hostname));
+  const picked = new Set(value.ids);
+  const setIds = (ids: Set<string>) => onChange({ ...value, ids: [...ids] });
+  const toggle = (id: string) => {
+    const n = new Set(picked);
+    if (n.has(id)) n.delete(id); else n.add(id);
+    setIds(n);
+  };
+  const allShown = shown.length > 0 && shown.every((e) => picked.has(e.endpoint_id));
+  const toggleShown = () => {
+    const n = new Set(picked);
+    for (const e of shown) {
+      if (allShown) n.delete(e.endpoint_id); else n.add(e.endpoint_id);
+    }
+    setIds(n);
+  };
   return (
-    <div className="chosen-picker form-row">
-      <label className="field">
-        <span>Deploy to</span>
-        <select value={value.by} onChange={(e) => onChange({ by: e.target.value as ChosenTarget["by"], value: "" })}>
-          <option value="group">a group</option>
-          <option value="site">a site</option>
-          <option value="endpoint">one endpoint</option>
-        </select>
-      </label>
-      <label className="field">
-        <span>{value.by === "group" ? "Group" : value.by === "site" ? "Site" : "Endpoint"}</span>
-        <select value={value.value} onChange={(e) => onChange({ ...value, value: e.target.value })}>
-          <option value="">Choose…</option>
-          {value.by === "group" && groups.map((g) => <option key={g} value={g}>{g} ({count("group", g)})</option>)}
-          {value.by === "site" && sites.map((s) => <option key={s} value={s}>{s} ({count("site", s)})</option>)}
-          {value.by === "endpoint" && [...live].sort((a, b) => a.hostname.localeCompare(b.hostname)).map((e) => (
-            <option key={e.endpoint_id} value={e.endpoint_id}>{e.hostname}{e.site ? ` · ${e.site}` : ""}</option>
-          ))}
-        </select>
-      </label>
+    <div className="chosen-picker">
+      <div className="chosen-row">
+        <label className="field">
+          <span>Deploy to</span>
+          <select value={value.by} onChange={(e) => onChange({ by: e.target.value as ChosenTarget["by"], value: "", ids: [] })}>
+            <option value="endpoints">machines I tick</option>
+            <option value="group">a whole group</option>
+            <option value="site">a whole site</option>
+          </select>
+        </label>
+        {value.by !== "endpoints" && (
+          <label className="field">
+            <span>{value.by === "group" ? "Group" : "Site"}</span>
+            <select value={value.value} onChange={(e) => onChange({ ...value, value: e.target.value })}>
+              <option value="">Choose…</option>
+              {value.by === "group" && groups.map((g) => <option key={g} value={g}>{g} ({count("group", g)})</option>)}
+              {value.by === "site" && sites.map((s) => <option key={s} value={s}>{s} ({count("site", s)})</option>)}
+            </select>
+          </label>
+        )}
+      </div>
+      {value.by === "endpoints" && (
+        <div className="chosen-list">
+          <div className="chosen-tools">
+            <input className="search" placeholder="Filter host, group, site…" value={q} onChange={(e) => setQ(e.target.value)} />
+            <label className="check small">
+              <input type="checkbox" checked={needOnly} onChange={(e) => setNeedOnly(e.target.checked)} /> only machines that need it
+            </label>
+            <span className="spacer" />
+            <b className="small">{picked.size} selected</b>
+            {picked.size > 0 && <button type="button" className="btn btn-sm" onClick={() => setIds(new Set())}>Clear</button>}
+          </div>
+          <div className="chosen-scroll">
+            <table className="table table-compact">
+              <thead>
+                <tr>
+                  <th style={{ width: 28 }}><input type="checkbox" checked={allShown} onChange={toggleShown} aria-label="Select all shown" /></th>
+                  <th>Machine</th><th>Site</th><th>Groups</th><th>Needs it</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shown.length === 0 && <tr><td colSpan={5} className="muted">No machine matches.</td></tr>}
+                {shown.map((e) => (
+                  <tr key={e.endpoint_id} className={picked.has(e.endpoint_id) ? "selected" : ""} onClick={() => toggle(e.endpoint_id)} style={{ cursor: "pointer" }}>
+                    <td onClick={(ev) => ev.stopPropagation()}>
+                      <input type="checkbox" checked={picked.has(e.endpoint_id)} onChange={() => toggle(e.endpoint_id)} aria-label={`Select ${e.hostname}`} />
+                    </td>
+                    <td>{e.hostname}</td>
+                    <td>{e.site || <span className="muted">—</span>}</td>
+                    <td className="small">{(e.groups ?? []).join(", ") || <span className="muted">—</span>}</td>
+                    <td>{needs.has(e.endpoint_id) ? <span className="text-amber">yes</span> : <span className="muted">no</span>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

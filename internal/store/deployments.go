@@ -375,13 +375,10 @@ func (s *Store) CreateDeployment(ctx context.Context, actor string, n NewDeploym
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		// One running deployment per package and operation: a second one
-		// would target the same machines again (duplicate work, confusing
-		// progress). Wait for it to finish, or cancel it first.
-		err = tx.QueryRow(`SELECT deployment_id FROM deployments WHERE package_id=? AND state IN ('pending_approval','active','paused') AND operation = ? LIMIT 1`, n.PackageID, n.Operation).Scan(&other)
-		if err == nil {
-			return Errf(ErrConflict, "deployment %s of this package is already running or waiting for approval; open it, wait for it to finish, or cancel it first", other)
-		} else if !errors.Is(err, sql.ErrNoRows) {
+		// Several deployments of a package may run at once (group A, then
+		// group B), but never two for the same machine: that would target it
+		// twice (duplicate work, confusing progress).
+		if err := overlappingDeployment(ctx, tx, n); err != nil {
 			return err
 		}
 		if s.Policy.SeparationOfDuties {
@@ -421,7 +418,7 @@ func (s *Store) CreateDeployment(ctx context.Context, actor string, n NewDeploym
 		// (activateDeployment).
 		kind := map[bool]string{true: "Rollback", false: "Deployment"}[rollback]
 		if err := s.raiseAlert(tx, "info", "deployment_awaiting_approval", "deployment", id,
-			fmt.Sprintf("%s %q of %s by %s is waiting for %d approval(s)", kind, n.Name, n.PackageID, strings.TrimPrefix(actor, "user:"), need)); err != nil {
+			fmt.Sprintf("%s %q of %s by %s is waiting for approval: %s", kind, n.Name, n.PackageID, strings.TrimPrefix(actor, "user:"), othersMustApprove(need))); err != nil {
 			return err
 		}
 		out, err = getDeploymentCounted(ctx, tx, id)

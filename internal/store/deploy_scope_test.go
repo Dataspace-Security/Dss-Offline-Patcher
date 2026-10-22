@@ -2,6 +2,8 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 )
 
@@ -115,5 +117,35 @@ func TestDeploymentScopeMigration(t *testing.T) {
 	}
 	if got, _ = s.GetDeployment(ctx, d.DeploymentID); got.ScopeEndpoints != 4 {
 		t.Fatalf("second migration widened the scope: %d", got.ScopeEndpoints)
+	}
+}
+
+// Group A, then group B: a second deployment of a package may run at the
+// same time for other machines, never for a machine the first one covers.
+func TestDeploymentsForOtherMachinesRunTogether(t *testing.T) {
+	s, ctx := approvalFixture(t) // e-old in group pilot
+	addEndpoint(t, s, "e-b1", []string{"branch"}, acmeOld)
+	addEndpoint(t, s, "e-b2", []string{"branch"}, acmeOld)
+	pilot := NewDeployment{PackageID: "Acme-3.0", Name: "pilot", Rings: []Ring{{Name: "p", Groups: []string{"pilot"}}}, MaxFailurePct: 50}
+	if _, err := createApproved(s, ctx, "user:otto", pilot); err != nil {
+		t.Fatal(err)
+	}
+	one := NewDeployment{PackageID: "Acme-3.0", Name: "b1", Rings: []Ring{{Name: "c", Groups: []string{"endpoint:e-b1"}}}, MaxFailurePct: 50}
+	if _, err := s.CreateDeployment(ctx, "user:otto", one); err != nil {
+		t.Fatalf("other machine while pilot runs: %v", err)
+	}
+	// e-b1 is covered by the waiting one; e-old by the active one.
+	for _, n := range []NewDeployment{
+		{PackageID: "Acme-3.0", Name: "branch", Rings: []Ring{{Name: "b", Groups: []string{"branch"}}}, MaxFailurePct: 50},
+		{PackageID: "Acme-3.0", Name: "everyone", Rings: allRing, MaxFailurePct: 50},
+	} {
+		_, err := s.CreateDeployment(ctx, "user:otto", n)
+		if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "already covers 1 of these machines") {
+			t.Fatalf("%s: want overlap refusal, got %v", n.Name, err)
+		}
+	}
+	two := NewDeployment{PackageID: "Acme-3.0", Name: "b2", Rings: []Ring{{Name: "c", Groups: []string{"endpoint:e-b2"}}}, MaxFailurePct: 50}
+	if _, err := s.CreateDeployment(ctx, "user:otto", two); err != nil {
+		t.Fatalf("third machine: %v", err)
 	}
 }

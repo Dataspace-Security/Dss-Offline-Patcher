@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -139,4 +140,73 @@ func migrateDeploymentScopes(db *sql.DB) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// overlappingDeployment refuses n when a deployment of the same package and
+// operation that is waiting for approval, active or paused already covers
+// one of the machines n would cover: its approved scope once active, the
+// machines in its ring groups while it waits.
+func overlappingDeployment(ctx context.Context, tx *sql.Tx, n NewDeployment) error {
+	rows, err := tx.QueryContext(ctx, `SELECT `+depCols+` FROM deployments WHERE package_id=? AND operation=? AND state IN ('pending_approval','active','paused') ORDER BY created_at`, n.PackageID, n.Operation)
+	if err != nil {
+		return err
+	}
+	var others []Deployment
+	for rows.Next() {
+		d, err := scanDeployment(rows)
+		if err != nil {
+			rows.Close()
+			return err
+		}
+		others = append(others, d)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil || len(others) == 0 {
+		return err
+	}
+	mine, err := scopeCandidates(ctx, tx, Deployment{NewDeployment: n})
+	if err != nil {
+		return err
+	}
+	want := map[string]bool{}
+	for _, id := range mine {
+		want[id] = true
+	}
+	for _, o := range others {
+		var covered []string
+		if o.State == "pending_approval" {
+			if covered, err = scopeCandidates(ctx, tx, o); err != nil {
+				return err
+			}
+		} else {
+			r, err := tx.QueryContext(ctx, `SELECT endpoint_id FROM deployment_scope WHERE deployment_id=? AND in_scope=1
+				UNION SELECT endpoint_id FROM targets WHERE deployment_id=?`, o.DeploymentID, o.DeploymentID)
+			if err != nil {
+				return err
+			}
+			for r.Next() {
+				var id string
+				if err := r.Scan(&id); err != nil {
+					r.Close()
+					return err
+				}
+				covered = append(covered, id)
+			}
+			r.Close()
+			if err := r.Err(); err != nil {
+				return err
+			}
+		}
+		both := 0
+		for _, id := range covered {
+			if want[id] {
+				both++
+			}
+		}
+		if both > 0 {
+			return Errf(ErrConflict, "deployment %s (%q, %s) of this package already covers %d of these machines; deploy to other machines, wait for it to finish, or cancel it first",
+				o.DeploymentID, o.Name, strings.ReplaceAll(o.State, "_", " "), both)
+		}
+	}
+	return nil
 }

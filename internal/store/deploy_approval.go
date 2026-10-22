@@ -97,7 +97,8 @@ func (s *Store) ApplyDeploymentApprovalPolicy(ctx context.Context) error {
 }
 
 func awaitingReason(have, need int) string {
-	return fmt.Sprintf("waiting for approval (%d of %d)", have, need)
+	// The creator is the first person: "1 of 2 people" before anyone approved.
+	return fmt.Sprintf("waiting for approval (%d of %d people)", have+1, need+1)
 }
 
 // pendingFor loads a deployment that must be waiting for approval and
