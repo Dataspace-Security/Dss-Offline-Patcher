@@ -108,6 +108,22 @@ signature protect the file all the way to the endpoint.
   it is deleted and downloaded again; the new file must match the expected hash like any download.
 - Catalog and MSRC page/API requests are retried up to 3 times (backoff 2 s, 8 s) on transport errors,
   timeouts, HTTP 429 and 5xx. A 404 is not retried.
+- **Oracle JDK** (`download.oracle.com/java/<release>/...`, e.g. winget `Oracle.JDK.21`). Oracle serves
+  the current update of a release only at `/java/21/latest/jdk-21_<platform>_bin.msi` and moves an
+  update to `/java/21/archive/jdk-21.0.12_<platform>_bin.msi` once a newer one ships. winget manifests
+  name one of the two (`internal/acquire/oracle.go`):
+  - pmctl reads the SHA-256 Oracle publishes next to the `/latest/` file (`.sha256`, at most 512 bytes,
+    15 s timeout). If it equals the manifest's hash, pmctl downloads from `/latest/`; otherwise it uses
+    `/archive/`.
+  - The other location is tried on a 404. It is also tried when an unversioned `/latest/` URL serves a
+    different build.
+  - Whichever URL serves the file, it must match the manifest's SHA-256. The spec's `source_url`
+    records the URL that served it.
+  - An update that neither location serves is reported as **unsupported**, with the reason, and is
+    not retried as a failure. It is not available under Oracle's No-Fee Terms. Example: Oracle JDK 21
+    from 21.0.13 (October 2026) is under the OTN license and only downloadable with an Oracle account,
+    although winget lists `Oracle.JDK.21` 21.0.13.0 with an `/archive/` URL Oracle never published.
+    Import an earlier no-fee update, or an OpenJDK build such as Eclipse Temurin or Microsoft OpenJDK.
 
 ### Checkpoint cumulative updates
 
@@ -415,7 +431,9 @@ Apps whose winget manifest has no MSI for an architecture (WebView2, OneDrive, t
 4. **Chain.** The signer certificate must chain, through the certificates in the signature, to a trusted root with the **code-signing** extended key usage. The chain is checked at the time of a verified **timestamp** (RFC 3161 token or PKCS#9 countersignature, whose TSA certificate must chain with the time-stamping usage), else at the current time. A signature made while the certificate was valid stays valid after it expires, as on Windows.
 5. **Several signatures.** A file may carry nested signatures. As on Windows, it is valid if one of them passes steps 2–4 on its own (the primary is tried first). Typical case: a SHA-1 primary with a SHA-256 nested signature.
 
-Trust anchors are the host's system roots plus the code-signing roots shipped in `internal/acquire/authenticode/roots.pem`: Microsoft Root Certificate Authority 2010 and 2011, Microsoft Identity Verification Root CA 2020, DigiCert Trusted Root G4, DigiCert Assured ID Root CA and USERTrust RSA. Their SHA-256 fingerprints are pinned in the tests. Microsoft's code-signing roots are not in the Mozilla-derived bundles Linux distributions use, hence the shipped set.
+Trust anchors are the host's system roots plus the code-signing roots shipped in `internal/acquire/authenticode/roots.pem`: Microsoft Root Certificate Authority 2010 and 2011, Microsoft Identity Verification Root CA 2020, DigiCert Trusted Root G4, DigiCert Assured ID Root CA, USERTrust RSA, and Sectigo Public Code Signing Root R46 and E46. Their SHA-256 fingerprints are pinned in the tests. Microsoft's code-signing roots are not in the Mozilla-derived bundles Linux distributions use, hence the shipped set.
+
+The Sectigo roots are needed for installers signed under Sectigo's current code-signing hierarchy, for example Proton AG (Proton VPN, Mail, Pass and Drive): leaf, then Sectigo Public Code Signing CA (EV) R36, then Root R46. Such files embed R46 only as a cross-certificate from AAA Certificate Services, which current Linux bundles no longer trust. Without the self-signed R46 they failed with "signer certificate (Proton AG) not trusted for code signing ... certificate signed by unknown authority". Both roots are in Microsoft's Trusted Root Program for code signing only (the fingerprints were checked against the CCADB report). Intermediates are not fetched over the network (no AIA). A vendor whose chain ends at a root outside this set needs that root in `authenticode_roots`.
 
 **Not checked by this package:** revocation (pmctl auto checks the CRL, see above; OCSP is not used). SHA-1-only signatures and SHA-1 timestamps are refused, which is stricter than Windows. The recorded signer is shown on the package for approval. The agent verifies the signature again (WinVerifyTrust) and checks that the signer is `exe.signer` before it runs the installer.
 

@@ -508,11 +508,14 @@ func FetchURL(ctx context.Context, o FetchURLOptions) (*FetchResult, error) {
 		dl, err = verifyFile(filepath.Join(o.OutDir, o.FileName), DownloadRequest{SHA256: o.SHA256})
 	} else {
 		dl, err = Download(ctx, o.HTTP, DownloadRequest{
-			URL: o.URL, DestDir: o.OutDir, FileName: o.FileName, SHA256: o.SHA256, Progress: o.Progress,
+			URL: o.URL, DestDir: o.OutDir, FileName: o.FileName, SHA256: o.SHA256, Version: o.Version, Progress: o.Progress,
 		})
 	}
 	if err != nil {
 		return nil, err
+	}
+	if dl.URL != "" {
+		e.SourceURL = dl.URL // a vendor alternate may have served it
 	}
 	if o.VerifyPayload != nil {
 		if err := o.VerifyPayload(dl.Path); err != nil {

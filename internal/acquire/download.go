@@ -76,6 +76,9 @@ type DownloadRequest struct {
 	SHA1   string // lowercase hex
 	SHA256 string // lowercase hex
 	Size   int64  // expected size, 0 = unknown
+	// Version, optional: the package version, used only to find a vendor's
+	// alternate location of the same file (Oracle JDK /latest/ -> /archive/).
+	Version string
 	// IdleTimeout aborts a download that makes no progress (default 2m).
 	IdleTimeout time.Duration
 	// Progress, if set, is called with bytes written so far and total (-1 unknown).
@@ -84,7 +87,10 @@ type DownloadRequest struct {
 
 // DownloadResult describes the verified file on disk.
 type DownloadResult struct {
-	Path    string
+	Path string
+	// URL the file was fetched from ("" when an existing file was reused);
+	// differs from the request's when a vendor alternate served it.
+	URL     string
 	Size    int64
 	SHA1    string
 	SHA256  string
@@ -149,6 +155,44 @@ func Download(ctx context.Context, hc *http.Client, req DownloadRequest) (*Downl
 		replacedStale = true
 	}
 
+	// Vendors that move a file between URLs (Oracle JDK: /latest/ and
+	// /archive/) get the other location on a 404; the hash check is the
+	// same for each.
+	cands := []string{req.URL}
+	if isOracleJDK(req.URL) {
+		cands = oracleCandidates(ctx, hc, req)
+	}
+	var missing []string
+	var mismatch error
+	for i, cu := range cands {
+		r := req
+		r.URL = cu
+		res, err := downloadFrom(ctx, hc, r, final, part)
+		more := i+1 < len(cands)
+		switch {
+		case err == nil:
+			res.URL = cu
+			res.ReplacedStale = replacedStale
+			return res, nil
+		case IsNotFound(err) && len(cands) > 1:
+			missing = append(missing, cu)
+			continue
+		case errors.Is(err, ErrHashMismatch) && more && oracleLatestRe.MatchString(cu):
+			// /latest/ is unversioned: it moved on to a newer update.
+			mismatch = err
+			continue
+		}
+		return nil, err
+	}
+	if mismatch != nil {
+		return nil, mismatch
+	}
+	return nil, oracleUnavailable(missing)
+}
+
+// downloadFrom fetches req.URL into part and renames it to final once it
+// verifies.
+func downloadFrom(ctx context.Context, hc *http.Client, req DownloadRequest, final, part string) (*DownloadResult, error) {
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		resumed, err := fetchToPart(ctx, hc, req, part)
@@ -170,7 +214,6 @@ func Download(ctx context.Context, hc *http.Client, req DownloadRequest) (*Downl
 		}
 		res.Path = final
 		res.Resumed = resumed
-		res.ReplacedStale = replacedStale
 		return res, nil
 	}
 	return nil, lastErr
@@ -227,7 +270,7 @@ func fetchToPart(ctx context.Context, hc *http.Client, req DownloadRequest, part
 		flags |= os.O_TRUNC // server ignored Range (or fresh download): start over
 		offset = 0
 	default:
-		return false, fmt.Errorf("GET %s: HTTP %d", hreq.URL.Redacted(), resp.StatusCode)
+		return false, &HTTPStatusError{Method: http.MethodGet, URL: hreq.URL.Redacted(), Code: resp.StatusCode}
 	}
 
 	total := int64(-1)

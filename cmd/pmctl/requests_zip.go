@@ -78,14 +78,14 @@ func (o installerOnDisk) discard() {
 // or whole is set). The caller calls cleanup.
 func (r *requestRun) installerFile(a acqrequest.App, m *acquire.WingetManifest, in acquire.WingetInstaller, file string, whole bool) (installerOnDisk, error) {
 	if in.ZipPath == "" {
-		dl, err := acquire.Download(r.ctx, r.hc, acquire.DownloadRequest{URL: in.URL, DestDir: r.downloads, FileName: file, SHA256: in.SHA256})
+		dl, err := acquire.Download(r.ctx, r.hc, acquire.DownloadRequest{URL: in.URL, DestDir: r.downloads, FileName: file, SHA256: in.SHA256, Version: m.Version})
 		if err != nil {
 			return installerOnDisk{}, err
 		}
 		return installerOnDisk{path: dl.Path, sha256: dl.SHA256}, nil
 	}
 	zipName := strings.TrimSuffix(file, filepath.Ext(file)) + ".zip"
-	dl, err := acquire.Download(r.ctx, r.hc, acquire.DownloadRequest{URL: in.URL, DestDir: r.downloads, FileName: zipName, SHA256: in.SHA256})
+	dl, err := acquire.Download(r.ctx, r.hc, acquire.DownloadRequest{URL: in.URL, DestDir: r.downloads, FileName: zipName, SHA256: in.SHA256, Version: m.Version})
 	if err != nil {
 		return installerOnDisk{}, err
 	}

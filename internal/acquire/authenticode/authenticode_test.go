@@ -330,6 +330,8 @@ func TestEmbeddedRoots(t *testing.T) {
 		"552f7bdcf1a7af9e6ce672017f4f12abf77240c78e761ac203d1d9d20ac89988": "DigiCert Trusted Root G4",
 		"3e9099b5015e8f486c00bcea9d111ee721faba355a89bcf1df69561e3dc6325c": "DigiCert Assured ID Root CA",
 		"e793c9b02fd8aa13e21c31228accb08119643b749c898964b1746d46c3d4cbd2": "USERTrust RSA Certification Authority",
+		"7e76260ae69a55d3f060b0fd18b2a8c01443c87b60791030c9fa0b0585101a38": "Sectigo Public Code Signing Root R46",
+		"8f6371d8cc5aa7ca149667a98b5496398951e4319f7afbcc6a660d673e438d0b": "Sectigo Public Code Signing Root E46",
 	}
 	rest := rootsPEM
 	n := 0
@@ -350,6 +352,76 @@ func TestEmbeddedRoots(t *testing.T) {
 	}
 	if n != len(want) {
 		t.Fatalf("%d roots, want %d", n, len(want))
+	}
+}
+
+// The signer chain a real Sectigo-signed installer carries (Proton AG,
+// ProtonMail-desktop.exe): leaf, EV intermediate, and the R46 root only as
+// a cross-certificate from AAA Certificate Services, which Mozilla-derived
+// bundles no longer hold. It must chain to the shipped self-signed R46 (the
+// Microsoft-program code-signing root), and only for code signing.
+func TestSectigoR46Chain(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("testdata", "proton-ag-chain.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var certs []*x509.Certificate
+	for {
+		var blk *pem.Block
+		if blk, b = pem.Decode(b); blk == nil {
+			break
+		}
+		c, err := x509.ParseCertificate(blk.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		certs = append(certs, c)
+	}
+	if len(certs) != 3 || certs[0].Subject.CommonName != "Proton AG" {
+		t.Fatalf("testdata: %d certificates", len(certs))
+	}
+	leaf := certs[0]
+	at := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC) // inside the leaf's validity
+
+	// Before: the reviewed set without the Sectigo code-signing roots, as
+	// the verifier stood when Proton installers were refused.
+	old := x509.NewCertPool()
+	rest := rootsPEM
+	for {
+		var blk *pem.Block
+		if blk, rest = pem.Decode(rest); blk == nil {
+			break
+		}
+		c, err := x509.ParseCertificate(blk.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(c.Subject.CommonName, "Sectigo Public Code Signing Root") {
+			old.AddCert(c)
+		}
+	}
+	var ua x509.UnknownAuthorityError
+	if _, err := verifyChain(leaf, certs, old, x509.ExtKeyUsageCodeSigning, at); !errors.As(err, &ua) {
+		t.Fatalf("without R46: err = %v, want unknown authority", err)
+	}
+
+	issuer, err := verifyChain(leaf, certs, EmbeddedRoots(), x509.ExtKeyUsageCodeSigning, at)
+	if err != nil {
+		t.Fatalf("with the shipped roots: %v", err)
+	}
+	if issuer == nil || issuer.Subject.CommonName != "Sectigo Public Code Signing CA EV R36" {
+		t.Fatalf("issuer = %v", issuer)
+	}
+	// Still a code-signing-only trust: not for TLS, and not outside validity.
+	if _, err := verifyChain(leaf, certs, EmbeddedRoots(), x509.ExtKeyUsageServerAuth, at); err == nil {
+		t.Fatal("code-signing chain accepted for server auth")
+	}
+	if _, err := verifyChain(leaf, certs, EmbeddedRoots(), x509.ExtKeyUsageCodeSigning, leaf.NotAfter.Add(time.Hour)); err == nil {
+		t.Fatal("expired leaf accepted")
+	}
+	// The intermediate alone (no root in the file, none trusted) is not enough.
+	if _, err := verifyChain(leaf, certs[:2], x509.NewCertPool(), x509.ExtKeyUsageCodeSigning, at); err == nil {
+		t.Fatal("chain accepted without a trusted root")
 	}
 }
 
