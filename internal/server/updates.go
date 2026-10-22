@@ -869,10 +869,24 @@ func liveRef(r *store.AcqRequestRef, importable string) *store.AcqRequestRef {
 	if r == nil || r.Status != "unsupported" {
 		return r
 	}
-	if importable == intel.ImportableYes || strings.Contains(r.Reason, "no MSI installer for") {
+	if importable == intel.ImportableYes || strings.Contains(r.Reason, "no MSI installer for") || untrustedBeforeRootsFix(r) {
 		return nil
 	}
 	return r
+}
+
+// rootsFixedAt: requests sent before acquisition zones trusted the Sectigo
+// Public Code Signing roots (R46/E46) refused installers signed under them
+// (Proton, many others) as "not trusted for code signing". Those refusals
+// are stale; a request sent after it reports a still-untrusted signer again.
+var rootsFixedAt = time.Date(2026, 10, 22, 15, 30, 0, 0, time.UTC)
+
+func untrustedBeforeRootsFix(r *store.AcqRequestRef) bool {
+	if !strings.Contains(r.Reason, "not trusted for code signing") && !strings.Contains(r.Reason, "unknown authority") {
+		return false
+	}
+	at, err := time.Parse(time.RFC3339Nano, r.At)
+	return err == nil && at.Before(rootsFixedAt)
 }
 
 func (s *Server) intelStatus(w http.ResponseWriter, r *http.Request) {

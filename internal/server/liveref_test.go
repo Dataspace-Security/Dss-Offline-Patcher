@@ -27,3 +27,17 @@ func TestLiveRefDropsStaleUnsupported(t *testing.T) {
 		t.Fatal("other states must be kept")
 	}
 }
+
+// Signer refusals from before the Sectigo roots were trusted are stale;
+// newer ones stand.
+func TestLiveRefDropsOldUntrustedSigner(t *testing.T) {
+	reason := `the installer's Authenticode signature is not valid: signer certificate "Proton AG" not trusted for code signing at 2026-08-31T10:46:41Z: x509: certificate signed by unknown authority`
+	old := &store.AcqRequestRef{Status: "unsupported", Reason: reason, At: "2026-10-22T06:58:14Z"}
+	if liveRef(old, intel.ImportableUnknown) != nil {
+		t.Fatal("refusal from before the roots fix kept")
+	}
+	recent := &store.AcqRequestRef{Status: "unsupported", Reason: reason, At: "2026-10-23T06:58:14Z"}
+	if liveRef(recent, intel.ImportableUnknown) != recent {
+		t.Fatal("a current signer refusal was dropped")
+	}
+}

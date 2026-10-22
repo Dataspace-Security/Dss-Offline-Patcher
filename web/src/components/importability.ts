@@ -30,8 +30,18 @@ export function cantImportReason(info: ImportInfo | null | undefined, requested?
  */
 export function liveRequested<T extends AcquisitionRequestRef>(requested: T | null | undefined, info?: ImportInfo | null): T | undefined {
   if (!requested) return undefined;
-  if (requested.status === "unsupported" && (info?.importable === "yes" || /no MSI installer for/.test(requested.reason ?? ""))) return undefined;
+  if (requested.status === "unsupported" && (info?.importable === "yes" || /no MSI installer for/.test(requested.reason ?? "") || untrustedBeforeRootsFix(requested))) return undefined;
   return requested;
+}
+
+/** Requests sent before acquisition zones trusted the Sectigo code-signing
+ *  roots refused installers signed under them (Proton and others). */
+const ROOTS_FIXED_AT = Date.parse("2026-10-22T15:30:00Z");
+
+function untrustedBeforeRootsFix(r: AcquisitionRequestRef): boolean {
+  if (!/not trusted for code signing|unknown authority/.test(r.reason ?? "")) return false;
+  const at = Date.parse(r.at ?? "");
+  return !Number.isNaN(at) && at < ROOTS_FIXED_AT;
 }
 
 /** Map key for an app (winget ids are case-insensitive). */

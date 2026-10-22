@@ -9,7 +9,7 @@ import (
 
 // A deliberately small YAML reader for winget manifests (block mappings,
 // block sequences, plain/quoted scalars, block scalars, simple flow
-// sequences). It returns map[string]any, []any and string values; anything
+// sequences, anchors and aliases). It returns map[string]any, []any and string values; anything
 // it does not understand is an error rather than a guess. Keeping it here
 // avoids a YAML dependency in the acquisition tool for one well-defined,
 // schema-validated input.
@@ -21,6 +21,10 @@ type yLine struct {
 }
 
 const maxYAMLDepth = 32
+
+// maxAliasNodes caps the values copied when expanding aliases, so a small
+// manifest cannot expand into a huge one ("billion laughs").
+const maxAliasNodes = 10000
 
 func parseYAMLMini(src []byte) (any, error) {
 	var lines []yLine
@@ -34,7 +38,7 @@ func parseYAMLMini(src []byte) (any, error) {
 		}
 		lines = append(lines, yLine{n: i + 1, indent: len(raw) - len(body), text: strings.TrimRight(body, " \t")})
 	}
-	p := &yParser{lines: lines}
+	p := &yParser{lines: lines, anchors: map[string]any{}}
 	p.skip()
 	if p.i >= len(p.lines) {
 		return map[string]any{}, nil
@@ -51,8 +55,10 @@ func parseYAMLMini(src []byte) (any, error) {
 }
 
 type yParser struct {
-	lines []yLine
-	i     int
+	lines   []yLine
+	i       int
+	anchors map[string]any
+	copied  int // values copied by alias expansion so far
 }
 
 // skip moves past blank lines, comments, directives and the document start.
@@ -130,8 +136,21 @@ func (p *yParser) value(rest string, indent, depth, n int) (any, error) {
 			return map[string]any{}, nil
 		}
 		return nil, fmt.Errorf("line %d: flow mappings are not supported", n)
-	case rest[0] == '&' || rest[0] == '*' || rest[0] == '!':
-		return nil, fmt.Errorf("line %d: anchors, aliases and tags are not supported", n)
+	case rest[0] == '&':
+		name, after := splitAnchor(rest)
+		if name == "" {
+			return nil, fmt.Errorf("line %d: empty anchor name", n)
+		}
+		v, err := p.value(after, indent, depth, n)
+		if err != nil {
+			return nil, err
+		}
+		p.anchors[name] = v
+		return v, nil
+	case rest[0] == '*':
+		return p.alias(rest, n)
+	case rest[0] == '!':
+		return nil, fmt.Errorf("line %d: tags are not supported", n)
 	}
 	return scalar(rest, n)
 }
@@ -151,34 +170,90 @@ func (p *yParser) seq(indent, depth int) ([]any, error) {
 			return out, nil // the parent mapping continues ("key:\n- a\nnext: b")
 		}
 		item := strings.TrimLeft(strings.TrimPrefix(ln.text, "-"), " ")
+		anchor := ""
+		if strings.HasPrefix(item, "&") {
+			// "- &name ..." anchors the item; the rest is parsed as usual.
+			if anchor, item = splitAnchor(item); anchor == "" {
+				return nil, fmt.Errorf("line %d: empty anchor name", ln.n)
+			}
+		}
 		col := ln.indent + len(ln.text) - len(item)
 		item = stripComment(item)
-		if item == "" {
-			p.i++
-			v, err := p.value("", indent, depth, ln.n)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, v)
-			continue
-		}
-		if _, _, isMap := splitKey(item); isMap || isSeqItem(item) {
-			// "- key: v" opens a mapping whose further keys align with "key".
-			p.lines[p.i] = yLine{n: ln.n, indent: col, text: item}
-			v, err := p.block(col, depth+1)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, v)
-			continue
-		}
-		p.i++
-		v, err := p.value(item, indent, depth, ln.n)
+		v, err := p.seqItem(ln, item, col, indent, depth)
 		if err != nil {
 			return nil, err
 		}
+		if anchor != "" {
+			p.anchors[anchor] = v
+		}
 		out = append(out, v)
 	}
+}
+
+func (p *yParser) seqItem(ln yLine, item string, col, indent, depth int) (any, error) {
+	if item == "" {
+		p.i++
+		return p.value("", indent, depth, ln.n)
+	}
+	if _, _, isMap := splitKey(item); isMap || isSeqItem(item) {
+		// "- key: v" opens a mapping whose further keys align with "key".
+		p.lines[p.i] = yLine{n: ln.n, indent: col, text: item}
+		return p.block(col, depth+1)
+	}
+	p.i++
+	return p.value(item, indent, depth, ln.n)
+}
+
+// splitAnchor splits "&name rest" into the anchor name and the rest.
+func splitAnchor(t string) (name, rest string) {
+	t = t[1:]
+	if i := strings.IndexByte(t, ' '); i >= 0 {
+		return t[:i], strings.TrimLeft(t[i+1:], " ")
+	}
+	return t, ""
+}
+
+// alias resolves "*name" to a copy of the anchored value, so later changes
+// to one use never show up in another.
+func (p *yParser) alias(t string, n int) (any, error) {
+	name := t[1:]
+	if name == "" || strings.ContainsAny(name, " ,[]{}") {
+		return nil, fmt.Errorf("line %d: bad alias %q", n, t)
+	}
+	v, ok := p.anchors[name]
+	if !ok {
+		return nil, fmt.Errorf("line %d: unknown alias %q", n, t)
+	}
+	return p.copyValue(v, n)
+}
+
+func (p *yParser) copyValue(v any, n int) (any, error) {
+	if p.copied++; p.copied > maxAliasNodes {
+		return nil, fmt.Errorf("line %d: aliases expand to too much data", n)
+	}
+	switch x := v.(type) {
+	case map[string]any:
+		m := make(map[string]any, len(x))
+		for k, e := range x {
+			c, err := p.copyValue(e, n)
+			if err != nil {
+				return nil, err
+			}
+			m[k] = c
+		}
+		return m, nil
+	case []any:
+		s := make([]any, len(x))
+		for i, e := range x {
+			c, err := p.copyValue(e, n)
+			if err != nil {
+				return nil, err
+			}
+			s[i] = c
+		}
+		return s, nil
+	}
+	return v, nil
 }
 
 func (p *yParser) blockScalar(header string, indent int) string {

@@ -3,6 +3,7 @@ package acquire
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -105,10 +106,50 @@ func TestYAMLMini(t *testing.T) {
 		m["T"] != "line1\nline2" || m["U"] != "https://h/x#frag" {
 		t.Fatalf("parsed: %#v", m)
 	}
-	for _, bad := range []string{"A: 1\nA: 2\n", "A: &x 1\n", "A: {b: 1}\n", "A:\n\tB: 1\n", "A: 1\n    B: 2\n", "just text\n"} {
+	for _, bad := range []string{"A: 1\nA: 2\n", "A: !x 1\n", "A: *nope\n", "A: & 1\n", "A: {b: 1}\n", "A:\n\tB: 1\n", "A: 1\n    B: 2\n", "just text\n"} {
 		if _, err := parseYAMLMini([]byte(bad)); err == nil {
 			t.Errorf("accepted %q", bad)
 		}
+	}
+}
+
+func TestYAMLMiniAnchors(t *testing.T) {
+	v, err := parseYAMLMini([]byte("A: &a x\nB: *a\nL:\n- &m\n  k: v\n- *m\n- &s s1\n- *s\nM: &n\n  q: 1\nN: *n\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := v.(map[string]any)
+	l := m["L"].([]any)
+	if m["B"] != "x" || l[1].(map[string]any)["k"] != "v" || l[3] != "s1" || m["N"].(map[string]any)["q"] != "1" {
+		t.Fatalf("parsed: %#v", m)
+	}
+	// An alias is a copy: changing one use leaves the anchor alone.
+	l[1].(map[string]any)["k"] = "changed"
+	if l[0].(map[string]any)["k"] != "v" {
+		t.Fatal("alias shares the anchored map")
+	}
+	// Aliases that multiply at every level are refused, not expanded.
+	bomb := "a: &a [x, x, x, x, x, x, x, x]\n"
+	for i := 'b'; i <= 'j'; i++ {
+		bomb += fmt.Sprintf("%c: &%c\n", i, i)
+		for j := 0; j < 8; j++ {
+			bomb += fmt.Sprintf("- *%c\n", i-1)
+		}
+	}
+	if _, err := parseYAMLMini([]byte(bomb)); err == nil {
+		t.Fatal("alias bomb accepted")
+	}
+}
+
+// Python's real manifest anchors each AppsAndFeaturesEntries item ("- &o0")
+// and repeats it in the machine-scope installer ("- *o0").
+func TestParseWingetManifestWithAliases(t *testing.T) {
+	m, err := ParseWingetManifest(wingetFixture(t, "p/Python/Python/3.10/3.10.11/Python.Python.3.10.installer.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.ID != "Python.Python.3.10" || m.Version != "3.10.11" || len(m.Installers) != 4 {
+		t.Fatalf("manifest: %+v", m)
 	}
 }
 
