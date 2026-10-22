@@ -805,12 +805,19 @@ Requires=avahi-daemon.service
 After=avahi-daemon.service
 # avahi-daemon restarted: publish again
 PartOf=avahi-daemon.service
+# A name that cannot be published gives up after a few tries (no endless restarts).
+StartLimitIntervalSec=10min
+StartLimitBurst=5
 
 [Service]
 ExecStart=$1 -a -R $2 $3
-Restart=always
-RestartSec=10
-DynamicUser=yes
+Restart=on-failure
+RestartSec=15
+# A fixed unprivileged account: avahi refuses D-Bus clients that run as a
+# systemd dynamic user ("Failed to create client object: An unexpected
+# D-Bus error occurred").
+User=nobody
+Group=nogroup
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -875,6 +882,14 @@ setup_mdns() {
     MDNS_NOTE="published, but not confirmed"
     warn "$SERVER_NAME did not resolve to $IP yet (got: ${got:-nothing}). Check: systemctl status offpatch-mdns; avahi-resolve -n $SERVER_NAME"
     journalctl -u offpatch-mdns.service -n 3 -o cat 2>/dev/null | sed 's/^/      /' || true
+    if [ -f "$MDNS_UNIT" ] && ! systemctl is-active --quiet offpatch-mdns.service; then
+      # Failing to publish: stop it rather than restart it forever. The console still works
+      # by IP (https://$IP:${PORT:-8443}); fix the cause above and re-run the installer.
+      systemctl disable --now offpatch-mdns.service >/dev/null 2>&1 || true
+      systemctl reset-failed offpatch-mdns.service 2>/dev/null || true
+      MDNS_NOTE="publishing failed (see above); use the IP"
+      warn "offpatch-mdns.service stopped (it could not publish $SERVER_NAME); use https://$IP or a DNS record"
+    fi
   fi
   return 0
 }
@@ -2400,10 +2415,17 @@ EOF
     systemctl restart offpatch-acquire.timer
     ok "acquisition every hour as $ACQ_USER (systemd timer offpatch-acquire.timer; an overlapping run is skipped)"
     if [ "$ROLE" = all ]; then
-      systemctl enable offpatch-acquire-requests.path >/dev/null 2>&1
+      systemctl enable offpatch-acquire-requests.path >/dev/null 2>&1 || true
       systemctl reset-failed offpatch-acquire-requests.path offpatch-acquire-requests.service 2>/dev/null || true
-      systemctl restart offpatch-acquire-requests.path
-      ok "queued acquisition requests are fetched right away (offpatch-acquire-requests.path watches $ACQ_REQ_DIR)"
+      # Optional speed-up: if the watcher cannot start, the hourly run still fetches every request,
+      # so say why and carry on instead of stopping the install.
+      if systemctl restart offpatch-acquire-requests.path 2>/dev/null; then
+        ok "queued acquisition requests are fetched right away (offpatch-acquire-requests.path watches $ACQ_REQ_DIR)"
+      else
+        warn "the request watcher (offpatch-acquire-requests.path) did not start; requests are fetched by the hourly run. Reason:"
+        { systemctl status offpatch-acquire-requests.path --no-pager -n 0 2>&1 | sed -n '1,4p'
+          journalctl -u offpatch-acquire-requests.path -u offpatch-acquire-requests.service -n 4 -o cat --no-pager 2>/dev/null; } | sed 's/^/      /' || true
+      fi
     fi
     # First update-intelligence run now, so the console's Updates page fills
     # immediately (needs internet; harmless if it fails — the timer retries).
