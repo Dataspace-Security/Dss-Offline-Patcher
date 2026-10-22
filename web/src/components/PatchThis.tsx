@@ -118,6 +118,11 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
   const pkg = pkgL.data;
   const policy = policyL.data;
   const fleet = fleetL.data?.[packageId];
+  // While one runs (usually for everyone who needs it), the next one is for
+  // other machines. (Hooks stay above the early return below.)
+  useEffect(() => {
+    if (fleet?.active_deployment_id) setPreset((p) => (p === "one_ring" ? "chosen" : p));
+  }, [fleet?.active_deployment_id]);
 
   const approve = async () => {
     if (!pkg || busy || !reason.trim()) return;
@@ -176,10 +181,6 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
   const pilotN = groupSize("pilot", eps);
   const pilotEmpty = !!epsL.data && pilotN === 0;
   const runningId = fleet?.active_deployment_id || runningFromServer;
-  // While one runs (usually for everyone who needs it), the next one is for other machines.
-  useEffect(() => {
-    if (fleet?.active_deployment_id) setPreset((p) => (p === "one_ring" ? "chosen" : p));
-  }, [fleet?.active_deployment_id]);
   // Many machines need it: start on a few first, the rest follow by themselves.
   const firstWave = preset === "one_ring" && fleet && epsL.data ? pickFirstWave(fleet.endpoint_ids ?? [], epsL.data) : [];
   // No window lets machines restart: don't promise restarts that never happen.
