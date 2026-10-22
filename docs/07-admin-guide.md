@@ -451,6 +451,15 @@ people besides the creator must approve (default 1, 1–5). When the count is lo
 already waiting follow it at the next server start (one that already has enough approvals starts). An `info` alert
 `deployment_awaiting_approval` is open while it waits.
 
+**Running apps during an application update (agents 0.10.1+).** Before an `.msi` or machine-wide EXE
+update (and its rollback) the agent finds the app's real install folder from Apps & features
+(`InstallLocation`, else the folder of its icon or uninstaller; never a fixed path; Windows, Program
+Files itself and the agent's own folders are refused). It stops the Windows services whose program is
+in that folder and starts them again after the installer, whatever its result. Open apps from that
+folder are closed first unless the deployment has **Close the app if it is open** turned off
+(`keep_apps_open`): then a machine with the app open waits and tries again at its next check-in. The
+target detail says which services were stopped and restarted and which apps were closed.
+
 **Network limits (all deployments together).** So that a rollout to every machine cannot flood the
 network, the server hands out new downloads only while fewer than these many machines are downloading
 (across all install deployments; rollbacks download nothing and are not limited):

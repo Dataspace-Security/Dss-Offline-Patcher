@@ -115,6 +115,8 @@ export type NewDeployment = {
   operation?: DeploymentOperation;
   // P1: when true the next stage starts by itself once the current one finished without too many failures
   auto_advance?: boolean;
+  /** App updates: true = an open app makes the machine wait; false (default) = the agent closes it. Services are always stopped and restarted. */
+  keep_apps_open?: boolean;
 };
 export type Deployment = NewDeployment & {
   deployment_id: string; state: DeploymentState; current_ring: number; state_reason: string;

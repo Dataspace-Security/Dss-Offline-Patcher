@@ -276,6 +276,7 @@ export function customHref(d: NewDeployment): string {
   if (d.emergency) p.set("emergency", "1");
   if (d.justification) p.set("justification", d.justification);
   if (d.ignore_windows) p.set("ignore_windows", "1");
+  if (d.keep_apps_open) p.set("keep_apps_open", "1");
   if (d.auto_advance) p.set("auto_advance", "1");
   p.set("reboot_policy", d.reboot_policy);
   p.set("max_failure_pct", String(d.max_failure_pct));

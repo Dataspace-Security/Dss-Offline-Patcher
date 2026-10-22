@@ -107,6 +107,7 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
   const [runningFromServer, setRunningFromServer] = useState("");
   const [justification, setJustification] = useState("");
   const [atOnce, setAtOnce] = useState("0");
+  const [closeApps, setCloseApps] = useState(true);
   const [chosen, setChosen] = useState<ChosenTarget>({ by: "endpoints", value: "", ids: [] });
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
@@ -184,7 +185,7 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
   // No window lets machines restart: don't promise restarts that never happen.
   const rebootInWindow = winL.data ? windowsAllowReboot(winL.data) : true;
   const atOnceN = Math.max(0, Math.floor(Number(atOnce) || 0));
-  const draft = { ...buildPreset(preset, pkg, { policy, endpointId: endpoint?.id, hostname: endpoint?.hostname, justification, firstWave, rebootInWindow, chosen, endpoints: eps }), max_concurrent: atOnceN };
+  const draft = { ...buildPreset(preset, pkg, { policy, endpointId: endpoint?.id, hostname: endpoint?.hostname, justification, firstWave, rebootInWindow, chosen, endpoints: eps }), max_concurrent: atOnceN, keep_apps_open: !closeApps };
   const counts = ringCounts(draft.rings, eps);
   const dl = policyDeadline(pkg, policy);
   const deployApprovals = deploymentApprovalsRequired(policy);
@@ -332,6 +333,13 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
                              policyMissing={!!policyL.error} dlFromPolicy={dl} endpoints={eps}
                              noRebootWindow={!!winL.data && !rebootInWindow && draft.reboot_policy === "never"}
                              policy={policy} atOnce={atOnce} setAtOnce={setAtOnce} />
+                {pkg.kind !== "msu" && (
+                  <label className="check small">
+                    <input type="checkbox" checked={closeApps} onChange={(e) => setCloseApps(e.target.checked)} />{" "}
+                    <b>Close the app if it is open</b> <span className="muted">(unsaved work in it is lost; its services are always stopped and started again.
+                    Off: a machine with the app open waits and tries again later)</span>
+                  </label>
+                )}
 
                 {preset === "emergency" && (
                   <label className="field">

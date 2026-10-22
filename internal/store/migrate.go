@@ -23,6 +23,8 @@ var columnMigrations = []struct{ table, column, ddl string }{
 	{"deployments", "health_checks", "TEXT NOT NULL DEFAULT '[]'"},
 	{"deployments", "operation", "TEXT NOT NULL DEFAULT 'install'"},
 	{"deployments", "auto_advance", "INTEGER NOT NULL DEFAULT 0"},
+	// Deployments from before closing apps existed keep them open (1).
+	{"deployments", "keep_apps_open", "INTEGER NOT NULL DEFAULT 1"},
 	{"targets", "leased_until", "TEXT NOT NULL DEFAULT ''"},
 	{"targets", "health", "TEXT NOT NULL DEFAULT ''"},
 	{"targets", "health_detail", "TEXT NOT NULL DEFAULT ''"},

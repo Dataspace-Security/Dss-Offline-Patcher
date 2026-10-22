@@ -77,3 +77,21 @@ func TestSiteDownloadLimit(t *testing.T) {
 		}
 	}
 }
+
+// Close apps: the default lets the agent close the app; keep_apps_open
+// tells it to wait for the user instead.
+func TestAssignmentCloseApps(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		s := openTest(t)
+		addPackage(t, s, Package{PackageID: "Acme-3.0", Kind: "msi", Version: "3.0.0", PackageName: "Acme App", ProductCode: "{A}"})
+		addEndpoint(t, s, "e1", []string{"all"}, acmeOld)
+		d, err := createApproved(s, context.Background(), "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: allRing, MaxFailurePct: 50, KeepAppsOpen: keep})
+		if err != nil || d.KeepAppsOpen != keep {
+			t.Fatalf("%v %+v", err, d)
+		}
+		as := checkin(t, s, "e1", acmeOld, false).Assignments
+		if len(as) != 1 || as[0].CloseApps == keep {
+			t.Fatalf("keep_apps_open=%v: %+v", keep, as)
+		}
+	}
+}

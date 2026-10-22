@@ -824,7 +824,7 @@ func (a *Agent) process(ctx context.Context, as store.Assignment, f Facts, inv [
 		if pkg.Kind == "agent" {
 			return a.selfUpgrade(ictx, as.DeploymentID, pkg, file)
 		}
-		return a.plat.Install(ictx, pkg, file)
+		return a.plat.Install(withCloseApps(ictx, as.CloseApps), pkg, file)
 	}()
 	a.invAt = time.Time{} // refresh inventory at the next check-in
 	a.recheckSoon = a.recheckSoon || refreshesInventory(res)
@@ -909,7 +909,7 @@ func (a *Agent) rollback(ctx context.Context, as store.Assignment, pkg manifest.
 	ictx := context.WithoutCancel(ctx) // see process: never kill an installer on stop
 	res := func() Result {
 		defer a.keepAlive(ctx, newLive(as, stageInstalling, 0, 0))()
-		return u.Uninstall(ictx, pkg)
+		return u.Uninstall(withCloseApps(ictx, as.CloseApps), pkg)
 	}()
 	a.invAt = time.Time{}
 	a.recheckSoon = a.recheckSoon || refreshesInventory(res)

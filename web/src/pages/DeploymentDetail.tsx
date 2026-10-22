@@ -274,6 +274,7 @@ export default function DeploymentDetailPage() {
             ["Machines at once", d.max_concurrent ? String(d.max_concurrent) : "no extra limit (network limits apply)"],
             ["Reboot policy", REBOOT_POLICIES.find((r) => r.value === d.reboot_policy)?.label ?? (d.reboot_policy || "never")],
             ["Maint. windows", d.ignore_windows ? <Pill state="pending" label="ignored" /> : "respected"],
+            ["Open apps", d.keep_apps_open ? "left open (the machine waits until the app is closed)" : "closed before the update; services stopped and started again"],
             ["Health checks", (d.health_checks ?? []).length
               ? (d.health_checks.map((c, i) => <span key={i} className="tag">{c.type === "tcp_listening" ? `tcp :${c.name}` : `service ${c.name}`}</span>))
               : "none"],

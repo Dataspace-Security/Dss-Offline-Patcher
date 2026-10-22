@@ -331,7 +331,21 @@ func (w *Windows) msiLog(p manifest.Package, op string) string {
 	return filepath.Join(w.LogDir, fmt.Sprintf("%s%s-%d.log", p.PackageID, op, time.Now().Unix()))
 }
 
+// Install installs p. Application updates first stop what runs from the
+// app's install folder (appquiesce_windows.go) and start its services again
+// afterwards.
 func (w *Windows) Install(ctx context.Context, p manifest.Package, file string) Result {
+	if !quiesceKind(p) {
+		return w.install(ctx, p, file)
+	}
+	done, wait := w.quiesceApp(ctx, p)
+	if wait != nil {
+		return *wait
+	}
+	return done(w.install(ctx, p, file))
+}
+
+func (w *Windows) install(ctx context.Context, p manifest.Package, file string) Result {
 	sys := filepath.Join(os.Getenv("SystemRoot"), "System32")
 	var code int
 	var res *Result
@@ -367,6 +381,17 @@ func (w *Windows) Install(ctx context.Context, p manifest.Package, file string) 
 // (msiexec /x {ProductCode}). Nothing is downloaded: the KB / product code
 // come from the signed manifest.
 func (w *Windows) Uninstall(ctx context.Context, p manifest.Package) Result {
+	if !quiesceKind(p) {
+		return w.uninstall(ctx, p)
+	}
+	done, wait := w.quiesceApp(ctx, p)
+	if wait != nil {
+		return *wait
+	}
+	return done(w.uninstall(ctx, p))
+}
+
+func (w *Windows) uninstall(ctx context.Context, p manifest.Package) Result {
 	sys := filepath.Join(os.Getenv("SystemRoot"), "System32")
 	var code int
 	var res *Result

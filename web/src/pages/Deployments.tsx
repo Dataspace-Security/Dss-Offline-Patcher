@@ -187,6 +187,7 @@ export function NewDeploymentPage() {
   const [maxConcurrent, setMaxConcurrent] = useState(qNum("max_concurrent", "0"));
   const [rebootPolicy, setRebootPolicy] = useState<RebootPolicy>(qReboot && REBOOT_VALUES.includes(qReboot) ? qReboot : "never");
   const [ignoreWindows, setIgnoreWindows] = useState(sp.get("ignore_windows") === "1");
+  const [closeApps, setCloseApps] = useState(sp.get("keep_apps_open") !== "1");
   const [autoAdvance, setAutoAdvance] = useState(sp.get("auto_advance") === "1");
   const [checks, setChecks] = useState<HealthCheck[]>([]);
   const [busy, setBusy] = useState(false);
@@ -284,6 +285,7 @@ export function NewDeploymentPage() {
       max_concurrent: mc,
       reboot_policy: rebootPolicy,
       ignore_windows: ignoreWindows,
+      keep_apps_open: !closeApps,
       auto_advance: rings.length > 1 && autoAdvance,
       health_checks: checks.map((c) => ({ type: c.type, name: c.name.trim() })),
       operation,
@@ -463,6 +465,10 @@ export function NewDeploymentPage() {
             <label className="check setup-ca">
               <input type="checkbox" checked={ignoreWindows} onChange={(e) => setIgnoreWindows(e.target.checked)} />
               <span><b>Ignore maintenance windows</b> — install as soon as assigned</span>
+            </label>
+            <label className="check setup-ca">
+              <input type="checkbox" checked={closeApps} onChange={(e) => setCloseApps(e.target.checked)} />
+              <span><b>Close the app if it is open</b> — app updates only; unsaved work in it is lost. The app's services are always stopped and started again. Off: the machine waits until the app is closed.</span>
             </label>
           </div>
         </fieldset>

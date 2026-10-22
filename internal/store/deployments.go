@@ -45,6 +45,11 @@ type NewDeployment struct {
 	// ("first machines, then everything else"). Off by default: rings wait
 	// for an explicit advance.
 	AutoAdvance bool `json:"auto_advance"`
+	// KeepAppsOpen: before an application update the agent always stops the
+	// app's services (and starts them again); it also closes the app's open
+	// windows unless this is set, in which case an open app makes the
+	// machine wait and retry. Off by default.
+	KeepAppsOpen bool `json:"keep_apps_open"`
 }
 
 // HealthCheck is a fixed, non-executable post-install check (no arbitrary
@@ -103,19 +108,19 @@ type Target struct {
 	Evidence string `json:"evidence,omitempty"`
 }
 
-const depCols = `deployment_id,package_id,name,state,emergency,justification,rings,current_ring,max_failure_pct,max_retries,window_start,window_end,created_by,created_at,updated_at,state_reason,deadline,max_concurrent,reboot_policy,ignore_windows,health_checks,operation,auto_advance,approvals_required,rejected_by,rejected_at,activated_at`
+const depCols = `deployment_id,package_id,name,state,emergency,justification,rings,current_ring,max_failure_pct,max_retries,window_start,window_end,created_by,created_at,updated_at,state_reason,deadline,max_concurrent,reboot_policy,ignore_windows,health_checks,operation,auto_advance,approvals_required,rejected_by,rejected_at,activated_at,keep_apps_open`
 
 func scanDeployment(sc interface{ Scan(...any) error }) (Deployment, error) {
 	var d Deployment
-	var em, iw, aa int
+	var em, iw, aa, ka int
 	var rings, hc string
 	err := sc.Scan(&d.DeploymentID, &d.PackageID, &d.Name, &d.State, &em, &d.Justification, &rings, &d.CurrentRing, &d.MaxFailurePct, &d.MaxRetries,
 		&d.WindowStart, &d.WindowEnd, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt, &d.StateReason, &d.Deadline, &d.MaxConcurrent, &d.RebootPolicy, &iw, &hc, &d.Operation, &aa,
-		&d.ApprovalsRequired, &d.RejectedBy, &d.RejectedAt, &d.ActivatedAt)
+		&d.ApprovalsRequired, &d.RejectedBy, &d.RejectedAt, &d.ActivatedAt, &ka)
 	if err != nil {
 		return d, err
 	}
-	d.Emergency, d.IgnoreWindows, d.AutoAdvance = em == 1, iw == 1, aa == 1
+	d.Emergency, d.IgnoreWindows, d.AutoAdvance, d.KeepAppsOpen = em == 1, iw == 1, aa == 1, ka == 1
 	json.Unmarshal([]byte(rings), &d.Rings)
 	json.Unmarshal([]byte(hc), &d.HealthChecks)
 	if d.HealthChecks == nil {
@@ -395,9 +400,9 @@ func (s *Store) CreateDeployment(ctx context.Context, actor string, n NewDeploym
 			em = 1
 		}
 		need := s.Policy.RequiredDeploymentApprovals()
-		if _, err := tx.Exec(`INSERT INTO deployments(`+depCols+`) VALUES(?,?,?,'pending_approval',?,?,?,0,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'','','')`,
+		if _, err := tx.Exec(`INSERT INTO deployments(`+depCols+`) VALUES(?,?,?,'pending_approval',?,?,?,0,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'','','',?)`,
 			id, n.PackageID, n.Name, em, n.Justification, mustJSON(n.Rings), n.MaxFailurePct, n.MaxRetries, n.WindowStart, n.WindowEnd, actor, now, now,
-			awaitingReason(0, need), n.Deadline, n.MaxConcurrent, n.RebootPolicy, boolInt(n.IgnoreWindows), mustJSON(n.HealthChecks), n.Operation, boolInt(n.AutoAdvance), need); err != nil {
+			awaitingReason(0, need), n.Deadline, n.MaxConcurrent, n.RebootPolicy, boolInt(n.IgnoreWindows), mustJSON(n.HealthChecks), n.Operation, boolInt(n.AutoAdvance), need, boolInt(n.KeepAppsOpen)); err != nil {
 			return err
 		}
 		action := "deployment.created"
@@ -411,7 +416,7 @@ func (s *Store) CreateDeployment(ctx context.Context, actor string, n NewDeploym
 			Details: map[string]any{"name": n.Name, "rings": n.Rings, "max_failure_pct": n.MaxFailurePct, "max_retries": n.MaxRetries,
 				"window": n.WindowStart + "-" + n.WindowEnd, "emergency": n.Emergency, "justification": n.Justification,
 				"deadline": n.Deadline, "max_concurrent": n.MaxConcurrent, "reboot_policy": n.RebootPolicy, "ignore_windows": n.IgnoreWindows, "health_checks": n.HealthChecks, "operation": n.Operation,
-				"auto_advance": n.AutoAdvance, "approvals_required": need}}); err != nil {
+				"auto_advance": n.AutoAdvance, "approvals_required": need, "keep_apps_open": n.KeepAppsOpen}}); err != nil {
 			return err
 		}
 		// No targets yet: nothing is dispatched until the approvals are in
@@ -1074,6 +1079,10 @@ type Assignment struct {
 	HealthChecks  []HealthCheck `json:"health_checks"`
 	// Operation is "rollback" for uninstalls (omitted for installs).
 	Operation string `json:"operation,omitempty"`
+	// CloseApps: the agent may close the app's open windows before an
+	// application update (its services are always stopped and restarted).
+	// False: an open app makes the target wait and retry.
+	CloseApps bool `json:"close_apps,omitempty"`
 }
 
 // Checkin records heartbeat + inventory, reconciles targets (exceptions,
@@ -1259,12 +1268,13 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 			winStart, winEnd       string
 			deadline, rebootPolicy string
 			ignoreWindows, maxConc int
+			keepApps               int
 			healthJSON, prereqJSON string
 			detail, operation      string
 		}
 		var cands []cand
 		actionable := 0
-		rows, err := tx.QueryContext(ctx, `SELECT t.deployment_id, t.state, t.attempts, d.max_retries, d.window_start, d.window_end, d.deadline, d.reboot_policy, d.ignore_windows, d.max_concurrent, d.health_checks,
+		rows, err := tx.QueryContext(ctx, `SELECT t.deployment_id, t.state, t.attempts, d.max_retries, d.window_start, d.window_end, d.deadline, d.reboot_policy, d.ignore_windows, d.max_concurrent, d.health_checks, d.keep_apps_open,
 			p.package_id, p.kind, p.kb, p.product_code, p.file_name, p.size, p.sha256, p.prerequisites, t.detail, d.operation
 			FROM targets t JOIN deployments d ON d.deployment_id=t.deployment_id JOIN packages p ON p.package_id=t.package_id
 			WHERE t.endpoint_id=? AND d.state='active' AND t.ring <= d.current_ring
@@ -1276,7 +1286,7 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 		}
 		for rows.Next() {
 			var c cand
-			if err := rows.Scan(&c.a.DeploymentID, &c.state, &c.attempts, &c.maxRetries, &c.winStart, &c.winEnd, &c.deadline, &c.rebootPolicy, &c.ignoreWindows, &c.maxConc, &c.healthJSON,
+			if err := rows.Scan(&c.a.DeploymentID, &c.state, &c.attempts, &c.maxRetries, &c.winStart, &c.winEnd, &c.deadline, &c.rebootPolicy, &c.ignoreWindows, &c.maxConc, &c.healthJSON, &c.keepApps,
 				&c.a.PackageID, &c.a.Kind, &c.a.KB, &c.a.ProductCode, &c.a.FileName, &c.a.Size, &c.a.SHA256, &c.prereqJSON, &c.detail, &c.operation); err != nil {
 				rows.Close()
 				return err
@@ -1347,6 +1357,7 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 				}
 			}
 			c.a.RebootAllowed = rebootAllowed(c.rebootPolicy, ws, pastDeadline)
+			c.a.CloseApps = c.keepApps == 0
 			json.Unmarshal([]byte(c.healthJSON), &c.a.HealthChecks)
 			if c.a.HealthChecks == nil {
 				c.a.HealthChecks = []HealthCheck{}
