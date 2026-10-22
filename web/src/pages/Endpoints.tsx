@@ -51,6 +51,11 @@ export default function Endpoints() {
   const groupOptions = [...new Set(live.flatMap((e) => e.groups ?? []))].sort();
   const siteOptions = [...new Set(live.map((e) => e.site).filter(Boolean))].sort();
   const hasNoSite = live.some((e) => !e.site);
+  // Names already in use (retired machines too): offered when enrolling, so a new PC joins an existing group.
+  const knownGroups = [...new Set((data ?? []).flatMap((e) => e.groups ?? []))].filter((g) => g !== "all").sort();
+  const groupCounts: Record<string, number> = {};
+  for (const e of live) for (const g of e.groups ?? []) groupCounts[g] = (groupCounts[g] ?? 0) + 1;
+  const knownSites = [...new Set((data ?? []).map((e) => e.site).filter(Boolean))].sort();
 
   const counts = useMemo(() => {
     const c: Record<string, number> = {};
@@ -185,7 +190,7 @@ export default function Endpoints() {
           </tbody>
         </table>
       )}
-      {showToken && canEdit && <EnrollmentModal onClose={() => { setShowToken(false); if (sp.get("enroll")) setSp({}); }} />}
+      {showToken && canEdit && <EnrollmentModal knownGroups={knownGroups} groupCounts={groupCounts} knownSites={knownSites} onClose={() => { setShowToken(false); if (sp.get("enroll")) setSp({}); }} />}
       {bulkOpen && (
         <BulkGroupsModal
           endpoints={visibleSelected}
@@ -298,7 +303,9 @@ function BulkGroupsModal({ endpoints, onClose, onDone }: { endpoints: Endpoint[]
   );
 }
 
-function EnrollmentModal({ onClose }: { onClose: () => void }) {
+function EnrollmentModal({ onClose, knownGroups, groupCounts, knownSites }: {
+  onClose: () => void; knownGroups: string[]; groupCounts: Record<string, number>; knownSites: string[];
+}) {
   const [groups, setGroups] = useState("");
   const [site, setSite] = useState("");
   const [hours, setHours] = useState("24");
@@ -343,10 +350,40 @@ function EnrollmentModal({ onClose }: { onClose: () => void }) {
           <label className="field">
             <span>Groups <em className="muted">comma-separated</em></span>
             <input value={groups} onChange={(e) => setGroups(e.target.value)} placeholder="pilot, workstations" autoFocus />
+            <small className="hint">
+              The machine joins these groups when it enrolls. Use an existing name to add it to that group; a new name starts a new group.
+            </small>
+            {knownGroups.length > 0 && (
+              <select className="known-select" value="" aria-label="Add an existing group"
+                      onChange={(e) => e.target.value && setGroups([...splitList(groups), e.target.value].join(", "))}>
+                <option value="">Add an existing group…</option>
+                {knownGroups.filter((g) => !splitList(groups).includes(g)).map((g) => (
+                  <option key={g} value={g}>{g} ({groupCounts[g] ?? 0} machine{(groupCounts[g] ?? 0) === 1 ? "" : "s"})</option>
+                ))}
+              </select>
+            )}
+            {splitList(groups).length > 0 && (
+              <div className="known-names small">
+                {splitList(groups).map((g) => (
+                  <span key={g} className="chip chip-on">
+                    {g}{!knownGroups.includes(g) && <em className="muted"> new</em>}
+                    <button type="button" className="btn-link" aria-label={`Remove ${g}`}
+                            onClick={() => setGroups(splitList(groups).filter((x) => x !== g).join(", "))}>×</button>
+                  </span>
+                ))}
+              </div>
+            )}
+            {nearMisses(splitList(groups), knownGroups).map(([typed, known]) => (
+              <small key={typed} className="hint text-amber">“{typed}” is a new group. Did you mean the existing “{known}”?</small>
+            ))}
           </label>
           <label className="field">
             <span>Site</span>
-            <input value={site} onChange={(e) => setSite(e.target.value)} />
+            <input value={site} onChange={(e) => setSite(e.target.value)} list="known-sites" placeholder={knownSites[0] ?? "head-office"} />
+            <datalist id="known-sites">{knownSites.map((s) => <option key={s} value={s} />)}</datalist>
+            {nearMisses(site.trim() ? [site.trim()] : [], knownSites).map(([typed, known]) => (
+              <small key={typed} className="hint text-amber">“{typed}” is a new site. Did you mean the existing “{known}”?</small>
+            ))}
           </label>
           <label className="field">
             <span>Expires in (hours)</span>
@@ -417,4 +454,16 @@ function OutdatedCell({ e }: { e: Endpoint }) {
       {unsupported}
     </span>
   );
+}
+
+/** Typed names that differ from an existing one only by case, spaces, dashes or a trailing "s". */
+function nearMisses(typed: string[], known: string[]): [string, string][] {
+  const norm = (s: string) => s.toLowerCase().replace(/[\s_-]+/g, "").replace(/s$/, "");
+  const out: [string, string][] = [];
+  for (const t of typed) {
+    if (known.includes(t)) continue;
+    const k = known.find((x) => norm(x) === norm(t));
+    if (k) out.push([t, k]);
+  }
+  return out;
 }

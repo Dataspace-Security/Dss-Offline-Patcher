@@ -543,6 +543,8 @@ a.tile:hover, button.tile:hover { text-decoration: none; color: var(--text); box
 .chip:hover { border-color: var(--border-strong); background: var(--surface-2); }
 .chip-on { border-color: var(--accent); background: var(--accent-soft); }
 .chip-on:hover { background: var(--accent-soft); border-color: var(--accent); }
+.known-select { margin-top: 6px; max-width: 100%; }
+.known-names { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
 .chip-select {
   padding: 3px 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text);
   border-radius: 999px; font: inherit; font-size: 12px; cursor: pointer;

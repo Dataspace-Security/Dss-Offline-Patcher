@@ -250,6 +250,13 @@ Remove-Item -Recurse -Force C:\\ProgramData\\offpatch`,
           Use one of those addresses, or reissue the certificate with <Mono>pmserver reissue-server-cert -hosts …</Mono>.
         </div>
       )}
+      {platform === "windows" && data && !canOneLiner && (!hasCA || isHttp) && (
+        <div className="banner banner-info">
+          <b>One-command install is not available on this server</b>: it needs HTTPS, because the command pins this server's
+          certificate so a PC can never be handed a fake agent. {isHttp ? "This server runs plain HTTP (a lab setup)" : "This server has no certificate authority configured"},
+          so follow the steps below. A server set up with <Mono>install-ubuntu.sh</Mono> uses HTTPS and shows the one command here.
+        </div>
+      )}
       {platform === "windows" && hasCA && !data?.windows_bootstrap && data && (
         <div className="banner banner-info">
           One-command install is unavailable: stage <Mono>pmagent.exe</Mono> in <Mono>{data.agent_dist_dir}</Mono>, and serve a
