@@ -52,6 +52,8 @@ export default function DeploymentDetailPage() {
   const [action, setAction] = useState<Action | null>(null);
   const [ringFilter, setRingFilter] = useState<string>("");
   const [stateFilter, setStateFilter] = useState<string>("");
+  // Machines the package does not apply to are hidden unless asked for.
+  const [showNA, setShowNA] = useState(false);
   const [excFor, setExcFor] = useState<Target | null>(null);
 
   const lastSeen = useMemo(() => {
@@ -65,8 +67,9 @@ export default function DeploymentDetailPage() {
     return t
       .filter((x) => ringFilter === "" || String(x.ring) === ringFilter)
       .filter((x) => stateFilter === "" || (stateFilter === "_failing" ? isFailing(x) : x.state === stateFilter))
+      .filter((x) => showNA || stateFilter === "not_applicable" || x.state !== "not_applicable")
       .sort((a, b) => a.ring - b.ring || targetRank(a) - targetRank(b) || a.hostname.localeCompare(b.hostname));
-  }, [d, ringFilter, stateFilter]);
+  }, [d, ringFilter, stateFilter, showNA]);
 
   const run = async (a: Action, reason: string) => {
     await api.post<Deployment>(`/api/deployments/${enc(id)}/${a}`, { reason });
@@ -85,6 +88,7 @@ export default function DeploymentDetailPage() {
   const total = d.rings?.length ?? 0;
   const canAdvance = d.state === "active" && d.current_ring < total - 1;
   const ringName = (i: number) => stageLabel(d.rings?.[i]?.name, i);
+  const naCount = (d.targets ?? []).filter((t) => t.state === "not_applicable").length;
   const states = Array.from(new Set((d.targets ?? []).map((t) => t.state))).sort();
   const rollback = d.operation === "rollback";
   const lost = (d.targets ?? []).filter((t) => t.state === "lost_after_install");
@@ -267,7 +271,7 @@ export default function DeploymentDetailPage() {
             ["Max retries", String(d.max_retries)],
             ["Window (UTC)", d.window_start || d.window_end ? `${d.window_start || "?"} – ${d.window_end || "?"}` : "always"],
             ["Deadline", d.deadline ? <Time value={d.deadline} /> : "none"],
-            ["Max concurrent", d.max_concurrent ? String(d.max_concurrent) : "unlimited"],
+            ["Machines at once", d.max_concurrent ? String(d.max_concurrent) : "no extra limit (network limits apply)"],
             ["Reboot policy", REBOOT_POLICIES.find((r) => r.value === d.reboot_policy)?.label ?? (d.reboot_policy || "never")],
             ["Maint. windows", d.ignore_windows ? <Pill state="pending" label="ignored" /> : "respected"],
             ["Health checks", (d.health_checks ?? []).length
@@ -282,7 +286,7 @@ export default function DeploymentDetailPage() {
 
       <section className="section">
         <div className="section-head">
-          <h2>Targets <span className="muted">· {(d.targets ?? []).length}</span></h2>
+          <h2>Targets <span className="muted">· {(d.targets ?? []).length - naCount}{naCount > 0 && ` (+${naCount} not applicable)`}</span></h2>
           <div className="filters">
             <select value={ringFilter} onChange={(e) => setRingFilter(e.target.value)}>
               <option value="">All stages</option>
@@ -293,9 +297,16 @@ export default function DeploymentDetailPage() {
               {failing.length > 0 && <option value="_failing">Failing ({failing.length})</option>}
               {states.map((s) => <option key={s} value={s}>{targetLabel(s, d.operation)}</option>)}
             </select>
+            {naCount > 0 && stateFilter !== "not_applicable" && (
+              <label className="check small">
+                <input type="checkbox" checked={showNA} onChange={(e) => setShowNA(e.target.checked)} /> show {naCount} not applicable
+              </label>
+            )}
           </div>
         </div>
-        {targets.length === 0 ? <Empty>No targets{ringFilter || stateFilter ? " match the filter" : " yet — endpoints in the current stage get a target when they next check in"}.</Empty> : (
+        {targets.length === 0 ? <Empty>{naCount > 0 && !showNA && !stateFilter && !ringFilter
+          ? <>No machine in this deployment needs the package: all {naCount} are not applicable (for example, the app is not installed on them). <button type="button" className="btn-link" onClick={() => setShowNA(true)}>Show them</button></>
+          : <>No targets{ringFilter || stateFilter ? " match the filter" : " yet — endpoints in the current stage get a target when they next check in"}.</>}</Empty> : (
           <table className="table targets-live">
             <thead>
               <tr><th>Hostname</th><th>Stage</th><th style={{ width: "26%" }}>Progress</th><th>Last contact</th><th className="num">Attempts</th><th className="num">Exit code</th><th>Health</th><th>Detail</th><th>Updated</th><th /></tr>
@@ -310,7 +321,9 @@ export default function DeploymentDetailPage() {
                     <td className="nowrap">{ringName(t.ring)}</td>
                     <td><LiveTargetProgress t={t} currentRing={d.current_ring} deploymentLive={d.state === "active"} /></td>
                     <td className="nowrap">{contact ? <span title={contact}><ClockRel value={contact} /></span> : <span className="muted">—</span>}</td>
-                    <td className="num">{t.attempts}{d.max_retries >= 0 && <span className="muted"> / {d.max_retries + 1}</span>}</td>
+                    <td className="num">{t.state === "not_applicable" || t.state === "exception"
+                      ? <span className="muted">—</span>
+                      : <>{t.attempts}{d.max_retries >= 0 && <span className="muted"> / {d.max_retries + 1}</span>}</>}</td>
                     <td className="num">{t.exit_code || t.state === "failed" ? <Mono>{t.exit_code}</Mono> : <span className="muted">—</span>}</td>
                     <td>{t.health ? <span title={t.health_detail || undefined}><Pill state={t.health === "ok" ? "verified" : "failed"} label={t.health} /></span> : <span className="muted">—</span>}
                       {t.health === "failed" && t.health_detail && <div className="cell-sub">{t.health_detail}</div>}</td>

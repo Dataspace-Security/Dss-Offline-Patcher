@@ -347,6 +347,18 @@ export function scoreTone(pct: number): "green" | "amber" | "red" {
 export function PatchScore({ counts, rollback, running }: { counts: Partial<Record<string, number>>; rollback?: boolean; running?: boolean }) {
   const s = patchScore(counts);
   if (s.total === 0) return null;
+  if (s.applicable === 0) {
+    // Nothing could be installed: never call that "100 % patched".
+    return (
+      <div className="patch-score">
+        <span className="patch-score-pct muted">—</span>
+        <span className="patch-score-label">
+          <b>Nothing to {rollback ? "remove" : "install"}</b>: none of the {s.total} machine{s.total === 1 ? "" : "s"} in its stages
+          {rollback ? " has the package" : " needs this package"} <span className="muted">({s.total} not applicable / excepted)</span>
+        </span>
+      </div>
+    );
+  }
   const failed = (counts.failed ?? 0) + (counts.lost_after_install ?? 0);
   const tone = running && failed === 0 && s.pct < 100 ? "blue" : scoreTone(s.pct);
   return (

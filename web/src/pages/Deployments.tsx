@@ -104,7 +104,9 @@ function SmallCounts({ d }: { d: Deployment }) {
   const sc = patchScore(c);
   return (
     <div className="cell-sub">
-      <b className={`text-${scoreTone(sc.pct)}`}>{sc.pct}% {d.operation === "rollback" ? "removed" : "patched"}</b> · {done}/{total} done
+      {sc.applicable === 0
+        ? <b className="muted">nothing to {d.operation === "rollback" ? "remove" : "install"}</b>
+        : <b className={`text-${scoreTone(sc.pct)}`}>{sc.pct}% {d.operation === "rollback" ? "removed" : "patched"}</b>} · {done}/{total} done
       {(c.failed ?? 0) > 0 && <span className="text-red"> · {c.failed} failed</span>}
       {(c.pending_reboot ?? 0) > 0 && <span className="text-amber"> · {c.pending_reboot} restart needed</span>}
       {(c.lost_after_install ?? 0) > 0 && <span className="text-red"> · {c.lost_after_install} lost</span>}
