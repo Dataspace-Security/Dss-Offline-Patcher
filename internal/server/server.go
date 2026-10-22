@@ -83,6 +83,13 @@ func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger
 	}
 	st.Policy.RequireMFA = cfg.LocalMFARequired()
 	st.Policy.RequireSetupCode = cfg.RequireSetupCode
+	if cfg.MaxDownloadsTotal != nil {
+		st.Policy.MaxDownloadsTotal = *cfg.MaxDownloadsTotal
+	}
+	if cfg.MaxDownloadsPerSite != nil {
+		st.Policy.MaxDownloadsPerSite = *cfg.MaxDownloadsPerSite
+	}
+	st.Policy.SiteMaxDownloads = cfg.SiteMaxDownloads
 	if err := st.ApplyDeploymentApprovalPolicy(context.Background()); err != nil {
 		return nil, fmt.Errorf("apply deployment approval policy: %w", err)
 	}

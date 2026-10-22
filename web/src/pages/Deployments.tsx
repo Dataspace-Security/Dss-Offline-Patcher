@@ -9,6 +9,7 @@ import { AlreadyRunning, runningDeploymentFrom } from "../components/PatchThis";
 import { TargetPreview, nothingToDo, type TargetSummary } from "../components/TargetPreview";
 import { STAGES_HINT, stageLabel } from "../components/deployLabels";
 import { CountsBar, Empty, ErrorBanner, Mono, PageHeader, Time, patchScore, scoreTone } from "../components/ui";
+import { networkLimitsText } from "../netlimits";
 import type { Deployment, DeploymentOperation, HealthCheck, NewDeployment, Package, RebootPolicy } from "../types";
 import { splitList, toRFC3339, useLoad } from "../util";
 import {
@@ -483,9 +484,9 @@ export function NewDeploymentPage() {
               </small>
             </label>
             <label className="field">
-              <span>Max concurrent installs</span>
+              <span>Machines at once</span>
               <input type="number" min={0} step={1} value={maxConcurrent} onChange={(e) => setMaxConcurrent(e.target.value)} />
-              <small className="hint">0 = unlimited. Caps how many endpoints download/install at once.</small>
+              <small className="hint">How many machines of this deployment download/install at once (0 = no extra cap). {networkLimitsText(policy.data)}</small>
             </label>
           </div>
         </details>

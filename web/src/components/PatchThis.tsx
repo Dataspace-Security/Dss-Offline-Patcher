@@ -3,7 +3,8 @@ import { Link, useNavigate } from "react-router-dom";
 import { api, ApiError, enc, errMsg } from "../api";
 import { deploymentApprovalsRequired, needsApprovalsText, othersMustApprove, useCan, useMe } from "../auth";
 import { paths } from "../paths";
-import type { Deployment, Endpoint, NewDeployment, Package, PackageFleet } from "../types";
+import { networkLimitsText } from "../netlimits";
+import type { Deployment, Endpoint, NewDeployment, Package, PackageFleet, Policy } from "../types";
 import { fmtTime, useLoad } from "../util";
 import { REBOOT_LABELS, STAGES_HINT, stageLabel } from "./deployLabels";
 import {
@@ -101,6 +102,7 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
   const [summary, setSummary] = useState<TargetSummary | null>(null);
   const [runningFromServer, setRunningFromServer] = useState("");
   const [justification, setJustification] = useState("");
+  const [atOnce, setAtOnce] = useState("0");
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -172,7 +174,8 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
   const firstWave = preset === "one_ring" && fleet && epsL.data ? pickFirstWave(fleet.endpoint_ids ?? [], epsL.data) : [];
   // No window lets machines restart: don't promise restarts that never happen.
   const rebootInWindow = winL.data ? windowsAllowReboot(winL.data) : true;
-  const draft = buildPreset(preset, pkg, { policy, endpointId: endpoint?.id, hostname: endpoint?.hostname, justification, firstWave, rebootInWindow });
+  const atOnceN = Math.max(0, Math.floor(Number(atOnce) || 0));
+  const draft = { ...buildPreset(preset, pkg, { policy, endpointId: endpoint?.id, hostname: endpoint?.hostname, justification, firstWave, rebootInWindow }), max_concurrent: atOnceN };
   const counts = ringCounts(draft.rings, eps);
   const dl = policyDeadline(pkg, policy);
   const deployApprovals = deploymentApprovalsRequired(policy);
@@ -321,7 +324,8 @@ export function PatchThis({ packageId, endpoint, onClose, onChanged }: PatchThis
                 {isFirstWavePlan(draft) && <div className="banner banner-info">{firstWaveText(firstWave.length)}</div>}
                 <PlanSummary draft={draft} counts={epsL.data ? counts : null} policyDeadline={policy?.deadlines?.[pkg.severity]}
                              policyMissing={!!policyL.error} dlFromPolicy={dl} endpoints={eps}
-                             noRebootWindow={!!winL.data && !rebootInWindow && draft.reboot_policy === "never"} />
+                             noRebootWindow={!!winL.data && !rebootInWindow && draft.reboot_policy === "never"}
+                             policy={policy} atOnce={atOnce} setAtOnce={setAtOnce} />
 
                 {preset === "emergency" && (
                   <label className="field">
@@ -375,9 +379,9 @@ function StageGroups({ groups, endpoints }: { groups: string[]; endpoints: Endpo
   );
 }
 
-function PlanSummary({ draft, counts, policyDeadline: policyDur, policyMissing, dlFromPolicy, endpoints, noRebootWindow }: {
+function PlanSummary({ draft, counts, policyDeadline: policyDur, policyMissing, dlFromPolicy, endpoints, noRebootWindow, policy, atOnce, setAtOnce }: {
   draft: NewDeployment; counts: number[] | null; policyDeadline: string | undefined; policyMissing: boolean; dlFromPolicy: Date | null;
-  endpoints: Endpoint[]; noRebootWindow: boolean;
+  endpoints: Endpoint[]; noRebootWindow: boolean; policy: Policy | null; atOnce: string; setAtOnce: (v: string) => void;
 }) {
   const deadline = draft.deadline ? new Date(draft.deadline) : null;
   const overdue = !!deadline && deadline.getTime() < Date.now();
@@ -420,6 +424,18 @@ function PlanSummary({ draft, counts, policyDeadline: policyDur, policyMissing, 
         </tr>
         <tr><th>Windows</th><td>{draft.ignore_windows ? <span className="text-red">ignored: installs start as soon as assigned</span> : "group maintenance windows apply"}</td></tr>
         <tr><th>Safety</th><td>auto-pause above {draft.max_failure_pct} % failures · {draft.max_retries} retries</td></tr>
+        <tr>
+          <th>Network</th>
+          <td>
+            <label className="inline-field">
+              Machines at once for this deployment{" "}
+              <input type="number" min={0} step={1} value={atOnce} onChange={(e) => setAtOnce(e.target.value)} style={{ width: "6em" }}
+                aria-label="Machines at once for this deployment" />
+              <span className="muted"> {Number(atOnce) > 0 ? "" : "0 = only the limits below"}</span>
+            </label>
+            {policy && <div className="small muted">{networkLimitsText(policy)}</div>}
+          </td>
+        </tr>
       </tbody>
     </table>
   );

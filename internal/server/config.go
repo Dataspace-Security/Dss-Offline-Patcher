@@ -84,6 +84,12 @@ type Config struct {
 	AuditCheckpointEvery    Duration            `json:"audit_checkpoint_interval"`
 	AuditRetention          Duration            `json:"audit_retention"`
 	SiteDownloadKbps        map[string]int      `json:"site_download_kbps"`
+	// Network limits: machines downloading installers at once, across all
+	// deployments. Defaults DefaultMaxDownloadsTotal fleet-wide and
+	// DefaultMaxDownloadsPerSite per site; 0 = no limit.
+	MaxDownloadsTotal   *int           `json:"max_downloads_total"`
+	MaxDownloadsPerSite *int           `json:"max_downloads_per_site"`
+	SiteMaxDownloads    map[string]int `json:"site_max_downloads"`
 	// Install safety (docs/07-admin-guide.md "Install safety").
 	Preinstall       PreinstallConfig `json:"preinstall"`
 	LostAfterInstall Duration         `json:"lost_after_install"`
@@ -254,6 +260,9 @@ func LoadConfig(path string) (*Config, error) {
 	if c.SessionTTL.Duration == 0 {
 		c.SessionTTL.Duration = 8 * time.Hour
 	}
+	if err := c.defaultNetworkLimits(); err != nil {
+		return nil, err
+	}
 	if c.DeploymentApprovals == nil {
 		n := store.DefaultDeploymentApprovals
 		c.DeploymentApprovals = &n
@@ -402,8 +411,8 @@ func (c *Config) IntakeConfig() (intake.Config, error) {
 // one defers the install to the next check-in (not a failure).
 type PreinstallConfig struct {
 	// MinFreeDiskMB by endpoint OS (windows, linux, macos): free space needed
-	// on the system volume, or 2 × the package size if larger. 0 = only the
-	// 2 × size rule. Defaults: windows 5120, macos 2048, linux 1024.
+	// on the system volume, or 2 Ã— the package size if larger. 0 = only the
+	// 2 Ã— size rule. Defaults: windows 5120, macos 2048, linux 1024.
 	MinFreeDiskMB map[string]int `json:"min_free_disk_mb"`
 	// MinBatteryPct: laptops on battery below this wait for AC power.
 	// Default 40; 0 = no battery check.
@@ -449,4 +458,42 @@ func (p PreinstallConfig) policyFor(osName string) store.PreinstallPolicy {
 		pct = *p.MinBatteryPct
 	}
 	return store.PreinstallPolicy{MinFreeDiskMB: mb, MinBatteryPct: pct}
+}
+
+// Network limit defaults: enough for a large head office, small enough
+// that a rollout to every machine does not flood a branch link.
+const (
+	DefaultMaxDownloadsTotal   = 100
+	DefaultMaxDownloadsPerSite = 5
+	maxDownloadsCeiling        = 100000
+)
+
+func (c *Config) defaultNetworkLimits() error {
+	for _, f := range []struct {
+		name string
+		v    **int
+		def  int
+	}{{"max_downloads_total", &c.MaxDownloadsTotal, DefaultMaxDownloadsTotal}, {"max_downloads_per_site", &c.MaxDownloadsPerSite, DefaultMaxDownloadsPerSite}} {
+		if *f.v == nil {
+			n := f.def
+			*f.v = &n
+		}
+		if n := **f.v; n < 0 || n > maxDownloadsCeiling {
+			return fmt.Errorf("config: %s must be 0-%d (0 = no limit; got %d)", f.name, maxDownloadsCeiling, n)
+		}
+	}
+	for site, n := range c.SiteMaxDownloads {
+		if site == "" || n < 0 || n > maxDownloadsCeiling {
+			return fmt.Errorf("config: site_max_downloads[%q] must be 0-%d for a named site (got %d)", site, maxDownloadsCeiling, n)
+		}
+	}
+	for site, n := range c.SiteDownloadKbps {
+		if n < 0 {
+			return fmt.Errorf("config: site_download_kbps[%q] must be >= 0 (got %d)", site, n)
+		}
+	}
+	if c.DownloadRateKbps < 0 {
+		return fmt.Errorf("config: download_rate_kbps must be >= 0 (got %d)", c.DownloadRateKbps)
+	}
+	return nil
 }

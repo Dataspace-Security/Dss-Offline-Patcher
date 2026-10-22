@@ -23,12 +23,21 @@ type policyView struct {
 	// DeploymentApprovals: different people who approve each deployment and
 	// rollback before it starts (two-person rule).
 	DeploymentApprovals int `json:"deployment_approvals"`
+	// Network limits (machines downloading at once; 0 = no limit) and the
+	// per-machine download speed (kbit/s; 0 = unlimited).
+	MaxDownloadsTotal   int            `json:"max_downloads_total"`
+	MaxDownloadsPerSite int            `json:"max_downloads_per_site"`
+	SiteMaxDownloads    map[string]int `json:"site_max_downloads"`
+	DownloadRateKbps    int            `json:"download_rate_kbps"`
+	SiteDownloadKbps    map[string]int `json:"site_download_kbps"`
 }
 
 func (s *Server) policy(w http.ResponseWriter, r *http.Request) {
 	p := s.store.Policy
 	v := policyView{ApprovalsRequired: map[string]int{}, SeparationOfDuties: p.SeparationOfDuties, Deadlines: map[string]string{},
-		DeploymentApprovals: p.RequiredDeploymentApprovals()}
+		DeploymentApprovals: p.RequiredDeploymentApprovals(),
+		MaxDownloadsTotal:   p.MaxDownloadsTotal, MaxDownloadsPerSite: p.MaxDownloadsPerSite, SiteMaxDownloads: nonNilMap(p.SiteMaxDownloads),
+		DownloadRateKbps: s.cfg.DownloadRateKbps, SiteDownloadKbps: nonNilMap(s.cfg.SiteDownloadKbps)}
 	for _, sev := range store.Severities {
 		v.ApprovalsRequired[sev] = p.RequiredApprovals(sev)
 		v.Deadlines[sev] = p.DeadlineFor(sev).String()
@@ -332,4 +341,11 @@ func (s *Server) retryFailed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, v)
+}
+
+func nonNilMap(m map[string]int) map[string]int {
+	if m == nil {
+		return map[string]int{}
+	}
+	return m
 }

@@ -149,6 +149,10 @@ func migrate(db *sql.DB) error {
 			}
 		}
 	}
+	// Network limits count downloads in flight across the fleet (netlimits.go).
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS targets_state ON targets(state, leased_until)`); err != nil {
+		return fmt.Errorf("targets_state index: %w", err)
+	}
 	for _, q := range roleRenames {
 		if _, err := db.Exec(q); err != nil {
 			return fmt.Errorf("role rename: %w", err)

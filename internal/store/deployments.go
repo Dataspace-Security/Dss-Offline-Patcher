@@ -1325,9 +1325,27 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 					continue
 				}
 			}
+			if starting && c.operation == "install" {
+				wait, err := s.downloadSlotBusy(ctx, tx, endpointID, e.Site, now)
+				if err != nil {
+					return err
+				}
+				if wait != "" {
+					if c.detail != wait {
+						if _, err := tx.Exec(`UPDATE targets SET detail=? WHERE deployment_id=? AND endpoint_id=?`, wait, c.a.DeploymentID, endpointID); err != nil {
+							return err
+						}
+					}
+					continue // asks again at its normal check-in
+				}
+			}
 			if starting {
 				lease := nowT.Add(leaseFor).UTC().Format(time.RFC3339Nano)
-				if _, err := tx.Exec(`UPDATE targets SET leased_until=? WHERE deployment_id=? AND endpoint_id=?`, lease, c.a.DeploymentID, endpointID); err != nil {
+				detail := c.detail
+				if isNetworkWait(detail) {
+					detail = "" // got its download slot
+				}
+				if _, err := tx.Exec(`UPDATE targets SET leased_until=?, detail=? WHERE deployment_id=? AND endpoint_id=?`, lease, detail, c.a.DeploymentID, endpointID); err != nil {
 					return err
 				}
 			}

@@ -20,7 +20,7 @@ Both are now constant-cost: internal paths skip the counts, and an indexed aggre
 
 - The fleet summary and the compliance report are O(fleet). They take about 1.2 s at 20,000 endpoints, while the console polls the overview every 10 s. Above about 50,000 endpoints, cache these or move to PostgreSQL (roadmap E).
 - SQLite has a single writer. Throughput is bounded by one CPU core of write work, not by the number of agents.
-- Content downloads are served by the same process. Large cumulative updates (500 MB+) going to many endpoints at once are bounded by network and disk, not by this test. Use `max_concurrent` and `download_rate_kbps` (C2) to shape them.
+- Content downloads are served by the same process. Large cumulative updates (500 MB+) going to many endpoints at once are bounded by network and disk, not by this test. The network limits `max_downloads_total` (default 100) and `max_downloads_per_site` (default 5) cap machines downloading at once across all deployments; `max_concurrent` per deployment and `download_rate_kbps` / `site_download_kbps` shape them further (docs/07-admin-guide.md, "Network limits").
 
 **Re-run on target hardware before the pilot:**
 

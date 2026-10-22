@@ -417,7 +417,7 @@ alert, so a second look is easy.
 | `auto_advance` | Default off. When on, a ring that finished within `max_failure_pct` starts the next ring by itself (audited as `deployment.advanced` by `system:scheduler`). A ring that finished over the threshold waits for you. "Patch this → every compatible machine that needs it" turns it on when 10 or more machines need the update: first max(5, 5 %) of them ("First machines"), then everything else. |
 | Window (`window_start`/`window_end`) | `HH:MM` **UTC**, both or neither. May cross midnight. Outside it, no assignments are handed out. |
 | `deadline` | RFC 3339, optional. After it, **endpoint maintenance windows** no longer hold installs back. It does **not** override the deployment window above. |
-| `max_concurrent` | Cap on endpoints downloading/installing at once (0 = no cap). |
+| `max_concurrent` | Cap on endpoints of this deployment downloading/installing at once (0 = no extra cap; the network limits below always apply). "Patch this" shows it as **Network → Machines at once**. |
 | `reboot_policy` | `never` (default), `in_window` (the agent may reboot inside a maintenance window with `allow_reboot`), `at_deadline` (in such a window, or at any time once the deadline has passed; needs a deadline). |
 | `ignore_windows` | Ignore endpoint maintenance windows entirely. |
 | `health_checks` | Up to 20 fixed checks run after install: `service_running` (Windows service name, systemd unit, or launchd label) or `tcp_listening` (port on 127.0.0.1). No arbitrary commands. |
@@ -450,6 +450,24 @@ and finished, rejected or cancelled. `deployment_approvals` in `pmserver.json` s
 people besides the creator must approve (default 1, 1–5). When the count is lowered, deployments
 already waiting follow it at the next server start (one that already has enough approvals starts). An `info` alert
 `deployment_awaiting_approval` is open while it waits.
+
+**Network limits (all deployments together).** So that a rollout to every machine cannot flood the
+network, the server hands out new downloads only while fewer than these many machines are downloading
+(across all install deployments; rollbacks download nothing and are not limited):
+
+| `pmserver.json` | Default | Meaning |
+|---|---|---|
+| `max_downloads_total` | 100 | Machines downloading at once across the fleet (0 = no limit). |
+| `max_downloads_per_site` | 5 | Machines downloading at once per endpoint site (0 = no limit). Endpoints without a site only count against the fleet limit. |
+| `site_max_downloads` | — | Per-site override, e.g. `{"branch-12": 2, "hq": 40}`. |
+| `download_rate_kbps` | 0 | Download speed per machine in kbit/s (0 = full speed). |
+| `site_download_kbps` | — | Per-site speed override, e.g. `{"branch-12": 2048}`. |
+
+A machine counts as downloading from the moment it is handed the work until it reports that the
+download finished (or 15 minutes without a report). Waiting machines show `waiting: N machines at site
+X are downloading (site limit M at once)` and ask again at their next check-in. Rough sizing: per-site
+limit × per-machine speed should stay well under the branch link (5 × 2 Mbit/s = 10 Mbit/s). Restart
+pmserver after changing these.
 
 ### 3.4 Advancing, pausing, resuming, cancelling
 
@@ -1134,6 +1152,7 @@ Check in this order:
 | Endpoint maintenance window closed | Endpoint's groups have windows on the Windows page, none open now | Wait; or the deployment's deadline passes; or use `ignore_windows` (new deployment). |
 | Prerequisite missing | Target detail `waiting for prerequisite(s) KB…` | Deploy the prerequisite first; this target continues by itself once inventory shows it. |
 | Concurrency cap | `max_concurrent` reached by other endpoints | Wait. Leases on endpoints that went quiet expire after 15 minutes. |
+| `waiting: N machines … are downloading (… limit M at once)` | Network limit (`max_downloads_total`, `max_downloads_per_site`, `site_max_downloads`) | Wait, or raise the limit if the link can take more. |
 | Endpoint offline | Endpoint status `offline` | See §3.6. |
 | Ring not reached | No target for this endpoint yet | Targets only exist up to the current ring. Advance. |
 | Endpoint in no ring | No target at all | Fix the endpoint's groups (Endpoints → edit groups). A group change adds it to active deployments. |

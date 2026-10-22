@@ -211,6 +211,12 @@ type Policy struct {
 	// built-in super admin still has the default password, its sign-in also
 	// needs the one-time setup code the installer prints (setupcode.go).
 	RequireSetupCode bool
+	// Network limits (netlimits.go): machines that may download installers
+	// at once, across the whole fleet and per site (0 = no limit).
+	MaxDownloadsTotal   int
+	MaxDownloadsPerSite int
+	// SiteMaxDownloads overrides MaxDownloadsPerSite for named sites.
+	SiteMaxDownloads map[string]int
 }
 
 // DefaultDeploymentApprovals is the approval count when none is configured:

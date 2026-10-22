@@ -663,3 +663,19 @@ func TestAuditBlockEveryRole(t *testing.T) {
 		}
 	}
 }
+
+func TestNetworkLimitsConfig(t *testing.T) {
+	cfg, err := LoadConfig(writeConfig(t, t.TempDir(), ""))
+	if err != nil || *cfg.MaxDownloadsTotal != DefaultMaxDownloadsTotal || *cfg.MaxDownloadsPerSite != DefaultMaxDownloadsPerSite {
+		t.Fatalf("defaults: %v", err)
+	}
+	cfg, err = LoadConfig(writeConfig(t, t.TempDir(), `"max_downloads_total": 0, "max_downloads_per_site": 3, "site_max_downloads": {"branch-7": 1},`))
+	if err != nil || *cfg.MaxDownloadsTotal != 0 || *cfg.MaxDownloadsPerSite != 3 || cfg.SiteMaxDownloads["branch-7"] != 1 {
+		t.Fatalf("explicit: %v", err)
+	}
+	for _, bad := range []string{`"max_downloads_total": -1,`, `"max_downloads_per_site": -2,`, `"site_max_downloads": {"": 2},`, `"download_rate_kbps": -5,`} {
+		if _, err := LoadConfig(writeConfig(t, t.TempDir(), bad)); err == nil {
+			t.Errorf("%s accepted", bad)
+		}
+	}
+}

@@ -317,8 +317,14 @@ export type Policy = {
   approvals_required: Record<string, number>; // by severity; missing = 1
   separation_of_duties: boolean;
   deadlines: Record<string, string>; // by severity: release date + this = install deadline
-  /** Roles contract: approvals every deployment / rollback needs before it starts (default 2). */
+  /** Roles contract: approvals every deployment / rollback needs besides its creator (default 1). */
   deployment_approvals?: number;
+  /** Network limits: machines downloading at once (0 = no limit) and per-machine speed (kbit/s, 0 = unlimited). */
+  max_downloads_total?: number;
+  max_downloads_per_site?: number;
+  site_max_downloads?: Record<string, number>;
+  download_rate_kbps?: number;
+  site_download_kbps?: Record<string, number>;
 };
 
 /** GET /api/packages-needs → Record<package_id, PackageFleet> (extended; old fields kept). */
