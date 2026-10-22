@@ -16,8 +16,22 @@ const LIB_POLL_MS = 5 * 60_000;
  */
 export function cantImportReason(info: ImportInfo | null | undefined, requested?: AcquisitionRequestRef | null): string | null {
   if (info?.importable === "no") return info.importable_reason?.trim() || "no supported installer";
-  if (requested?.status === "unsupported") return requested.reason?.trim() || "the acquisition team cannot fetch it this way";
+  const req = liveRequested(requested, info);
+  if (req?.status === "unsupported") return req.reason?.trim() || "the acquisition team cannot fetch it this way";
   return null;
+}
+
+/**
+ * An old "can't import" (unsupported) result that no longer holds is
+ * ignored, so Import is offered again: the Library now says the app can be
+ * imported, or the result came from a downloader that only took MSI
+ * installers ("no MSI installer for x64 …"; it now tries EXE, MSIX,
+ * per-user and portable installers too). Same rule as the server (liveRef).
+ */
+export function liveRequested<T extends AcquisitionRequestRef>(requested: T | null | undefined, info?: ImportInfo | null): T | undefined {
+  if (!requested) return undefined;
+  if (requested.status === "unsupported" && (info?.importable === "yes" || /no MSI installer for/.test(requested.reason ?? ""))) return undefined;
+  return requested;
 }
 
 /** Map key for an app (winget ids are case-insensitive). */

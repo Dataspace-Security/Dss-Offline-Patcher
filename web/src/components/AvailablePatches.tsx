@@ -8,7 +8,7 @@ import { useLoad } from "../util";
 import { acqStatusPill } from "./AcqRequestStatus";
 import { PatchThis } from "./PatchThis";
 import { isAgentPackage } from "./patchPlan";
-import { appInfoKey, useLibraryImportability, type ImportInfo } from "./importability";
+import { appInfoKey, liveRequested, useLibraryImportability, type ImportInfo } from "./importability";
 import { PipelineAction, isRequestable } from "./PipelineAction";
 import { RequestResultBanner } from "./RequestResultBanner";
 import { latestRequests, useImportRequest, type ImportItems } from "./useImportRequest";
@@ -144,7 +144,7 @@ export function EndpointUpdatesTable({ endpointId, hostname, os }: { endpointId:
   const library = useLibraryImportability(useCan("super_admin") && windows);
   const rows = mergeRows(intel.data, avail.data, library);
   const importable = (r: Row) => !r.deploymentId && !!r.importItems
-    && isRequestable(r.link, r.requestKey ? requestedBy.get(r.requestKey) : undefined, r.importInfo);
+    && isRequestable(r.link, r.requestKey ? liveRequested(requestedBy.get(r.requestKey), r.importInfo) : undefined, r.importInfo);
   const loaded = avail.data !== null && (!windows || intel.data !== null || !!intel.error);
   const info = intel.data;
 
@@ -190,11 +190,11 @@ export function EndpointUpdatesTable({ endpointId, hostname, os }: { endpointId:
                 <td>{r.severity ? <span className={`sev sev-${r.severity}`}>{r.severity}</span> : <span className="muted">—</span>}</td>
                 <td className="nowrap">{r.installed}</td>
                 <td className="nowrap">{r.available}</td>
-                <td><Pipeline r={r} requested={r.link ? undefined : requestedBy.get(r.requestKey)} /></td>
+                <td><Pipeline r={r} requested={r.link ? undefined : liveRequested(requestedBy.get(r.requestKey), r.importInfo)} /></td>
                 <td className="right">
                   {r.deploymentId
                     ? <Link className="btn btn-sm" to={paths.deployment(r.deploymentId)}>Deployment →</Link>
-                    : <PipelineAction link={r.link} agent={r.agent} requested={r.requestKey ? requestedBy.get(r.requestKey) : undefined} onPatch={setPatching}
+                    : <PipelineAction link={r.link} agent={r.agent} requested={r.requestKey ? liveRequested(requestedBy.get(r.requestKey), r.importInfo) : undefined} onPatch={setPatching}
                                       importInfo={r.importInfo}
                                       onRequest={importable(r) ? () => void imp.send(r.importItems!, r.key) : undefined}
                                       requesting={imp.busy === r.key} disabled={imp.busy !== null} />}
