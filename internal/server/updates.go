@@ -859,12 +859,17 @@ func refFor(refs map[string]store.AcqRequestRef, kind, key string) *store.AcqReq
 	return nil
 }
 
-// liveRef drops an old "can't import" (unsupported) result once the current
-// import rule says the app can be imported: it was reported by an older
-// acquisition (before EXE, zip, MSIX or portable support, or for an older
-// version), so the row offers Import again instead of a stale refusal.
+// liveRef drops an old "can't import" (unsupported) result when it no
+// longer holds, so the row offers Import again instead of a stale refusal:
+// the current import rule says the app can be imported, or the result came
+// from an acquisition zone that only took MSI installers (its "no MSI
+// installer for <arch>" refusal; pmctl now tries EXE, MSIX, per-user and
+// portable installers too and words it "no supported installer").
 func liveRef(r *store.AcqRequestRef, importable string) *store.AcqRequestRef {
-	if r != nil && r.Status == "unsupported" && importable == intel.ImportableYes {
+	if r == nil || r.Status != "unsupported" {
+		return r
+	}
+	if importable == intel.ImportableYes || strings.Contains(r.Reason, "no MSI installer for") {
 		return nil
 	}
 	return r

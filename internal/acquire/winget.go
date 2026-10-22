@@ -245,6 +245,7 @@ func ParseWingetManifest(b []byte) (*WingetManifest, error) {
 		in.Scope = strings.ToLower(in.Scope)
 		m.Installers = append(m.Installers, in)
 	}
+	applyKnownSwitches(m)
 	return m, nil
 }
 

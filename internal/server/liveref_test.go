@@ -14,8 +14,13 @@ func TestLiveRefDropsStaleUnsupported(t *testing.T) {
 	if liveRef(un, intel.ImportableYes) != nil {
 		t.Fatal("stale unsupported kept although importable")
 	}
-	if liveRef(un, intel.ImportableNo) != un || liveRef(un, "") != un {
-		t.Fatal("unsupported dropped although still not importable")
+	// MSI-only acquisition zones' refusal is stale whatever the rule knows.
+	if liveRef(un, "") != nil || liveRef(un, intel.ImportableUnknown) != nil {
+		t.Fatal("MSI-only refusal kept")
+	}
+	still := &store.AcqRequestRef{Status: "unsupported", Reason: "EXE installer without a documented silent switch"}
+	if liveRef(still, intel.ImportableNo) != still || liveRef(still, "") != still {
+		t.Fatal("a current refusal was dropped")
 	}
 	pending := &store.AcqRequestRef{Status: "pending"}
 	if liveRef(pending, intel.ImportableYes) != pending || liveRef(nil, intel.ImportableYes) != nil {
