@@ -80,6 +80,34 @@ export function windowsOneLiner(agentURL: string, token: string, caSha256: strin
 }
 
 /**
+ * Removes the agent wherever it was installed (manual folder, MSI under
+ * Program Files, one-command install): the service's own path and
+ * -state-dir tell where; an MSI install is removed through Windows Installer.
+ */
+const REMOVE_AGENT_PS = String.raw`# Run in an elevated (Administrator) PowerShell
+$svc = Get-CimInstance Win32_Service -Filter "Name='offpatch-agent'"
+$msi = Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
+  Where-Object { $_.DisplayName -eq 'offpatch Endpoint Agent' -and $_.PSChildName -like '{*}' } | Select-Object -First 1
+if (-not $svc -and -not $msi) { 'The agent is not installed on this PC.'; return }
+$exe = $null; $dir = Join-Path $env:ProgramData 'offpatch'
+if ($svc) {
+  $m = [regex]::Match($svc.PathName, '^\s*"?(?<exe>[^"]+?\.exe)"?(?:.*-state-dir\s+"?(?<dir>[^"]+?)"?\s*$)?')
+  $exe = $m.Groups['exe'].Value
+  if ($m.Groups['dir'].Success) { $dir = $m.Groups['dir'].Value }
+  "Agent: $exe  (data: $dir)"
+  Stop-Service offpatch-agent -Force -ErrorAction SilentlyContinue
+}
+if ($msi) {
+  Start-Process msiexec.exe -Wait -ArgumentList '/x', $msi.PSChildName, '/qn'
+} elseif ($exe -and (Test-Path $exe)) {
+  & $exe service uninstall
+} else {
+  sc.exe delete offpatch-agent | Out-Null
+}
+if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+'Agent removed.'`;
+
+/**
  * Step-by-step agent installation, with the server URL, pinned signing
  * key(s) and (optionally) a freshly created enrollment token filled in.
  */
@@ -135,9 +163,7 @@ C:\\offpatch\\pmagent.exe run -once`,
       service: `C:\\offpatch\\pmagent.exe service install
 Start-Service offpatch-agent
 Get-Service offpatch-agent`,
-      remove: `Stop-Service offpatch-agent
-C:\\offpatch\\pmagent.exe service uninstall
-Remove-Item -Recurse -Force C:\\ProgramData\\offpatch`,
+      remove: REMOVE_AGENT_PS,
       msi: `msiexec /i offpatch-agent.msi SERVER=${url} TOKEN=${tok} /qn`,
     };
   }, [keys.length, pinCA, useRoot, url, tok, agentExe?.sha256]); // eslint-disable-line react-hooks/exhaustive-deps
