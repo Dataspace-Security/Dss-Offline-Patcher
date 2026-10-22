@@ -7,6 +7,7 @@
 # The console (web/dist) must be built first (`make ui`); it is embedded in pmserver.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+VERSION=${VERSION:-$(tr -d ' \r\n' < VERSION 2>/dev/null)}
 VERSION=${VERSION:-$(git describe --tags --always 2>/dev/null || echo dev)}
 # Agent version: AGENT_VERSION env, else the default compiled into internal/agent (var Version).
 # Written to AGENT_VERSION in the tarball; install-ubuntu.sh reads it (and never downgrades a

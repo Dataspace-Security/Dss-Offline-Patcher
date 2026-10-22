@@ -32,7 +32,7 @@ import (
 )
 
 // Version is set at build time: -ldflags "-X offpatch/internal/agent.Version=1.2.3".
-var Version = "0.10.0"
+var Version = "0.10.1"
 
 // State is persisted in <state-dir>/agent.json (0600).
 type State struct {

@@ -1512,7 +1512,10 @@ else
     ok "Go $GO_VERSION for this build in $GO_TMP (SHA-256 verified; removed afterwards)"
   fi
   step "Building offpatch"
-  VERSION=$(cd "$SRC" && git describe --tags --always 2>/dev/null || echo dev)
+  # The release number (VERSION at the repository root), as release tarballs
+  # show it; the commit only when the checkout has no VERSION file.
+  VERSION=$(tr -d ' \r\n' < "$SRC/VERSION" 2>/dev/null)
+  VERSION=${VERSION:-$(cd "$SRC" && git describe --tags --always 2>/dev/null || echo dev)}
   AGENT_VER=$(cat "$SRC/AGENT_VERSION" 2>/dev/null || sed -n 's/^var Version = "\(.*\)"$/\1/p' "$SRC/internal/agent/agent.go" | head -n 1)
   AGENT_VER=${AGENT_VER:-0.0.0-dev}
   export GOFLAGS=-trimpath CGO_ENABLED=0
