@@ -83,6 +83,9 @@ func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger
 	}
 	st.Policy.RequireMFA = cfg.LocalMFARequired()
 	st.Policy.RequireSetupCode = cfg.RequireSetupCode
+	if err := st.ApplyDeploymentApprovalPolicy(context.Background()); err != nil {
+		return nil, fmt.Errorf("apply deployment approval policy: %w", err)
+	}
 	st.AcqStaleAfter = cfg.AcquisitionStaleAfter.Duration
 	if cfg.MFAKeyFile != "" {
 		key, err := loadMFAKey(cfg.MFAKeyFile)

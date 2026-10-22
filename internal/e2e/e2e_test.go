@@ -281,8 +281,8 @@ func (e *env) api(method, path, token string, body any, out any) int {
 }
 
 // createDep creates a deployment (POST /api/deployments) and, when that
-// succeeds (201), approves it with two bank users who did not create it,
-// so it starts as deployments did before the two-person rule. out, if set,
+// succeeds (201), approves it with as many bank users as it needs (none
+// of them its creator), so it starts as deployments did before approvals. out, if set,
 // receives the deployment after approval.
 func (e *env) createDep(token string, n any, out any) int {
 	e.t.Helper()
@@ -291,10 +291,10 @@ func (e *env) createDep(token string, n any, out any) int {
 	if c != 201 {
 		return c
 	}
-	if d.State != "pending_approval" || d.ApprovalsRequired != 2 {
+	if d.State != "pending_approval" || d.ApprovalsRequired < 1 {
 		e.t.Fatalf("new deployment: state %s, approvals_required %d", d.State, d.ApprovalsRequired)
 	}
-	e.approveDep(d.DeploymentID, d.CreatedBy)
+	e.approveDep(d.DeploymentID, d.CreatedBy, d.ApprovalsRequired)
 	if out != nil {
 		if c := e.api("GET", "/api/deployments/"+d.DeploymentID, tokViewer, nil, out); c != 200 {
 			e.t.Fatalf("get deployment: %d", c)
@@ -303,13 +303,13 @@ func (e *env) createDep(token string, n any, out any) int {
 	return c
 }
 
-// approveDep approves deployment id with the two first of alice, bob and
+// approveDep approves deployment id with the first need of alice, bob and
 // adam who are not its creator.
-func (e *env) approveDep(id, createdBy string) {
+func (e *env) approveDep(id, createdBy string, need int) {
 	e.t.Helper()
 	n := 0
 	for _, a := range []struct{ user, tok string }{{"alice", tokApprover}, {"bob", tokUser2}, {"adam", tokAdmin}} {
-		if n == 2 || "user:"+envEmail(a.tok) == createdBy {
+		if n == need || "user:"+envEmail(a.tok) == createdBy {
 			continue
 		}
 		if c := e.api("POST", "/api/deployments/"+id+"/approve", a.tok, map[string]string{"reason": "change approved"}, nil); c != 200 {

@@ -89,7 +89,7 @@ type Config struct {
 	LostAfterInstall Duration         `json:"lost_after_install"`
 	// DeploymentApprovals: different people (bank user or admin, not the
 	// creator) who must approve each deployment and rollback before it
-	// starts. Default 2, 1-5 (an isolated lab may use 1).
+	// starts. Default 1 (creator plus one other person), 1-5.
 	DeploymentApprovals *int `json:"deployment_approvals"`
 	// MFAKeyFile: 32-byte key (64 hex characters) that encrypts local
 	// users' authenticator secrets (AES-256-GCM). Default

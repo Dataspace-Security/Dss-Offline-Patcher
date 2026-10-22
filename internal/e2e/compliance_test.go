@@ -140,7 +140,7 @@ func TestCompliancePackAfterDeployment(t *testing.T) {
 	if strings.Count(csv, "\n") != 7 || !strings.Contains(csv, "pc-c-exc") || !strings.Contains(csv, ",exception,") {
 		t.Fatalf("E-007:\n%s", csv)
 	}
-	if !strings.Contains(string(files["evidence/E-006-approvals.csv"]), "user:alice@bank.test; user:bob@bank.test") {
+	if !strings.Contains(string(files["evidence/E-006-approvals.csv"]), ",user:alice@bank.test,") {
 		t.Fatalf("E-006:\n%s", files["evidence/E-006-approvals.csv"])
 	}
 	var summary compliance.Pack

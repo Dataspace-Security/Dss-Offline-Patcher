@@ -35,6 +35,67 @@ func fillApprovals(ctx context.Context, q querier, d *Deployment) error {
 	return rows.Err()
 }
 
+func othersMustApprove(n int) string {
+	if n <= 1 {
+		return "another person must approve it"
+	}
+	return fmt.Sprintf("%d other people must approve it", n)
+}
+
+// ApplyDeploymentApprovalPolicy (server start): deployments and rollbacks
+// waiting for approval follow the configured count, also when it was
+// lowered after they were created; one that already has enough approvals
+// starts now.
+func (s *Store) ApplyDeploymentApprovalPolicy(ctx context.Context) error {
+	need := s.Policy.RequiredDeploymentApprovals()
+	return s.txChanged(ctx, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `SELECT deployment_id FROM deployments WHERE state='pending_approval' AND approvals_required>?`, need)
+		if err != nil {
+			return err
+		}
+		var ids []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			ids = append(ids, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, id := range ids {
+			if _, err := tx.Exec(`UPDATE deployments SET approvals_required=? WHERE deployment_id=?`, need, id); err != nil {
+				return err
+			}
+			d, err := getDeploymentCounted(ctx, tx, id)
+			if err != nil {
+				return err
+			}
+			if err := s.audit(tx, Ev{Actor: "system:scheduler", Action: "deployment.approvals_policy", ObjectType: "deployment", ObjectID: id, PackageID: d.PackageID,
+				Details: map[string]any{"approvals": len(d.Approvals), "approvals_required": need}}); err != nil {
+				return err
+			}
+			if len(d.Approvals) < need {
+				if _, err := tx.Exec(`UPDATE deployments SET state_reason=? WHERE deployment_id=?`, awaitingReason(len(d.Approvals), need), id); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := s.activateDeployment(ctx, tx, d, d.Approvals); err != nil {
+				// The package changed state since: leave it waiting (it can be cancelled).
+				if errors.Is(err, ErrConflict) {
+					continue
+				}
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 func awaitingReason(have, need int) string {
 	return fmt.Sprintf("waiting for approval (%d of %d)", have, need)
 }
@@ -53,7 +114,7 @@ func pendingFor(ctx context.Context, tx *sql.Tx, actor, role, id, verb string) (
 		return d, Errf(ErrForbidden, "only bank users and admins approve or reject deployments (your role: %s)", role)
 	}
 	if actor == d.CreatedBy {
-		return d, Errf(ErrConflict, "you created this deployment; %d other people must approve it", d.ApprovalsRequired)
+		return d, Errf(ErrConflict, "you created this deployment; %s", othersMustApprove(d.ApprovalsRequired))
 	}
 	return d, nil
 }

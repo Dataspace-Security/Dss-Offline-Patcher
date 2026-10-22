@@ -60,7 +60,7 @@ func (e *env) passwordUser(t *testing.T, email, pw, newPW string) *http.Client {
 // create → nothing installs → creator and vendor cannot approve → two bank
 // users approve → agents install. A rollback is rejected.
 func TestTwoPersonDeploymentApproval(t *testing.T) {
-	e := newEnv(t)
+	e := newEnvOpts(t, false, `"deployment_approvals": 2,`) // several approvers (default is 1)
 	e.intakeApproved(map[string]manifest.Package{"KB5009301-x64": msuPkg("KB5009301-x64", "KB5009301")}, 1)
 	a1 := e.enroll("pc-1", []string{"pilot"}, agent.SimConfig{})
 	a2 := e.enroll("pc-2", []string{"pilot"}, agent.SimConfig{})

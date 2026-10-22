@@ -428,14 +428,14 @@ revoke and exceptions to `admin`.
 | Method & path | Role | Body → Response |
 |---|---|---|
 | `POST /api/deployments` | user | Unchanged body. The deployment is created in state **`pending_approval`** (install, rollback and emergency alike) with **no targets**: nothing is dispatched until it is approved. A pending deployment counts as running for the one-running-per-package-and-operation rule (409). Raises an `info` alert `deployment_awaiting_approval`. |
-| `POST /api/deployments/{id}/approve` | user | `{reason}` (required) → `Deployment`. 403 unless the caller's role is `user` or `admin`; 409 for the creator ("you created this deployment; N other people must approve it"), for a second approval by the same person, or when the deployment is not `pending_approval`. Audited `deployment.approved` (`details`: `reason`, `approvals`, `approvals_required`, `operation`, `role`). The approval that reaches `approvals_required` activates the deployment: state `active`, `activated_at` set, `state_reason` `approved by A and B`, targets created and evaluated, audited `deployment.activated` (`details.approved_by`: both names), the alert closes itself. |
+| `POST /api/deployments/{id}/approve` | user | `{reason}` (required) → `Deployment`. 403 unless the caller's role is `user` or `admin`; 409 for the creator ("you created this deployment; another person must approve it"), for a second approval by the same person, or when the deployment is not `pending_approval`. Audited `deployment.approved` (`details`: `reason`, `approvals`, `approvals_required`, `operation`, `role`). The approval that reaches `approvals_required` activates the deployment: state `active`, `activated_at` set, `state_reason` `approved by A and B`, targets created and evaluated, audited `deployment.activated` (`details.approved_by`: both names), the alert closes itself. |
 | `POST /api/deployments/{id}/reject` | user | `{reason}` (required) → `Deployment`. Same eligibility rules as approve (not the creator: the creator cancels instead). State **`rejected`** (final), `rejected_by`, `rejected_at`, and `state_reason` = the reason. Audited `deployment.rejected`; the alert closes itself. |
 | `POST /api/deployments/{id}/cancel` | user | Also from `pending_approval` (the creator may cancel their own). |
 | `GET /api/policy` | viewer | Gains `deployment_approvals: number`. |
 
-`pmserver.json` → `deployment_approvals` (default **2**, 1–5): different people who must approve each
+`pmserver.json` → `deployment_approvals` (default **1**: creator + one approver, 1–5): different people who must approve each
 deployment and rollback. The count is fixed on the deployment when it is created
-(`approvals_required`). Deadlines are absolute times; windows and assignments only apply once the
+(`approvals_required`); when the configured count is lowered, waiting deployments follow it at the next server start. Deadlines are absolute times; windows and assignments only apply once the
 deployment is `active`.
 
 ```ts

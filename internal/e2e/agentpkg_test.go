@@ -42,8 +42,11 @@ func (e *env) deployAgent(t *testing.T, n store.NewDeployment, ada *http.Client)
 	if c := e.api("POST", "/api/deployments", tokSuper, n, &d); c != 201 {
 		t.Fatalf("super admin creates agent deployment: %d", c)
 	}
-	if c := e.api("POST", "/api/deployments/"+d.DeploymentID+"/approve", tokAdmin, map[string]string{"reason": "agent upgrade CAB"}, nil); c != 200 {
+	if c := e.api("POST", "/api/deployments/"+d.DeploymentID+"/approve", tokAdmin, map[string]string{"reason": "agent upgrade CAB"}, &d); c != 200 {
 		t.Fatalf("adam approves agent deployment: %d", c)
+	}
+	if d.State != "pending_approval" {
+		return d
 	}
 	c, b := call(t, ada, "POST", e.srv.URL+"/api/deployments/"+d.DeploymentID+"/approve", map[string]string{"reason": "agent upgrade CAB"}, true)
 	if c != 200 {
@@ -57,7 +60,7 @@ func (e *env) deployAgent(t *testing.T, n store.NewDeployment, ada *http.Client)
 // revoke or deploy them; agent deployments are created by the super admin
 // and approved by two bank admins (not users).
 func TestAgentPackagesVendorOnly(t *testing.T) {
-	e := newEnv(t)
+	e := newEnvOpts(t, false, `"deployment_approvals": 2,`) // several approvers (default is 1)
 	up := agentPkg("0.3.0")
 	cu := msuPkg("KB5009401-x64", "KB5009401")
 	pk := map[string]manifest.Package{up.PackageID: up, cu.PackageID: cu}

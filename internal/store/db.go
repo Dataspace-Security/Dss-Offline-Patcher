@@ -200,7 +200,8 @@ type Policy struct {
 	// (defaults: critical 7d, important 30d, moderate 60d, low 90d).
 	Deadlines map[string]time.Duration
 	// DeploymentApprovals: distinct approvers (bank user or admin, not the
-	// creator) a deployment or rollback needs before it starts. 0 = 2.
+	// creator) a deployment or rollback needs before it starts. 0 = 1: the
+	// creator plus one other person is the two-person rule.
 	DeploymentApprovals int
 	// RequireMFA (config require_mfa, default true): authenticator MFA is
 	// required for every local user, super admins included (bank roles
@@ -212,10 +213,11 @@ type Policy struct {
 	RequireSetupCode bool
 }
 
-// DefaultDeploymentApprovals is the approval count when none is configured.
-const DefaultDeploymentApprovals = 2
+// DefaultDeploymentApprovals is the approval count when none is configured:
+// the creator and one other person (two people) for every deployment.
+const DefaultDeploymentApprovals = 1
 
-// RequiredDeploymentApprovals is the configured count (default 2).
+// RequiredDeploymentApprovals is the configured count (default 1).
 func (p Policy) RequiredDeploymentApprovals() int {
 	if p.DeploymentApprovals > 0 {
 		return p.DeploymentApprovals

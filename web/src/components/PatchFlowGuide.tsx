@@ -11,7 +11,7 @@ type FlowStep = { name: string; text: string };
 
 /** What the signed-in role can do at each step, in plain words. */
 export function flowSteps(role: Role, approvals: number): FlowStep[] {
-  const others = `${approvals} other ${approvals === 1 ? "person's" : "people's"} approval`;
+  const others = approvals === 1 ? "another person's approval" : `${approvals} other people's approval`;
   switch (role) {
     case "viewer":
       return [
@@ -53,7 +53,7 @@ export function PatchFlowGuide() {
   const role = normalizeRole(me?.role);
   const [hidden, setHidden] = useState(() => localStorage.getItem(HIDDEN_KEY) === "1");
   const policy = useLoad(fetchPolicy, []);
-  const approvals = policy.data?.deployment_approvals ?? 2;
+  const approvals = policy.data?.deployment_approvals ?? 1;
   const setHide = (v: boolean) => {
     if (v) localStorage.setItem(HIDDEN_KEY, "1");
     else localStorage.removeItem(HIDDEN_KEY);

@@ -270,7 +270,7 @@ func TestDeploymentApprovalsConfig(t *testing.T) {
 		extra string
 		ok    bool
 		want  int
-	}{{"", true, 2}, {`"deployment_approvals": 1,`, true, 1}, {`"deployment_approvals": 0,`, false, 0}, {`"deployment_approvals": 6,`, false, 0}} {
+	}{{"", true, 1}, {`"deployment_approvals": 2,`, true, 2}, {`"deployment_approvals": 0,`, false, 0}, {`"deployment_approvals": 6,`, false, 0}} {
 		cfg, err := LoadConfig(writeConfig(t, t.TempDir(), c.extra))
 		if (err == nil) != c.ok || (c.ok && *cfg.DeploymentApprovals != c.want) {
 			t.Errorf("%q: %v", c.extra, err)

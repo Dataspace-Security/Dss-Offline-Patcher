@@ -13,7 +13,7 @@ import (
 // One person cannot pass the two-person rule through user management, and
 // an approved deployment cannot be widened by editing endpoint groups.
 func TestApprovalFreshAccountsAndFixedScope(t *testing.T) {
-	e := newEnv(t)
+	e := newEnvOpts(t, false, `"deployment_approvals": 2,`) // several approvers (default is 1)
 	e.intakeApproved(map[string]manifest.Package{"KB5009311-x64": msuPkg("KB5009311-x64", "KB5009311")}, 1)
 	a1 := e.enroll("pc-1", []string{"pilot"}, agent.SimConfig{})
 	a2 := e.enroll("pc-2", []string{"branch"}, agent.SimConfig{})

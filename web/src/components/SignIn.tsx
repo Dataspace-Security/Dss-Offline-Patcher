@@ -66,7 +66,7 @@ export function SignIn({ onLogin, ssoError }: { onLogin: (me: Me) => void; ssoEr
 
 const TRUST_POINTS: { icon: ReactNode; title: string; text: string }[] = [
   { icon: <IconShieldCheck size={20} />, title: "Signed, verified patches", text: "Only packages that pass signature and hash checks reach your machines." },
-  { icon: <IconUsers size={20} />, title: "2-person approval for every rollout", text: "One person prepares a deployment or rollback; two other people approve it before anything installs." },
+  { icon: <IconUsers size={20} />, title: "2-person approval for every rollout", text: "One person prepares a deployment or rollback; a second person approves it before anything installs." },
   { icon: <IconOffline size={20} />, title: "Works fully offline", text: "Endpoints talk only to this server. No internet, no Windows Update fallback." },
 ];
 

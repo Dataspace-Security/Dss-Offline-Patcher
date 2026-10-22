@@ -25,6 +25,8 @@ func createApproved(s *Store, ctx context.Context, actor string, n NewDeployment
 func approvalFixture(t *testing.T) (*Store, context.Context) {
 	t.Helper()
 	s := openTest(t)
+	// These tests cover several approvers; the default (1) is tested below.
+	s.Policy.DeploymentApprovals = 2
 	addPackage(t, s, Package{PackageID: "Acme-3.0", Kind: "msi", Version: "3.0.0", PackageName: "Acme App", ProductCode: "{A}"})
 	addEndpoint(t, s, "e-old", []string{"pilot"}, acmeOld)
 	return s, context.Background()
@@ -223,6 +225,61 @@ func TestEmergencyDeploymentAlsoPending(t *testing.T) {
 	d, err := s.CreateDeployment(ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "now", Rings: allRing, Emergency: true, Justification: "exploited"})
 	if err != nil || d.State != "pending_approval" {
 		t.Fatalf("emergency: %v %s", err, d.State)
+	}
+}
+
+// Default two-person rule: the creator plus one other person.
+func TestDeploymentDefaultCreatorPlusOne(t *testing.T) {
+	s, ctx := approvalFixture(t)
+	s.Policy.DeploymentApprovals = 0
+	d, err := s.CreateDeployment(ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: allRing, MaxFailurePct: 50})
+	if err != nil || d.ApprovalsRequired != 1 || d.State != "pending_approval" {
+		t.Fatalf("%v %+v", err, d)
+	}
+	if _, err := s.ApproveDeployment(ctx, "user:otto", RoleUser, d.DeploymentID, "mine"); !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "another person must approve") {
+		t.Fatalf("creator approving: %v", err)
+	}
+	if d, err = s.ApproveDeployment(ctx, "user:alice", RoleUser, d.DeploymentID, "ok"); err != nil || d.State != "active" {
+		t.Fatalf("one other approver: %v %s", err, d.State)
+	}
+}
+
+// Lowering deployment_approvals: waiting deployments follow it at start;
+// one that already has enough approvals starts.
+func TestApplyDeploymentApprovalPolicy(t *testing.T) {
+	s, ctx := approvalFixture(t)
+	mkPending := func() Deployment {
+		d, err := s.CreateDeployment(ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: allRing, MaxFailurePct: 50})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	a := mkPending()
+	if _, err := s.ApproveDeployment(ctx, "user:alice", RoleUser, a.DeploymentID, "ok"); err != nil {
+		t.Fatal(err)
+	}
+	s.Policy.DeploymentApprovals = 1
+	if err := s.ApplyDeploymentApprovalPolicy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetDeployment(ctx, a.DeploymentID)
+	if err != nil || got.State != "active" || got.ApprovalsRequired != 1 {
+		t.Fatalf("one approval already, policy now 1: %v %s %d", err, got.State, got.ApprovalsRequired)
+	}
+	// Nothing approved yet: stays waiting, now 0 of 1.
+	if _, err := s.DeploymentAction(ctx, "user:otto", a.DeploymentID, "cancel", "done"); err != nil {
+		t.Fatal(err)
+	}
+	s.Policy.DeploymentApprovals = 2
+	b := mkPending()
+	s.Policy.DeploymentApprovals = 1
+	if err := s.ApplyDeploymentApprovalPolicy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.GetDeployment(ctx, b.DeploymentID)
+	if err != nil || got.State != "pending_approval" || got.ApprovalsRequired != 1 || got.StateReason != "waiting for approval (0 of 1)" {
+		t.Fatalf("no approvals, policy now 1: %v %+v", err, got)
 	}
 }
 

@@ -5,7 +5,7 @@ import type { Deployment, Policy } from "../types";
 import { fmtTime } from "../util";
 import { Pill, ReasonModal, Time } from "./ui";
 
-/** "Waiting for approval (1 of 2)". */
+/** "Waiting for approval (0 of 1)". */
 export function waitingText(d: Deployment, policy?: Policy | null): string {
   const n = (d.approvals ?? []).length;
   return `Waiting for approval (${n} of ${deploymentApprovalsRequired(policy, d)})`;

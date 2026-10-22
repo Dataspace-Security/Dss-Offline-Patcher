@@ -41,7 +41,7 @@ single-server deployment. Then:
 4. **Endpoints → Create enrollment token** → run the PowerShell line on each PC as Administrator
    (§5.1). Each PC needs TCP 8443 to the server's IP. Agents connect by that IP
    (`https://<server IP>:8443`), never by the server name: no DNS or hosts-file entry on PCs.
-5. **Patches → Needed → Import**, **Catalog → Approve**, **Patch this** (2 approvals).
+5. **Patches → Needed → Import**, **Catalog → Approve**, **Patch this** (approved by a second person).
 
 A two-machine layout (`--role server` in the isolated zone, `--role acquisition` in the connected
 zone, one-way transfer between them) is stricter and is described in the README and runbooks 01/02.
@@ -212,7 +212,7 @@ old name are moved to `user` automatically.
 | Role | Can do (in addition to the roles below it) |
 |---|---|
 | `viewer` | Read: Overview, Patches → Needed and Catalog, Deployments, Windows, Exceptions, Endpoints, Agent setup (and download staged agent files), Reports (incl. CSV and PDF, the auditor report and evidence ZIP), Alerts, Audit (incl. verify, lifecycle export and PDF). No action buttons. **Not Imports** (bundles, transfer reconciliation, acquisition requests: user and up) and **not the Library** (vendor super admin only). |
-| `user` (bank) | Patches → Imports; import what the machines need (not from the Library: the vendor's); create enrollment tokens; edit endpoint groups/site/owner/criticality; retire endpoints; export acquisition requests; approve and reject packages; create deployments and rollbacks (they wait for two approvals); **approve or reject other people's deployments and rollbacks** (not agent versions); pause, resume, cancel, advance and retry deployments; create and delete maintenance windows; acknowledge alerts. |
+| `user` (bank) | Patches → Imports; import what the machines need (not from the Library: the vendor's); create enrollment tokens; edit endpoint groups/site/owner/criticality; retire endpoints; export acquisition requests; approve and reject packages; create deployments and rollbacks (they wait for another person's approval); **approve or reject other people's deployments and rollbacks** (not agent versions); pause, resume, cancel, advance and retry deployments; create and delete maintenance windows; acknowledge alerts. |
 | `admin` (bank) | Users page: create, disable / enable and delete local users, reset passwords and MFA, change roles of Users, Viewers and Admins; create and revoke exceptions; revoke packages; **approve or reject agent-version deployments** (only bank admins can). |
 | `super_admin` (vendor) | Everything, including super admin accounts, the **Library** and **agent versions** (approve, reject, revoke, deploy and roll back packages of kind `agent`). Not a deployment approver, agent-version deployments included. |
 
@@ -441,14 +441,14 @@ window allows automatic restarts (restart the machine or add a window)"), and th
 this" defaults to `never` in that case. The console shows `pending_reboot` as "Restart needed".
 
 **Two-person approval of deployments and rollbacks.** Every deployment and rollback (emergency too)
-starts as **Waiting for approval (0 of 2)**: no machine gets anything yet. Two **different** bank
-Users or Admins, neither of them the creator, open it and **Approve** with a reason (the change
-number). The second approval starts it (audited `deployment.approved` twice and
-`deployment.activated` with both names). **Reject** (with a reason) ends it for good; the creator can
+starts as **Waiting for approval (0 of 1)**: no machine gets anything yet. The two people are the
+creator and one **other** bank User or Admin, who opens it and **Approves** with a reason (the change
+number). That approval starts it (audited `deployment.approved` and `deployment.activated`). **Reject** (with a reason) ends it for good; the creator can
 **Cancel** it instead. The super admin (vendor) and Viewers cannot approve. While it waits, it counts
 as running: a second deployment of the same package and operation is refused until it is approved
-and finished, rejected or cancelled. `deployment_approvals` in `pmserver.json` sets the count
-(default 2, 1–5; an isolated single-person lab may use 1). An `info` alert
+and finished, rejected or cancelled. `deployment_approvals` in `pmserver.json` sets how many
+people besides the creator must approve (default 1, 1–5). When the count is lowered, deployments
+already waiting follow it at the next server start (one that already has enough approvals starts). An `info` alert
 `deployment_awaiting_approval` is open while it waits.
 
 ### 3.4 Advancing, pausing, resuming, cancelling
@@ -729,7 +729,7 @@ The full commands are in [runbooks/02-acquisition-zone-setup-and-monthly-run.md]
 | 5 | Isolated | user | Intake page: bundle `validated`, every check green. Transfer reconciliation: receipt matched. |
 | 6 | Isolated | user(s) | Catalog: review and approve each package with the change reference. Critical patches may need two approvals by different people. |
 | 7 | Isolated | user (not a package approver, if SoD is on) | Create the deployment: rings `pilot` → `broad`, deadline from your policy, `max_failure_pct`, `max_retries`, reboot policy, health checks for the business services on pilot machines. |
-| 7a | Isolated | two other bank users / admins | Approve the deployment with the change reference (two-person rule; nothing installs before). |
+| 7a | Isolated | another bank user / admin | Approve the deployment with the change reference (two-person rule: creator + approver; nothing installs before). |
 | 8 | Isolated | user | Watch the pilot ring. Fix failures. Get sign-off from pilot owners. |
 | 9 | Isolated | user | Advance to `broad` (console: **Start next stage**). Watch for auto-pause, `install_failed`, `health_check_failed`. |
 | 10 | Isolated | user / support | Work the remainder: offline endpoints, pending reboots, failures, exceptions. |
@@ -1188,7 +1188,7 @@ Notes:
 | Endpoint `awaiting_checkin` for a long time | Agent installed but not running, or cannot reach the server | As for `offline` (§3.6). After 24 h it is shown `offline`. |
 | Approve returns 409 `already approved this package; a different approver is required` | Two-person rule | A different bank user approves. |
 | Create deployment returns 409 `separation of duties` | You approved the package | Another user creates the deployment. |
-| Approve deployment returns 409 `you created this deployment` / `you already approved` | Two-person rule for deployments | Two other bank users or admins approve it. |
+| Approve deployment returns 409 `you created this deployment` / `you already approved` | Two-person rule for deployments | Another bank user or admin approves it. |
 | Approve deployment returns 403 | Your role is viewer or super_admin (vendor); or, for an agent version (`agent version deployments are approved by bank admins`), your role is `user` | A bank user or admin approves it; an agent-version deployment needs bank admins. |
 | Approve / deploy an agent version returns 403 `agent versions are managed by the vendor (super admin)` | Agent packages (`offpatch-agent-*`) are the vendor's | The super admin approves and deploys them. |
 | Every call returns 403 `mfa_enrollment_required` | First sign-in of a bank user without an authenticator | Enrol the authenticator app (the console shows the QR code). |

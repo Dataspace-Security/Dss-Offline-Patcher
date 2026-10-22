@@ -93,9 +93,9 @@ export function isBankApprover(me: Me | null): boolean {
   return !!me && (me.role === "user" || me.role === "admin");
 }
 
-/** Approvals every deployment / rollback needs before it starts (policy, default 2). */
+/** Approvals every deployment / rollback needs before it starts besides its creator (policy, default 1). */
 export function deploymentApprovalsRequired(policy: Policy | null | undefined, d?: Pick<Deployment, "approvals_required"> | null): number {
-  return d?.approvals_required || policy?.deployment_approvals || 2;
+  return d?.approvals_required || policy?.deployment_approvals || 1;
 }
 
 export type DeploymentApprovalStatus = {
@@ -116,7 +116,7 @@ export function deploymentApprovalStatus(d: Deployment, me: Me | null, policy?: 
   const pending = d.state === "pending_approval";
   let whyNot = "";
   if (!pending) whyNot = "It is not waiting for approval.";
-  else if (mine) whyNot = `You created this — ${required} other ${required === 1 ? "person" : "people"} must approve.`;
+  else if (mine) whyNot = required === 1 ? "You created this. Another person must approve it." : `You created this. ${required} other people must approve it.`;
   else if (iApproved) whyNot = "You already approved this. Waiting for someone else.";
   else if (me?.role === "super_admin") whyNot = "Only the bank's Admins and Users approve deployments.";
   else if (!isBankApprover(me)) whyNot = "Only Admins and Users can approve deployments.";
@@ -128,7 +128,9 @@ export function needsApprovalsText(n: number): string {
   return `Needs ${n} approval${n === 1 ? "" : "s"} before it starts`;
 }
 
-/** "2 other people (Users or Admins, not you) must approve it." */
+/** "Another person (a User or Admin, not you) must approve it." */
 export function othersMustApprove(n: number): string {
-  return `${n} other ${n === 1 ? "person" : "people"} (Users or Admins, not you) must approve it.`;
+  return n === 1
+    ? "Another person (a User or Admin, not you) must approve it."
+    : `${n} other people (Users or Admins, not you) must approve it.`;
 }
