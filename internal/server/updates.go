@@ -449,7 +449,7 @@ func (s *Server) endpointUpdates(w http.ResponseWriter, r *http.Request) {
 				cat = &l
 			}
 			u.InstalledVersion = u.installed
-			out.Apps = append(out.Apps, appUpdateView{AppUpdate: u.AppUpdate, Catalog: cat, Requested: refFor(refs, "app", u.AppID),
+			out.Apps = append(out.Apps, appUpdateView{AppUpdate: u.AppUpdate, Catalog: cat, Requested: liveRef(refFor(refs, "app", u.AppID), imp),
 				Importable: imp, ImportableReason: why})
 		}
 	}
@@ -844,7 +844,7 @@ func (s *Server) fleetUpdates(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]fleetUpdateView, 0, len(updates))
 	for _, u := range updates {
-		out = append(out, fleetUpdateView{fleetUpdate: u, Requested: refFor(refs, u.Kind, u.Key)})
+		out = append(out, fleetUpdateView{fleetUpdate: u, Requested: liveRef(refFor(refs, u.Kind, u.Key), u.Importable)})
 	}
 	writeJSON(w, 200, struct {
 		Intel   *intake.IntelSummary `json:"intel"`
@@ -857,6 +857,17 @@ func refFor(refs map[string]store.AcqRequestRef, kind, key string) *store.AcqReq
 		return &r
 	}
 	return nil
+}
+
+// liveRef drops an old "can't import" (unsupported) result once the current
+// import rule says the app can be imported: it was reported by an older
+// acquisition (before EXE, zip, MSIX or portable support, or for an older
+// version), so the row offers Import again instead of a stale refusal.
+func liveRef(r *store.AcqRequestRef, importable string) *store.AcqRequestRef {
+	if r != nil && r.Status == "unsupported" && importable == intel.ImportableYes {
+		return nil
+	}
+	return r
 }
 
 func (s *Server) intelStatus(w http.ResponseWriter, r *http.Request) {

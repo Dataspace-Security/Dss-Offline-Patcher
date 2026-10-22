@@ -268,7 +268,7 @@ func (s *Server) fleetStatus(ctx context.Context) (fleetStatus, error) {
 	out := fleetStatus{Intel: sum, Rows: make([]fleetStatusRow, 0, len(snap.all))}
 	for _, u := range snap.all {
 		cat := u.statusCatalog()
-		row := fleetStatusRow{Kind: u.Kind, Key: u.Key, Name: u.Name, Latest: u.Latest, Catalog: cat, Requested: refFor(refs, u.Kind, u.Key),
+		row := fleetStatusRow{Kind: u.Kind, Key: u.Key, Name: u.Name, Latest: u.Latest, Catalog: cat, Requested: liveRef(refFor(refs, u.Kind, u.Key), u.Importable),
 			Importable: u.Importable, ImportableReason: u.ImportableReason, Uncovered: u.Uncovered, UncoveredBuilds: u.UncoveredBuilds,
 			Endpoints: make([]fleetStatusEndpoint, 0, len(u.Endpoints)+len(u.current))}
 		add := func(n fleetNeed, outdated bool) {

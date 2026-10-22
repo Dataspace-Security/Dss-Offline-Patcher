@@ -257,7 +257,7 @@ func (o libOverlay) row(e *libEntry) (libraryItem, *fleetUpdate) {
 	} else if it.Catalog == nil && o.snap != nil && o.snap.cat != nil {
 		it.Catalog = o.snap.cat.forOS(it.ID)
 	}
-	it.Requested = refFor(o.refs, it.Kind, it.ID)
+	it.Requested = liveRef(refFor(o.refs, it.Kind, it.ID), it.Importable)
 	return it, u
 }
 
