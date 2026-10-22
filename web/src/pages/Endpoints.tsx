@@ -56,6 +56,8 @@ export default function Endpoints() {
   const groupCounts: Record<string, number> = {};
   for (const e of live) for (const g of e.groups ?? []) groupCounts[g] = (groupCounts[g] ?? 0) + 1;
   const knownSites = [...new Set((data ?? []).map((e) => e.site).filter(Boolean))].sort();
+  const siteCounts: Record<string, number> = {};
+  for (const e of live) if (e.site) siteCounts[e.site] = (siteCounts[e.site] ?? 0) + 1;
 
   const counts = useMemo(() => {
     const c: Record<string, number> = {};
@@ -190,7 +192,7 @@ export default function Endpoints() {
           </tbody>
         </table>
       )}
-      {showToken && canEdit && <EnrollmentModal knownGroups={knownGroups} groupCounts={groupCounts} knownSites={knownSites} onClose={() => { setShowToken(false); if (sp.get("enroll")) setSp({}); }} />}
+      {showToken && canEdit && <EnrollmentModal knownGroups={knownGroups} groupCounts={groupCounts} knownSites={knownSites} siteCounts={siteCounts} onClose={() => { setShowToken(false); if (sp.get("enroll")) setSp({}); }} />}
       {bulkOpen && (
         <BulkGroupsModal
           endpoints={visibleSelected}
@@ -303,8 +305,8 @@ function BulkGroupsModal({ endpoints, onClose, onDone }: { endpoints: Endpoint[]
   );
 }
 
-function EnrollmentModal({ onClose, knownGroups, groupCounts, knownSites }: {
-  onClose: () => void; knownGroups: string[]; groupCounts: Record<string, number>; knownSites: string[];
+function EnrollmentModal({ onClose, knownGroups, groupCounts, knownSites, siteCounts }: {
+  onClose: () => void; knownGroups: string[]; groupCounts: Record<string, number>; knownSites: string[]; siteCounts: Record<string, number>;
 }) {
   const [groups, setGroups] = useState("");
   const [site, setSite] = useState("");
@@ -381,6 +383,26 @@ function EnrollmentModal({ onClose, knownGroups, groupCounts, knownSites }: {
             <span>Site</span>
             <input value={site} onChange={(e) => setSite(e.target.value)} list="known-sites" placeholder={knownSites[0] ?? "head-office"} />
             <datalist id="known-sites">{knownSites.map((s) => <option key={s} value={s} />)}</datalist>
+            <small className="hint">
+              One site per machine. Pick an existing site to put it with those machines; a new name starts a new site.
+            </small>
+            {knownSites.length > 0 && (
+              <select className="known-select" value={knownSites.includes(site.trim()) ? site.trim() : ""} aria-label="Pick an existing site"
+                      onChange={(e) => setSite(e.target.value)}>
+                <option value="">Pick an existing site…</option>
+                {knownSites.map((s) => (
+                  <option key={s} value={s}>{s} ({siteCounts[s] ?? 0} machine{(siteCounts[s] ?? 0) === 1 ? "" : "s"})</option>
+                ))}
+              </select>
+            )}
+            {site.trim() && (
+              <div className="known-names small">
+                <span className="chip chip-on">
+                  {site.trim()}{!knownSites.includes(site.trim()) && <em className="muted"> new</em>}
+                  <button type="button" className="btn-link" aria-label={`Clear site ${site.trim()}`} onClick={() => setSite("")}>×</button>
+                </span>
+              </div>
+            )}
             {nearMisses(site.trim() ? [site.trim()] : [], knownSites).map(([typed, known]) => (
               <small key={typed} className="hint text-amber">“{typed}” is a new site. Did you mean the existing “{known}”?</small>
             ))}

@@ -204,6 +204,13 @@ function EditForm({ e, canEdit, onSaved }: { e: Endpoint; canEdit: boolean; onSa
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [dirty, setDirty] = useState(false);
+  // Names already in use, so this machine can join an existing group or site.
+  const { data: fleet } = useLoad(() => api.get<Endpoint[]>("/api/endpoints"), []);
+  const live = (fleet ?? []).filter((x) => x.status !== "retired");
+  const knownGroups = [...new Set((fleet ?? []).flatMap((x) => x.groups ?? []))].filter((g) => g !== "all").sort();
+  const knownSites = [...new Set((fleet ?? []).map((x) => x.site).filter(Boolean))].sort();
+  const count = (pred: (x: Endpoint) => boolean) => live.filter(pred).length;
+  const machines = (n: number) => `${n} machine${n === 1 ? "" : "s"}`;
 
   // Keep the form in sync with polled data unless the user is editing.
   useEffect(() => {
@@ -239,11 +246,29 @@ function EditForm({ e, canEdit, onSaved }: { e: Endpoint; canEdit: boolean; onSa
       <label className="field">
         <span>Groups <em className="muted">comma-separated</em></span>
         <input value={groups} disabled={!canEdit} onChange={(ev) => mark(setGroups)(ev.target.value)} />
+        {canEdit && knownGroups.some((g) => !splitList(groups).includes(g)) && (
+          <select className="known-select" value="" aria-label="Add an existing group"
+                  onChange={(ev) => ev.target.value && mark(setGroups)([...splitList(groups), ev.target.value].join(", "))}>
+            <option value="">Add an existing group…</option>
+            {knownGroups.filter((g) => !splitList(groups).includes(g)).map((g) => (
+              <option key={g} value={g}>{g} ({machines(count((x) => (x.groups ?? []).includes(g)))})</option>
+            ))}
+          </select>
+        )}
       </label>
       <div className="form-grid">
         <label className="field">
           <span>Site</span>
           <input value={site} disabled={!canEdit} onChange={(ev) => mark(setSite)(ev.target.value)} />
+          {canEdit && knownSites.length > 0 && (
+            <select className="known-select" value={knownSites.includes(site.trim()) ? site.trim() : ""} aria-label="Pick an existing site"
+                    onChange={(ev) => mark(setSite)(ev.target.value)}>
+              <option value="">Pick an existing site…</option>
+              {knownSites.map((st) => (
+                <option key={st} value={st}>{st} ({machines(count((x) => x.site === st))})</option>
+              ))}
+            </select>
+          )}
         </label>
         <label className="field">
           <span>Owner</span>
