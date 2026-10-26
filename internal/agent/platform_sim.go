@@ -174,7 +174,7 @@ func (s *Sim) Install(ctx context.Context, p manifest.Package, file string) Resu
 		}
 		// Like the EXE installer: an older version's ARP entry is replaced.
 		st.Products = slices.DeleteFunc(st.Products, func(it store.InventoryItem) bool { return exeAppMatch(p, it) })
-		it := store.InventoryItem{Kind: "product", ID: id, Name: p.Exe.Detect.DisplayName, Version: exeWantVersion(p)}
+		it := store.InventoryItem{Kind: "product", ID: id, Name: exeDetect(p).DisplayName, Version: exeWantVersion(p)}
 		if perUserExe(p) {
 			it.Scope = "user"
 		}
@@ -356,13 +356,11 @@ func simID(p manifest.Package) string {
 	case "msi":
 		return p.ProductCode
 	case manifest.KindExe:
-		if p.Exe == nil {
-			return p.PackageName
+		d := exeDetect(p)
+		if d.ProductCode != "" {
+			return d.ProductCode
 		}
-		if p.Exe.Detect.ProductCode != "" {
-			return p.Exe.Detect.ProductCode
-		}
-		return p.Exe.Detect.DisplayName
+		return d.DisplayName
 	case manifest.KindPortable:
 		if p.Portable != nil {
 			return p.Portable.ARPKey

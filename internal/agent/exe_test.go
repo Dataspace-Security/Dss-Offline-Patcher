@@ -414,6 +414,15 @@ func TestChooseARPEntry(t *testing.T) {
 	if _, ok := chooseARPEntry(p, entries); ok {
 		t.Fatal("missing app found")
 	}
+	// Regression: chooseARPEntry used to read p.Exe.Detect raw instead of
+	// through exeDetect, so a package relying on the package_name fallback
+	// (detect.display_name empty) could never find its ARP entry — a
+	// rollback would silently report "not installed; nothing to remove"
+	// for an app exeAppMatch itself already recognises as present.
+	p.Exe.Detect = manifest.ExeDetect{} // no display_name; p.PackageName == "Example App"
+	if e, ok := chooseARPEntry(p, entries); !ok || e.Key != "Example App 2_is1" {
+		t.Fatalf("package_name fallback: %+v %v", e, ok)
+	}
 }
 
 func TestNewestLogAndBurnTail(t *testing.T) {

@@ -63,6 +63,24 @@ type ExeDetect struct {
 	Publisher      string `json:"publisher,omitempty"`
 }
 
+// DetectFor is an EXE package's detection block, with packageName standing
+// in for the display name whenever the block doesn't give one — not only
+// when exe is nil, but also when it's present with display_name left blank.
+// The single source for this fallback rule: internal/store, internal/agent
+// and internal/server/updates.go each need it (packages of the same shape
+// but different Go types) and used to re-implement it independently, which
+// let two of the three copies drift out of sync with the third.
+func DetectFor(exe *ExeInstall, packageName string) ExeDetect {
+	if exe == nil {
+		return ExeDetect{DisplayName: packageName}
+	}
+	d := exe.Detect
+	if strings.TrimSpace(d.DisplayName) == "" {
+		d.DisplayName = packageName
+	}
+	return d
+}
+
 // ExeUninstall: QuietUninstall is true only when the app is known to register
 // a QuietUninstallString; otherwise rollback is unsupported.
 type ExeUninstall struct {

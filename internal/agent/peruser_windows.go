@@ -137,7 +137,7 @@ func (w *Windows) installPerUser(ctx context.Context, p manifest.Package, file s
 			r = *res
 		}
 		if (r.State == "installed" || r.State == "pending_reboot") && !userHasVersion(p, userUninstallItems(s.sidS)) {
-			r = Result{State: "failed", ExitCode: code, Detail: fmt.Sprintf("the installer finished (exit code %d) but the user's Apps & features shows no %s %s", code, p.Exe.Detect.DisplayName, exeWantVersion(p))}
+			r = Result{State: "failed", ExitCode: code, Detail: fmt.Sprintf("the installer finished (exit code %d) but the user's Apps & features shows no %s %s", code, exeDetect(p).DisplayName, exeWantVersion(p))}
 		}
 		runs = append(runs, userRun{User: s.name, Result: r})
 	}

@@ -16,6 +16,7 @@ import (
 	"offpatch/internal/acqrequest"
 	"offpatch/internal/intake"
 	"offpatch/internal/intel"
+	"offpatch/internal/manifest"
 	"offpatch/internal/store"
 )
 
@@ -247,11 +248,13 @@ func newCatalogIndex(pkgs []store.Package, st *store.Store) *catalogIndex {
 		if p.ProductCode != "" {
 			keep(ci.byCode, strings.ToLower(p.ProductCode), p)
 		}
-		// EXE packages are found in Apps & features by their detection name,
-		// portable apps by the name of the entry the agent writes.
+		// EXE packages are found in Apps & features by their detection name
+		// (manifest.DetectFor: the one shared fallback rule internal/store
+		// and internal/agent also use), portable apps by the name of the
+		// entry the agent writes.
 		name := p.PackageName
-		if p.Kind == "exe" && p.Exe != nil && strings.TrimSpace(p.Exe.Detect.DisplayName) != "" {
-			name = p.Exe.Detect.DisplayName
+		if p.Kind == "exe" {
+			name = manifest.DetectFor(p.Exe, p.PackageName).DisplayName
 		}
 		if p.Kind == "portable" && p.Portable != nil && strings.TrimSpace(p.Portable.DisplayName) != "" {
 			name = p.Portable.DisplayName

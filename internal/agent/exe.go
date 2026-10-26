@@ -322,22 +322,11 @@ func archTag(name string) string {
 	return strings.ToLower(m)
 }
 
-// exeDetect is the package's detection block; package_name stands in for
-// the display name whenever the block doesn't give one — not only when the
-// whole block is missing, but also when it's present with an empty
-// display_name — matching the server's internal/store/exe.go exeDetect. If
-// this diverged, the agent could fail to recognise an already-installed app
-// (and unnecessarily reinstall it) purely because detect.display_name was
-// left blank while package_name was set.
+// exeDetect is the package's detection block, via the one shared fallback
+// rule (manifest.DetectFor) internal/store and internal/server/updates.go
+// also use, so none of the three can drift out of sync with the others.
 func exeDetect(p manifest.Package) manifest.ExeDetect {
-	if p.Exe == nil {
-		return manifest.ExeDetect{DisplayName: p.PackageName}
-	}
-	d := p.Exe.Detect
-	if strings.TrimSpace(d.DisplayName) == "" {
-		d.DisplayName = p.PackageName
-	}
-	return d
+	return manifest.DetectFor(p.Exe, p.PackageName)
 }
 
 // exeAppMatch reports whether an inventory item is the app an EXE package
@@ -349,7 +338,7 @@ func exeDetect(p manifest.Package) manifest.ExeDetect {
 // A machine-wide package counts per-machine entries only, a per-user
 // installer (exe.scope user) per-user entries only.
 func exeAppMatch(p manifest.Package, it store.InventoryItem) bool {
-	if it.Kind != "product" || (it.Scope == "user") != perUserExe(p) {
+	if p.Kind != manifest.KindExe || it.Kind != "product" || (it.Scope == "user") != perUserExe(p) {
 		return false
 	}
 	d := exeDetect(p)
@@ -504,7 +493,7 @@ func chooseARPEntry(p manifest.Package, entries []arpEntry) (arpEntry, bool) {
 	if p.Exe == nil {
 		return arpEntry{}, false
 	}
-	d := p.Exe.Detect
+	d := exeDetect(p)
 	if d.ProductCode != "" {
 		for _, e := range entries {
 			if strings.EqualFold(e.Key, d.ProductCode) {

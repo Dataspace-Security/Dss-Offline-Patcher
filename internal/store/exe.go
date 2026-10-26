@@ -63,23 +63,11 @@ func exeAppMatch(p Package, it InventoryItem) bool {
 	return SameAppName(it.Name, d.DisplayName) && itemArchCompatible(it, d.DisplayName)
 }
 
-// exeDetect is the package's detection block; package_name stands in for
-// the display name whenever the block doesn't give one — not only when the
-// whole block is missing, but also when it's present with an empty
-// display_name — matching the catalog-link index in
-// internal/server/updates.go, which already falls back this way. Letting
-// this diverge silently excludes the package from every inventory match
-// (exeAppMatch), so the fleet's "needed" count and verification never see
-// it as installed even when it genuinely is.
+// exeDetect is the package's detection block, via the one shared fallback
+// rule (manifest.DetectFor) internal/agent and internal/server/updates.go
+// also use, so none of the three can drift out of sync with the others.
 func exeDetect(p Package) manifest.ExeDetect {
-	if p.Exe == nil {
-		return manifest.ExeDetect{DisplayName: p.PackageName}
-	}
-	d := p.Exe.Detect
-	if strings.TrimSpace(d.DisplayName) == "" {
-		d.DisplayName = p.PackageName
-	}
-	return d
+	return manifest.DetectFor(p.Exe, p.PackageName)
 }
 
 // exeWantVersion: the DisplayVersion the app shows once installed.
