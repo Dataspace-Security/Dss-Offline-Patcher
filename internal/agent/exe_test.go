@@ -361,6 +361,16 @@ func TestExeInventoryMatching(t *testing.T) {
 	if !exeUpToDate(p, item("k", "Example App", "2.1.0")) || exeUpToDate(p, item("k", "Example App", "2.0")) {
 		t.Error("package version fallback")
 	}
+	// Neither detect.display_version nor the package version known: nothing
+	// proves presence, so the installer must run — matching the server's
+	// exePresent (internal/store/exe.go), which also requires want != "".
+	// Regression: exeUpToDate used to return true here ("want == "" ||"),
+	// which let the agent report "installed" without installing while the
+	// server could never verify it, leaving the target stuck forever.
+	p.Version = ""
+	if exeUpToDate(p, item("k", "Example App", "99.0")) {
+		t.Error("empty want must never be proof of presence, whatever the inventory version")
+	}
 }
 
 func TestChooseARPEntry(t *testing.T) {

@@ -382,12 +382,16 @@ func exeWantVersion(p manifest.Package) string {
 
 // exeUpToDate: the app is installed at (at least) the package's version. An
 // entry without a DisplayVersion cannot prove that, so the installer runs.
+// Mirrors the server's exePresent (internal/store/exe.go) exactly: if this
+// diverged, the agent could skip installing (and so never attempt it) for a
+// package the server can never independently verify as present, leaving the
+// target stuck "installed · confirming by inventory" forever.
 func exeUpToDate(p manifest.Package, it store.InventoryItem) bool {
 	if !exeAppMatch(p, it) {
 		return false
 	}
 	want := exeWantVersion(p)
-	return want == "" || (it.Version != "" && store.VersionAtLeast(it.Version, want))
+	return want != "" && it.Version != "" && store.VersionAtLeast(it.Version, want)
 }
 
 // newestLog returns the most recently written *.log directly in dir ("" if
