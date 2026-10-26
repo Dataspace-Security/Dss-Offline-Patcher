@@ -8,11 +8,11 @@
 // Run it on the machine/volume where pm.db actually lives (it never talks
 // to the network):
 //
-//	go run ./scripts/audit-exe-packages.go /var/lib/offpatch-server/pm.db
+//	go run ./scripts/audit-exe-packages /var/lib/offpatch-server/pm.db
 //
 // or, from a built binary carried to the server:
 //
-//	go build -o audit-exe-packages ./scripts/audit-exe-packages.go
+//	go build -o audit-exe-packages ./scripts/audit-exe-packages
 //	./audit-exe-packages /var/lib/offpatch-server/pm.db
 package main
 
