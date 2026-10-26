@@ -38,8 +38,34 @@ func withMSILog(r Result, logPath string) Result {
 	if tail == "" {
 		return r
 	}
+	if reason := knownConflictReason(r.ExitCode, tail); reason != "" {
+		r.Detail = reason
+	}
 	r.Detail += msiLogHeader + tail
 	return r
+}
+
+// knownConflicts recognises a handful of LaunchConditions failures that the
+// generic "installer exit code N" detail leaves the operator to dig for in
+// the log tail themselves, and states the real blocker up front instead.
+// Table-driven like classifyInstall's exit-code mapping (exitcodes.go): the
+// next known conflict is a row, not a new function.
+var knownConflicts = []struct {
+	exitCode       uint32
+	substr, reason string
+}{
+	{1603, "already installed on this system using a standalone executable installer",
+		"blocked: already installed via a different (non-MSI) installer — uninstall it manually, then retry"},
+}
+
+func knownConflictReason(exitCode int, tail string) string {
+	u := uint32(exitCode)
+	for _, c := range knownConflicts {
+		if u == c.exitCode && strings.Contains(tail, c.substr) {
+			return c.reason
+		}
+	}
+	return ""
 }
 
 // msiLogTail reads the end of a verbose msiexec log (UTF-16LE or ANSI/UTF-8)

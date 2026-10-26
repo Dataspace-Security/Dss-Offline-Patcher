@@ -26,10 +26,10 @@ func TestInstallDirFrom(t *testing.T) {
 
 func TestServiceExe(t *testing.T) {
 	for in, want := range map[string]string{
-		`"C:\Program Files\Acme\svc.exe" -k run`: `C:\Program Files\Acme\svc.exe`,
-		`C:\Acme\svc.exe /service`:               `C:\Acme\svc.exe`,
+		`"C:\Program Files\Acme\svc.exe" -k run`:     `C:\Program Files\Acme\svc.exe`,
+		`C:\Acme\svc.exe /service`:                   `C:\Acme\svc.exe`,
 		`C:\WINDOWS\system32\svchost.exe -k netsvcs`: `C:\WINDOWS\system32\svchost.exe`,
-		`\SystemRoot\System32\drivers\x.sys`:     "",
+		`\SystemRoot\System32\drivers\x.sys`:         "",
 	} {
 		if got := serviceExe(in); got != want {
 			t.Errorf("serviceExe(%q) = %q, want %q", in, got, want)
@@ -41,18 +41,18 @@ func TestSafeAppDir(t *testing.T) {
 	trees := []string{`C:\Windows`, `C:\offpatch`, `C:\ProgramData\offpatch`}
 	exact := []string{`C:\Program Files`, `C:\Program Files (x86)`, `C:\ProgramData`, `C:\Users`}
 	for dir, want := range map[string]bool{
-		`C:\Program Files\Acme`:          true,
-		`D:\Apps\Acme`:                   true,
-		`C:\`:                            false,
-		`C:\Program Files`:               false,
-		`C:\Windows\System32`:            false,
-		`C:\Windows`:                     false,
-		`C:\offpatch`:                    false, // the agent's own folder
-		`C:\ProgramData\offpatch\x`:      false,
-		`C:\Users`:                       false,
-		`C:\Users\aadesh`:                false, // a profile
+		`C:\Program Files\Acme`:           true,
+		`D:\Apps\Acme`:                    true,
+		`C:\`:                             false,
+		`C:\Program Files`:                false,
+		`C:\Windows\System32`:             false,
+		`C:\Windows`:                      false,
+		`C:\offpatch`:                     false, // the agent's own folder
+		`C:\ProgramData\offpatch\x`:       false,
+		`C:\Users`:                        false,
+		`C:\Users\aadesh`:                 false, // a profile
 		`C:\Users\aadesh\AppData\Local\X`: true,
-		`C:\ProgramData`:                 false,
+		`C:\ProgramData`:                  false,
 	} {
 		if got := safeAppDir(dir, trees, exact); got != want {
 			t.Errorf("safeAppDir(%q) = %v, want %v", dir, got, want)

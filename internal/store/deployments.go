@@ -91,18 +91,22 @@ type DeploymentDetail struct {
 
 type Target struct {
 	DeploymentID string `json:"deployment_id"`
-	PackageID    string `json:"package_id"`
-	EndpointID   string `json:"endpoint_id"`
-	Hostname     string `json:"hostname"`
-	Ring         int    `json:"ring"`
-	State        string `json:"state"`
-	Attempts     int    `json:"attempts"`
-	Detail       string `json:"detail"`
-	ExitCode     int    `json:"exit_code"`
-	UpdatedAt    string `json:"updated_at"`
-	Health       string `json:"health"` // "" | ok | failed
-	HealthDetail string `json:"health_detail"`
-	Operation    string `json:"operation"` // of the deployment: install | rollback
+	// DeploymentState: its deployment's state at the time of the query, so a
+	// client can tell a target still worth acting on (active/paused) from one
+	// left behind by a deployment that's since completed/cancelled/rejected.
+	DeploymentState string `json:"deployment_state"`
+	PackageID       string `json:"package_id"`
+	EndpointID      string `json:"endpoint_id"`
+	Hostname        string `json:"hostname"`
+	Ring            int    `json:"ring"`
+	State           string `json:"state"`
+	Attempts        int    `json:"attempts"`
+	Detail          string `json:"detail"`
+	ExitCode        int    `json:"exit_code"`
+	UpdatedAt       string `json:"updated_at"`
+	Health          string `json:"health"` // "" | ok | failed
+	HealthDetail    string `json:"health_detail"`
+	Operation       string `json:"operation"` // of the deployment: install | rollback
 	// Evidence (verified targets): the inventory line, or OS revision, that
 	// proved the install (see presentOn; GET /api/reports/targets.csv).
 	Evidence string `json:"evidence,omitempty"`
@@ -171,7 +175,7 @@ func fillCounts(ctx context.Context, q querier, d *Deployment) error {
 }
 
 func queryTargets(ctx context.Context, q querier, where string, args ...any) ([]Target, error) {
-	rows, err := q.QueryContext(ctx, `SELECT t.deployment_id,t.package_id,t.endpoint_id,e.hostname,t.ring,t.state,t.attempts,t.detail,t.exit_code,t.updated_at,t.health,t.health_detail,d.operation,t.evidence
+	rows, err := q.QueryContext(ctx, `SELECT t.deployment_id,d.state,t.package_id,t.endpoint_id,e.hostname,t.ring,t.state,t.attempts,t.detail,t.exit_code,t.updated_at,t.health,t.health_detail,d.operation,t.evidence
 		FROM targets t JOIN endpoints e ON e.endpoint_id=t.endpoint_id JOIN deployments d ON d.deployment_id=t.deployment_id
 		WHERE `+where+` ORDER BY t.ring, e.hostname`, args...)
 	if err != nil {
@@ -181,7 +185,7 @@ func queryTargets(ctx context.Context, q querier, where string, args ...any) ([]
 	out := []Target{}
 	for rows.Next() {
 		var t Target
-		if err := rows.Scan(&t.DeploymentID, &t.PackageID, &t.EndpointID, &t.Hostname, &t.Ring, &t.State, &t.Attempts, &t.Detail, &t.ExitCode, &t.UpdatedAt, &t.Health, &t.HealthDetail, &t.Operation, &t.Evidence); err != nil {
+		if err := rows.Scan(&t.DeploymentID, &t.DeploymentState, &t.PackageID, &t.EndpointID, &t.Hostname, &t.Ring, &t.State, &t.Attempts, &t.Detail, &t.ExitCode, &t.UpdatedAt, &t.Health, &t.HealthDetail, &t.Operation, &t.Evidence); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -1376,11 +1380,11 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 		// Reboot: endpoints waiting on a reboot get one only where policy allows,
 		// and at most once per rebootRetry so a slow reboot isn't spammed.
 		pend, err := tx.QueryContext(ctx, `SELECT t.deployment_id, t.detail, d.reboot_policy, d.deadline FROM targets t JOIN deployments d ON d.deployment_id=t.deployment_id
-			WHERE t.endpoint_id=? AND t.state='pending_reboot' AND d.state IN ('active','paused')`, endpointID)
+			WHERE `+pendingRebootWhere, endpointID)
 		if err != nil {
 			return err
 		}
-		want := false
+		want, overridePending := false, false
 		type detailFix struct{ dep, detail string }
 		var fixes []detailFix
 		for pend.Next() {
@@ -1388,6 +1392,9 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 			if err := pend.Scan(&dep, &detail, &pol, &dl); err != nil {
 				pend.Close()
 				return err
+			}
+			if e.RebootOverrideBy != "" && dep == e.RebootOverrideDeploymentID {
+				overridePending = true
 			}
 			past := dl != "" && !nowT.Before(parseTime(dl))
 			if rebootAllowed(pol, ws, past) {
@@ -1409,12 +1416,38 @@ func (s *Store) Checkin(ctx context.Context, endpointID string, r CheckinRequest
 			}
 			changed = true
 		}
-		if want && (e.RebootRequestedAt == "" || nowT.Sub(parseTime(e.RebootRequestedAt)) > rebootRetry) {
-			res.RebootNow = true
-			if _, err := tx.Exec(`UPDATE endpoints SET reboot_requested_at=? WHERE endpoint_id=?`, now, endpointID); err != nil {
+		// A manual "restart now" (RequestReboot) bypasses policy and the
+		// rebootRetry throttle for the one deployment it was requested for,
+		// but only while that deployment is actually still waiting on a
+		// reboot; a stale override (that deployment's install already
+		// recovered, or a different deployment's reboot is pending now
+		// instead) is dropped instead of firing later for the wrong
+		// deployment.
+		override := e.RebootOverrideBy != "" && overridePending
+		if e.RebootOverrideBy != "" && !overridePending {
+			if _, err := tx.Exec(`UPDATE endpoints SET reboot_override_deployment_id='', reboot_override_by='' WHERE endpoint_id=?`, endpointID); err != nil {
 				return err
 			}
-			if err := s.audit(tx, Ev{Actor: "system:scheduler", Action: "endpoint.reboot_requested", ObjectType: "endpoint", ObjectID: endpointID,
+			changed = true
+		}
+		if override || (want && (e.RebootRequestedAt == "" || nowT.Sub(parseTime(e.RebootRequestedAt)) > rebootRetry)) {
+			res.RebootNow = true
+			if _, err := tx.Exec(`UPDATE endpoints SET reboot_requested_at=?, reboot_override_deployment_id='', reboot_override_by='' WHERE endpoint_id=?`, now, endpointID); err != nil {
+				return err
+			}
+			actor, action := "system:scheduler", "endpoint.reboot_requested"
+			if override {
+				actor, action = e.RebootOverrideBy, "endpoint.reboot_override_applied"
+				// The override bypasses the window/policy this detail
+				// describes; without this fix the target can still say "no
+				// window allows a restart" in the very check-in that
+				// restarts it.
+				if _, err := tx.Exec(`UPDATE targets SET detail=? WHERE deployment_id=? AND endpoint_id=? AND detail=?`,
+					"installed; restarting now (admin override)", e.RebootOverrideDeploymentID, endpointID, noRebootWindowDetail); err != nil {
+					return err
+				}
+			}
+			if err := s.audit(tx, Ev{Actor: actor, Action: action, ObjectType: "endpoint", ObjectID: endpointID,
 				Details: map[string]any{"hostname": e.Hostname, "in_window": ws.open}}); err != nil {
 				return err
 			}
@@ -1439,6 +1472,11 @@ const (
 	rebootWaitDetail     = "installed; waiting for a restart"
 )
 
+// pendingRebootWhere: a target still waiting on a reboot the scheduler (or a
+// manual override) may act on. Shared by Checkin's own pend query and
+// RequestReboot's eligibility check so both agree on what "pending" means.
+const pendingRebootWhere = `t.endpoint_id=? AND t.state='pending_reboot' AND d.state IN ('active','paused')`
+
 // rebootNeverInWindow: the policy restarts only inside a window that allows
 // reboots, and the endpoint has no such window (and, for at_deadline, the
 // deadline has not passed yet), so no automatic restart will come.
@@ -1460,6 +1498,46 @@ func rebootAllowed(policy string, ws windowState, pastDeadline bool) bool {
 		return (ws.open && ws.reboot) || pastDeadline
 	}
 	return false
+}
+
+// RequestReboot overrides reboot policy for one endpoint: at its next
+// check-in it restarts immediately, regardless of maintenance window or a
+// "never" policy, for the one deployment currently waiting on it. An
+// explicit, audited admin action (see the "override" path in Checkin) — not
+// something the scheduler does on its own. The override is scoped to that
+// specific deployment (not just the endpoint) so it can't later be consumed
+// by an unrelated deployment's pending reboot.
+func (s *Store) RequestReboot(ctx context.Context, actor, endpointID, reason string) (Endpoint, error) {
+	if err := requireReason(reason); err != nil {
+		return Endpoint{}, err
+	}
+	var out Endpoint
+	err := s.txChanged(ctx, func(tx *sql.Tx) error {
+		e, err := getEndpoint(ctx, tx, endpointID)
+		if err != nil {
+			return err
+		}
+		var depID string
+		err = tx.QueryRowContext(ctx, `SELECT t.deployment_id FROM targets t JOIN deployments d ON d.deployment_id=t.deployment_id
+			WHERE `+pendingRebootWhere+` LIMIT 1`, endpointID).Scan(&depID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return Errf(ErrInvalid, "no restart is pending on this endpoint")
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE endpoints SET reboot_override_deployment_id=?, reboot_override_by=? WHERE endpoint_id=?`, depID, actor, endpointID); err != nil {
+			return err
+		}
+		if err := s.audit(tx, Ev{Actor: actor, Action: "endpoint.reboot_override_requested", ObjectType: "endpoint", ObjectID: endpointID,
+			Details: map[string]any{"hostname": e.Hostname, "reason": reason, "deployment_id": depID}}); err != nil {
+			return err
+		}
+		e.RebootOverrideDeploymentID, e.RebootOverrideBy = depID, actor
+		out = e
+		return nil
+	})
+	return out, err
 }
 
 // CheckinResult is what the agent receives.

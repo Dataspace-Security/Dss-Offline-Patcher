@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"offpatch/internal/manifest"
@@ -98,12 +99,13 @@ func (s *Store) IngestBundle(ctx context.Context, in Intake) (Bundle, error) {
 			}
 			// Catalog conflicts: same package_id with different content is fatal;
 			// identical content is a harmless duplicate. Two exceptions by state:
-			//  - rejected: "Import again" (an operator asked for it explicitly in
-			//    a request). The package goes back to quarantined for a new
-			//    review, with this bundle's content and signed manifest; if the
-			//    content changed, the new content replaces the old. Safe because
-			//    a rejected package was never published or deployed, and the
-			//    new review starts from scratch (earlier approvals are cleared).
+			//  - rejected or purged: "Import again" (an operator asked for it
+			//    explicitly in a request). The package goes back to quarantined
+			//    for a new review, with this bundle's content and signed
+			//    manifest; if the content changed, the new content replaces the
+			//    old. Safe because a rejected or purged package was never
+			//    published or deployed, and the new review starts from scratch
+			//    (earlier approvals are cleared).
 			//  - revoked: a security decision, never undone by a delivery. The
 			//    package is skipped as a duplicate (whatever the content) and
 			//    stays revoked.
@@ -117,8 +119,8 @@ func (s *Store) IngestBundle(ctx context.Context, in Intake) (Bundle, error) {
 					newPkgs = append(newPkgs, p)
 				case err != nil:
 					return err
-				case state == "rejected":
-					again = append(again, reimport{p: p, prevSHA: sha, prevBundle: oldBundle})
+				case state == "rejected", state == "purged":
+					again = append(again, reimport{p: p, prevSHA: sha, prevBundle: oldBundle, prevState: state})
 				case state == "revoked":
 					dups = append(dups, p.PackageID+" (revoked; not imported again)")
 				case sha == p.File.SHA256:
@@ -140,7 +142,7 @@ func (s *Store) IngestBundle(ctx context.Context, in Intake) (Bundle, error) {
 					for _, r := range again {
 						ids = append(ids, r.p.PackageID)
 					}
-					d += fmt.Sprintf("; rejected packages imported again for a new review: %v", ids)
+					d += fmt.Sprintf("; rejected/purged packages imported again for a new review: %v", ids)
 				}
 				b.Checks = append(b.Checks, Check{"catalog_conflict", true, d})
 			}
@@ -206,25 +208,26 @@ func (s *Store) IngestBundle(ctx context.Context, in Intake) (Bundle, error) {
 	return b, err
 }
 
-// reimport is a rejected package delivered again in a validated bundle.
+// reimport is a rejected or purged package delivered again in a validated bundle.
 type reimport struct {
 	p                   manifest.Package
 	prevSHA, prevBundle string
+	prevState           string // "rejected" or "purged"
 }
 
-// reimportRejected puts a rejected package back in quarantine for a new
-// review: every field comes from the new bundle (its signed manifest is the
-// one endpoints verify against, so bundle_id must point at it), earlier
-// approvals are cleared, and the audit event records what changed.
+// reimportRejected puts a rejected or purged package back in quarantine for
+// a new review: every field comes from the new bundle (its signed manifest
+// is the one endpoints verify against, so bundle_id must point at it),
+// earlier approvals are cleared, and the audit event records what changed.
 func (s *Store) reimportRejected(tx *sql.Tx, bundleID, quarantineDir string, r reimport) error {
 	p, now := r.p, s.now()
 	qpath := filepath.Join(quarantineDir, "payload", filepath.Base(p.File.Name))
 	if _, err := tx.Exec(`UPDATE packages SET bundle_id=?,title=?,vendor=?,kind=?,version=?,kb=?,product_code=?,severity=?,release_date=?,supersedes=?,applicability=?,
 		file_name=?,size=?,sha256=?,source_url=?,vendor_signature=?,quarantine_path=?,state='quarantined',state_reason='',state_by='system:intake',state_at=?,
-		package_name=?,prerequisites=?,expected_ubr=?,exe=?,formats=? WHERE package_id=? AND state='rejected'`,
+		package_name=?,prerequisites=?,expected_ubr=?,exe=?,formats=? WHERE package_id=? AND state=?`,
 		bundleID, p.Title, p.Vendor, p.Kind, p.Version, p.KB, p.ProductCode, p.Severity, p.ReleaseDate, mustJSON(nonNil(p.Supersedes)), mustJSON(p.Applicability),
 		filepath.Base(p.File.Name), p.File.Size, p.File.SHA256, p.SourceURL, mustJSON(p.VendorSignature), qpath, now,
-		p.PackageName, mustJSON(nonNil(p.Prerequisites)), p.ExpectedUBR, exeJSON(p.Exe), formatsJSON(p), p.PackageID); err != nil {
+		p.PackageName, mustJSON(nonNil(p.Prerequisites)), p.ExpectedUBR, exeJSON(p.Exe), formatsJSON(p), p.PackageID, r.prevState); err != nil {
 		return err
 	}
 	res, err := tx.Exec(`DELETE FROM package_approvals WHERE package_id=?`, p.PackageID)
@@ -234,7 +237,7 @@ func (s *Store) reimportRejected(tx *sql.Tx, bundleID, quarantineDir string, r r
 	cleared, _ := res.RowsAffected()
 	return s.audit(tx, Ev{Actor: "system:intake", Action: "package.reimported", ObjectType: "package", ObjectID: p.PackageID, PackageID: p.PackageID,
 		Details: map[string]any{"bundle_id": bundleID, "previous_bundle_id": r.prevBundle, "sha256": p.File.SHA256, "previous_sha256": r.prevSHA,
-			"content_changed": r.prevSHA != p.File.SHA256, "approvals_cleared": cleared, "from": "rejected", "to": "quarantined",
+			"content_changed": r.prevSHA != p.File.SHA256, "approvals_cleared": cleared, "from": r.prevState, "to": "quarantined",
 			"size": p.File.Size, "vendor_signature": p.VendorSignature.Status}})
 }
 
@@ -573,6 +576,52 @@ func (s *Store) SetPackageState(ctx context.Context, actor, id, action, reason s
 	})
 	out.ApprovalsRequired = s.Policy.required(out.Severity)
 	return out, err
+}
+
+// PurgePackage deletes a quarantined or rejected package's file to free disk
+// space, and marks the catalog entry "purged" (kept, not deleted, for
+// history and audit). Approved and revoked content is never eligible: once
+// published, the repository is immutable (docs/02-architecture.md) — a
+// package that should no longer be used is revoked, not purged, and keeps
+// its file so the hash in the audit chain stays verifiable.
+func (s *Store) PurgePackage(ctx context.Context, actor, id, reason string) (Package, error) {
+	if err := requireReason(reason); err != nil {
+		return Package{}, err
+	}
+	var out Package
+	err := s.txChanged(ctx, func(tx *sql.Tx) error {
+		p, err := getPackage(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if p.State != "quarantined" && p.State != "rejected" {
+			return Errf(ErrConflict, "package is %s; only quarantined or rejected packages can be purged (approved content is kept for audit)", p.State)
+		}
+		now := s.now()
+		if _, err := tx.Exec(`UPDATE packages SET state='purged', state_reason=?, state_by=?, state_at=? WHERE package_id=?`, reason, actor, now, id); err != nil {
+			return err
+		}
+		if err := s.audit(tx, Ev{Actor: actor, Action: "package.purged", ObjectType: "package", ObjectID: id, PackageID: id,
+			Details: map[string]any{"from": p.State, "reason": reason, "sha256": p.SHA256, "file_name": p.FileName}}); err != nil {
+			return err
+		}
+		p.State, p.StateReason, p.StateBy, p.StateAt = "purged", reason, actor, now
+		out = p
+		return nil
+	})
+	if err != nil {
+		return Package{}, err
+	}
+	if out.QuarantinePath != "" {
+		// The state change above already committed; once "purged" the state
+		// guard refuses a second call, so a removal failure here can't be
+		// retried through this function again — the caller decides what to
+		// tell the operator (the file simply outlives the catalog entry).
+		if rmErr := os.Remove(out.QuarantinePath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+			return out, fmt.Errorf("catalog entry purged, but removing its file failed: %w", rmErr)
+		}
+	}
+	return out, nil
 }
 
 func approvedBy(p Package, actor string) bool {

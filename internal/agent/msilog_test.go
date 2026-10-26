@@ -163,3 +163,30 @@ func TestWithMSILog(t *testing.T) {
 		t.Errorf("no log: %q", got.Detail)
 	}
 }
+
+func TestWithMSILogKnownConflict(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "x.log")
+	var sb strings.Builder
+	sb.WriteString("MSI (c) (F4:A8) [13:59:34:000]: Doing action: LaunchConditions\r\n")
+	sb.WriteString("Action start 13:59:34: LaunchConditions.\r\n")
+	sb.WriteString("Product: WinSCP -- WinSCP is already installed on this system using a standalone executable installer. Please uninstall that before running this MSI installer.\r\n")
+	sb.WriteString("WinSCP is already installed on this system using a standalone executable installer. Please uninstall that before running this MSI installer.\r\n")
+	sb.WriteString("Action ended 13:59:34: LaunchConditions. Return value 3.\r\n")
+	sb.WriteString("Action ended 13:59:34: INSTALL. Return value 3.\r\n")
+	os.WriteFile(p, []byte(sb.String()), 0o600)
+
+	got := withMSILog(classifyInstall("msi", 1603), p)
+	want := "blocked: already installed via a different (non-MSI) installer — uninstall it manually, then retry"
+	if !strings.HasPrefix(got.Detail, want+msiLogHeader) {
+		t.Errorf("detail: %q", got.Detail)
+	}
+	if !strings.Contains(got.Detail, "LaunchConditions") {
+		t.Errorf("log tail dropped: %q", got.Detail)
+	}
+
+	// Exit codes other than 1603 are never rewritten, even with the same log text.
+	if got := withMSILog(classifyInstall("msi", 1601), p); strings.HasPrefix(got.Detail, want) {
+		t.Errorf("non-1603 code rewritten: %q", got.Detail)
+	}
+}

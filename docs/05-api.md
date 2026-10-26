@@ -19,6 +19,7 @@ Roles are cumulative: `viewer` < `user` < `admin` < `super_admin` (v1.8; the old
 | `POST /api/packages/{package_id}/approve` | user | `{reason}` → `Package` |
 | `POST /api/packages/{package_id}/reject` | user | `{reason}` → `Package` |
 | `POST /api/packages/{package_id}/revoke` | admin | `{reason}` → `Package` |
+| `POST /api/packages/{package_id}/purge` | user | `{reason}` → `Package` (state `purged`). Deletes the quarantined file to free disk space; refused unless the package is `quarantined` or `rejected` (never `approved`/`revoked` — the repository stays immutable). The same `package_id` delivered again behaves like a rejected one: back to `quarantined` for a fresh review. |
 | `GET /api/endpoints` | viewer | → `Endpoint[]` |
 | `GET /api/endpoints/{endpoint_id}` | viewer | → `EndpointDetail` |
 | `PATCH /api/endpoints/{endpoint_id}` | user | `{groups?, site?, owner?, criticality?}` → `Endpoint` |
@@ -171,6 +172,7 @@ Cookie-authenticated requests (SSO and email + password) that change state MUST 
 | `GET /api/users` | admin | → `User[]` |
 | `POST /api/users/{username}/disable` · `/enable` | admin | `{reason}` → `{ok}` (disable revokes sessions) |
 | `POST /api/endpoints/{id}/retire` | user | `{reason}` → `Endpoint` (status `retired`) |
+| `POST /api/endpoints/{id}/reboot` | user | `{reason}` → `Endpoint`. "Restart now": overrides reboot policy and maintenance window, at the next check-in, for the one deployment currently waiting on a reboot for this endpoint (refused with no `pending_reboot` target under an active/paused deployment). Scoped to that deployment, not just the endpoint: it is dropped as stale, not applied, if that deployment's reboot resolves or a different deployment's reboot becomes pending before the next check-in. Audited as `endpoint.reboot_override_requested`, then `endpoint.reboot_override_applied` under the same actor once it fires. |
 | `GET /api/maintenance-windows` | viewer | → `MaintenanceWindow[]` |
 | `POST /api/maintenance-windows` | user | `MaintenanceWindow` (without id/created_*) → `MaintenanceWindow` |
 | `POST /api/maintenance-windows/{id}/delete` | user | `{reason}` → `{ok}` |
@@ -577,7 +579,7 @@ Packages of kind `agent` (`offpatch-agent-*`) are managed by the vendor:
 
 | Action | Who | Refused with |
 |---|---|---|
-| `POST /api/packages/{id}/approve` · `/reject` · `/revoke` | super_admin only | 403 `agent versions are managed by the vendor (super admin)` |
+| `POST /api/packages/{id}/approve` · `/reject` · `/revoke` · `/purge` | super_admin only | 403 `agent versions are managed by the vendor (super admin)` |
 | `POST /api/deployments` (install or rollback of an agent version) | super_admin only | 403 `agent versions are managed by the vendor (super admin)` |
 | `POST /api/deployments/{id}/approve` · `/reject` for an agent-version deployment | role `admin` only (bank admins), not the creator; `deployment_approvals` of them | 403 `agent version deployments are approved by bank admins` (role `user`); the super admin cannot approve either |
 

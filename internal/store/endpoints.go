@@ -55,11 +55,18 @@ type Endpoint struct {
 	EnrolledAt        string   `json:"enrolled_at"`
 	Edition           string   `json:"edition"`
 	RebootRequestedAt string   `json:"reboot_requested_at"`
-	CertNotAfter      string   `json:"cert_not_after"`
-	RetiredAt         string   `json:"retired_at"`
-	RetiredReason     string   `json:"retired_reason"`
-	Status            string   `json:"status"`
-	Hardware          Hardware `json:"hardware"`
+	// RebootOverrideDeploymentID/By: an admin's "restart now" request for one
+	// specific deployment's pending reboot, applied (and cleared) at the
+	// endpoint's next check-in regardless of that deployment's reboot policy.
+	// Scoped to a deployment so a stale override can't later fire for a
+	// different deployment's pending reboot than the admin intended.
+	RebootOverrideDeploymentID string   `json:"reboot_override_deployment_id"`
+	RebootOverrideBy           string   `json:"reboot_override_by"`
+	CertNotAfter               string   `json:"cert_not_after"`
+	RetiredAt                  string   `json:"retired_at"`
+	RetiredReason              string   `json:"retired_reason"`
+	Status                     string   `json:"status"`
+	Hardware                   Hardware `json:"hardware"`
 	// Missing is filled by the API (update intelligence + catalog); nil
 	// without intelligence and nothing ready to deploy.
 	Missing *EndpointMissing `json:"missing"`
@@ -106,14 +113,15 @@ type EndpointDetail struct {
 	Targets   []Target        `json:"targets"`
 }
 
-const endpointCols = `endpoint_id,hostname,os,os_version,build,arch,groups,site,owner,criticality,last_seen,inventory_at,reboot_pending,agent_version,enrolled_at,inventory,cert_not_after,retired_at,retired_reason,edition,reboot_requested_at,hardware`
+const endpointCols = `endpoint_id,hostname,os,os_version,build,arch,groups,site,owner,criticality,last_seen,inventory_at,reboot_pending,agent_version,enrolled_at,inventory,cert_not_after,retired_at,retired_reason,edition,reboot_requested_at,hardware,reboot_override_deployment_id,reboot_override_by`
 
 func scanEndpoint(sc interface{ Scan(...any) error }) (Endpoint, error) {
 	var e Endpoint
 	var groups, inv, hw string
 	var rp int
 	err := sc.Scan(&e.EndpointID, &e.Hostname, &e.OS, &e.OSVersion, &e.Build, &e.Arch, &groups, &e.Site, &e.Owner, &e.Criticality,
-		&e.LastSeen, &e.InventoryAt, &rp, &e.AgentVersion, &e.EnrolledAt, &inv, &e.CertNotAfter, &e.RetiredAt, &e.RetiredReason, &e.Edition, &e.RebootRequestedAt, &hw)
+		&e.LastSeen, &e.InventoryAt, &rp, &e.AgentVersion, &e.EnrolledAt, &inv, &e.CertNotAfter, &e.RetiredAt, &e.RetiredReason, &e.Edition, &e.RebootRequestedAt, &hw,
+		&e.RebootOverrideDeploymentID, &e.RebootOverrideBy)
 	if err != nil {
 		return e, err
 	}

@@ -241,7 +241,7 @@ func (pk *Pack) limitations(res pairsResult) []string {
 		out = append(out, fmt.Sprintf("%d endpoint/update pairs have no deadline because their clock start (release, acquisition or approval date) is unknown; they are reported as pending.", res.noClock))
 	}
 	if res.excluded > 0 {
-		out = append(out, fmt.Sprintf("%d rejected or revoked catalog packages are not required and are excluded from the timeliness calculation.", res.excluded))
+		out = append(out, fmt.Sprintf("%d rejected, revoked or purged catalog packages are not required and are excluded from the timeliness calculation.", res.excluded))
 	}
 	missingIntel := 0
 	for _, e := range in.Endpoints {

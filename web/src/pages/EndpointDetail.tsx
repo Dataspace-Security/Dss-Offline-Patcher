@@ -27,6 +27,7 @@ export default function EndpointDetailPage() {
   const { data: e, error, reload } = useLoad(() => api.get<EndpointDetail>(`/api/endpoints/${enc(id)}`), [id], 15000);
   const [invFilter, setInvFilter] = useState("");
   const [retiring, setRetiring] = useState(false);
+  const [restarting, setRestarting] = useState(false);
   const now = useNow(60000);
 
   if (!e) {
@@ -39,6 +40,18 @@ export default function EndpointDetailPage() {
   }
 
   const retired = e.status === "retired";
+  // Actionable by "Restart now": a target genuinely waiting on a reboot
+  // under a deployment still active/paused (what RequestReboot itself
+  // requires) — not e.reboot_pending alone, an independent OS-level flag
+  // with no DSS Patcher deployment behind it, and not a target left behind
+  // by a deployment that's since completed/cancelled/rejected.
+  const pendingRestart = e.targets.some((t) => t.state === "pending_reboot" && (t.deployment_state === "active" || t.deployment_state === "paused"));
+  const restartOverridden = !!e.reboot_override_by;
+  // Anything restart-related worth telling the admin about in the System
+  // card below, including signals pendingRestart (and so "Restart now")
+  // can't act on: a bare OS-level flag with no DSS Patcher target behind
+  // it, or a target left by a deployment that's since moved on.
+  const restartSignal = e.reboot_pending || e.targets.some((t) => t.state === "pending_reboot");
 
   const inv = (e.inventory ?? []).filter((i) =>
     !invFilter || `${i.id} ${i.name} ${i.version}`.toLowerCase().includes(invFilter.toLowerCase()));
@@ -47,6 +60,11 @@ export default function EndpointDetailPage() {
     <>
       <PageHeader title={<>{e.hostname} <Pill state={e.status} /></>}
                   sub={<><Link to="/endpoints">← Endpoints</Link> · <Mono>{e.endpoint_id}</Mono></>}>
+        {canEdit && !retired && pendingRestart && (
+          <button className="btn" disabled={restartOverridden} onClick={() => setRestarting(true)}>
+            {restartOverridden ? "Restart requested…" : "Restart now…"}
+          </button>
+        )}
         {canEdit && !retired && (
           <button className="btn btn-danger" onClick={() => setRetiring(true)}>Retire endpoint…</button>
         )}
@@ -92,11 +110,12 @@ export default function EndpointDetailPage() {
             ["Agent", e.agent_version],
             ["Last seen", <Time value={e.last_seen} />],
             ["Inventory", <Time value={e.inventory_at} />],
-            ["Restart", e.reboot_pending || e.targets.some((t) => t.state === "pending_reboot") ? <RestartNeeded e={e} /> : "not needed"],
+            ["Restart", restartSignal ? <RestartNeeded e={e} /> : "not needed"],
             ...(e.targets.some((t) => t.state === "deferred") ? [["Deferred", <span className="text-amber">{e.targets.filter((t) => t.state === "deferred").map((t) => t.detail).filter(Boolean)[0] ?? "pre-install check not met"}</span>] as [string, ReactNode]] : []),
             ["Enrolled", <Time value={e.enrolled_at} />],
             ["Certificate", <CertExpiry value={e.cert_not_after} now={now} />],
             ...(e.reboot_requested_at && parseTime(e.reboot_requested_at) ? [["Reboot requested", <Time value={e.reboot_requested_at} />] as [string, ReactNode]] : []),
+            ...(restartOverridden ? [["Restart now", <span className="text-amber">requested by {e.reboot_override_by} — applies at the next check-in</span>] as [string, ReactNode]] : []),
           ]} />
         </section>
         <HardwareCard hw={e.hardware} now={now} />
@@ -157,6 +176,24 @@ export default function EndpointDetailPage() {
         )}
       </section>
 
+      {restarting && (
+        <ReasonModal
+          title={`Restart ${e.hostname} now`}
+          description={
+            <div className="banner banner-warn">
+              <b>Restarts at its next check-in</b>, not immediately — within the usual check-in interval. This overrides the
+              deployment's reboot policy and maintenance window for this one machine; anything open and unsaved on it may be lost.
+            </div>
+          }
+          confirmLabel="Restart now"
+          danger
+          onClose={() => setRestarting(false)}
+          onSubmit={async (reason) => {
+            await api.post<Endpoint>(`/api/endpoints/${enc(e.endpoint_id)}/reboot`, { reason });
+            await reload();
+          }}
+        />
+      )}
       {retiring && (
         <ReasonModal
           title={`Retire ${e.hostname}`}

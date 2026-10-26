@@ -55,7 +55,9 @@ export function YourWork({ summary, endpoints, className = "" }: { summary: Summ
       ? <>No endpoints enrolled yet — <Link to={`${paths.endpoints}?enroll=1`}>create an enrollment token</Link> and install the agent on the Windows PCs.</>
       : <>No endpoints enrolled yet. A User or Admin enrolls them.</>);
   }
-  const pkgTotal = Object.values(summary.packages ?? {}).reduce((a, v) => a + (v ?? 0), 0);
+  // "purged" packages have had their file deleted and are never deployable
+  // again as-is, so they don't count as catalog content for this hint.
+  const pkgTotal = Object.entries(summary.packages ?? {}).reduce((a, [state, v]) => a + (state === "purged" ? 0 : v ?? 0), 0);
   if (pkgTotal === 0) {
     firstRun.push(isOperator
       ? <>The catalog is empty — use Import on <Link to={paths.needed()}>Needed</Link>{handlesAgents && <> or in the <Link to={paths.library()}>Library</Link></>}, then follow them on <Link to={paths.imports}>Imports</Link>.</>

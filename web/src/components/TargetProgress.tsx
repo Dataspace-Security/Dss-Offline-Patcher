@@ -5,12 +5,27 @@ import { TargetPill } from "./ui";
 
 type Stage = { label: string; sub?: string; pct: number | null; tone: "blue" | "green" | "amber" | "red" | "grey"; live: boolean };
 
+// Fallback for how long "installed" can go without a check-in before the UI
+// stops assuming verification is just about to land, used only when the
+// caller doesn't know the server's actual configured check-in interval. The
+// agent forces a fresh inventory report ~20s after an install, well inside
+// the default 60s check-in interval; a few minutes of silence usually means
+// the agent isn't checking in at all (down, offline, network issue), not
+// that inventory is slow. Callers should instead derive this from the
+// server's checkin_interval_seconds (GET /api/system): a site configured
+// with a longer interval (e.g. to save bandwidth) would otherwise see this
+// warning as a matter of course after every single install.
+const DEFAULT_STALE_CONTACT_SEC = 180;
+
 /**
  * What a target is doing right now, from its live heartbeat (Target.live)
  * when there is one, else from its recorded state. `pct` drives the bar;
- * null = indeterminate (animated) while work is in progress.
+ * null = indeterminate (animated) while work is in progress. `lastContact`
+ * (ISO timestamp of the endpoint's last check-in, when known) flags a stuck
+ * "confirming by inventory" wait that is really just a silent agent, once it
+ * has been silent longer than `staleAfterSec` (default DEFAULT_STALE_CONTACT_SEC).
  */
-export function targetStage(t: Target, currentRing: number, deploymentLive: boolean, now: number): Stage {
+export function targetStage(t: Target, currentRing: number, deploymentLive: boolean, now: number, lastContact?: string, staleAfterSec = DEFAULT_STALE_CONTACT_SEC): Stage {
   const live = t.live && liveFresh(t.live, now) ? t.live : null;
   const since = parseTime(t.updated_at);
   const elapsed = since ? fmtDuration((now - since.getTime()) / 1000) : "";
@@ -39,12 +54,22 @@ export function targetStage(t: Target, currentRing: number, deploymentLive: bool
       return { label: "Downloaded · verifying", pct: 45, tone: "blue", live: false };
     case "installing":
       return { label: `Installing${elapsed ? ` · ${elapsed}` : ""}`, pct: null, tone: "blue", live: false };
-    case "installed":
+    case "installed": {
       // P2: the server flags installs that inventory has not confirmed after 6 h.
       if (/not confirmed/i.test(t.detail ?? "")) {
         return { label: "Installed · not confirmed", sub: t.detail, pct: 85, tone: "amber", live: false };
       }
+      const contactAt = parseTime(lastContact);
+      const silentFor = contactAt ? (now - contactAt.getTime()) / 1000 : null;
+      if (silentFor !== null && silentFor > staleAfterSec) {
+        return {
+          label: "Installed · waiting on the agent",
+          sub: `hasn't checked in for ${fmtDuration(silentFor)} — verification will follow its next check-in`,
+          pct: 85, tone: "amber", live: false,
+        };
+      }
       return { label: "Installed · confirming by inventory", sub: "verified at the next inventory report", pct: 85, tone: "green", live: false };
+    }
     case "pending_reboot":
       return { label: "Restart needed", sub: t.detail || (elapsed ? `for ${elapsed}` : undefined), pct: 90, tone: "amber", live: false };
     case "verified":
@@ -59,8 +84,8 @@ export function targetStage(t: Target, currentRing: number, deploymentLive: bool
   }
 }
 
-export function TargetProgress({ t, currentRing, deploymentLive, now }: { t: Target; currentRing: number; deploymentLive: boolean; now: number }) {
-  const s = targetStage(t, currentRing, deploymentLive, now);
+export function TargetProgress({ t, currentRing, deploymentLive, now, lastContact, staleAfterSec }: { t: Target; currentRing: number; deploymentLive: boolean; now: number; lastContact?: string; staleAfterSec?: number }) {
+  const s = targetStage(t, currentRing, deploymentLive, now, lastContact, staleAfterSec);
   const running = s.pct === null && (s.tone === "blue" || s.tone === "amber");
   return (
     <div className="tprog">

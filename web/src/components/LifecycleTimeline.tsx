@@ -86,10 +86,11 @@ export function buildSteps(pkg: Package, life: LifecycleExport | null, requests:
   steps.push({
     key: "approved",
     title: <>Approved <span className="muted">({approvals.length}/{required})</span></>,
-    status: pkg.state === "rejected" ? "bad" : isApproved ? "done" : pkg.state === "quarantined" ? "current" : "pending",
+    status: pkg.state === "rejected" || pkg.state === "purged" ? "bad" : isApproved ? "done" : pkg.state === "quarantined" ? "current" : "pending",
     at: isApproved ? (approvedEv?.ts ?? latest(approvals.map((a) => a.at))) : latest(approvals.map((a) => a.at)),
     actor: approvals.map((a) => a.by).join(", ") || undefined,
-    detail: pkg.state === "rejected" ? <>rejected: {pkg.state_reason}</> : pkg.state === "revoked" ? <span className="text-red">revoked: {pkg.state_reason}</span> : undefined,
+    detail: pkg.state === "rejected" ? <>rejected: {pkg.state_reason}</> : pkg.state === "revoked" ? <span className="text-red">revoked: {pkg.state_reason}</span>
+      : pkg.state === "purged" ? <span className="text-red">deleted (file removed to free space): {pkg.state_reason}</span> : undefined,
   });
 
   const deps = (life?.deployments ?? []).filter((d) => (d.operation ?? "install") === "install");

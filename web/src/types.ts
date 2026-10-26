@@ -21,7 +21,7 @@ export type Bundle = {
   received_at: string; package_count: number; checks: Check[]; error: string;
 };
 
-export type PackageState = "quarantined" | "approved" | "rejected" | "revoked";
+export type PackageState = "quarantined" | "approved" | "rejected" | "revoked" | "purged";
 export type PackageKind = "msu" | "msi" | "deb" | "rpm" | "pkg" | "agent"
   | "exe" // EXE contract: signed vendor EXE installer (Inno Setup / Nullsoft / WiX Burn / plain EXE)
   | "portable" | "msix"; // app formats (agents 0.10.0+): portable app copied to Program Files; MSIX provisioned for all users
@@ -77,6 +77,8 @@ export type Endpoint = {
   enrolled_at: string; status: EndpointStatus;
   // v1.1
   edition: string; cert_not_after: string; retired_at: string; retired_reason: string; reboot_requested_at: string;
+  // UX iteration: a "Restart now" override for one deployment, applied (and cleared) at the next check-in.
+  reboot_override_deployment_id: string; reboot_override_by: string;
   hardware?: Hardware;
   // UX iteration: counts from update intelligence + catalog (null without intelligence)
   missing?: EndpointMissing | null;
@@ -138,6 +140,9 @@ export type Target = {
   // v1.2: the deployment's operation
   operation: DeploymentOperation;
   live?: TargetLive | null; // UX iteration: live progress from heartbeats
+  // Its deployment's state at query time: active/paused is worth acting on, unlike
+  // one left behind by a deployment that's since completed/cancelled/rejected.
+  deployment_state: DeploymentState;
 };
 export type DeploymentDetail = Deployment & { targets: Target[] };
 

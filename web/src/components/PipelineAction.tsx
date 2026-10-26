@@ -49,13 +49,13 @@ export function CantImport({ reason }: { reason: string }) {
 
 /**
  * True when an update can be imported: not in the catalog, or its package was
- * rejected (a fresh download gets a new review). Revoked packages stay
- * revoked, and an update the Library says is not importable (or the
- * downloader reported it can never fetch) is not offered.
+ * rejected or purged (never published; a fresh download gets a new review).
+ * Revoked packages stay revoked, and an update the Library says is not
+ * importable (or the downloader reported it can never fetch) is not offered.
  */
 export function isRequestable(link: CatalogLink | null | undefined, requested?: AcquisitionRequestRef | null, info?: ImportInfo | null): boolean {
   if (cantImportReason(info, requested) !== null) return false;
-  return !link || link.state === "rejected";
+  return !link || link.state === "rejected" || link.state === "purged";
 }
 
 type Props = {
@@ -130,14 +130,16 @@ export function PipelineAction({ link, requested, fleet, onPatch, onRequest, req
       </div>
     );
   }
-  if (link.state === "rejected") {
+  if (link.state === "rejected" || link.state === "purged") {
+    const purged = link.state === "purged";
     return (
       <div className="row-action">
-        <Link to={paths.catalog(link.package_id)}><Pill state="rejected" /></Link>
+        <Link to={paths.catalog(link.package_id)}><Pill state={link.state} /></Link>
         {cant !== null ? <CantImport reason={cant} /> : requested && requested.status !== "fulfilled" && <RequestedNote requested={requested} />}
         {canRequest && !unsupported && cant === null && (
           <RequestButton label={failed ? "Try again" : "Import again"} onRequest={onRequest!} requesting={requesting} disabled={disabled}
-                         title="The previous package was rejected; import a fresh download for a new review" />
+                         title={purged ? "The previous download was deleted to free space; import a fresh copy for a new review"
+                                       : "The previous package was rejected; import a fresh download for a new review"} />
         )}
       </div>
     );

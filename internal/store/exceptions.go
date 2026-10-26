@@ -239,7 +239,7 @@ func (s *Store) Summary(ctx context.Context, th Thresholds) (Summary, error) {
 		}
 		return m, rows.Err()
 	}
-	if sm.Packages, err = count("packages", "quarantined", "approved", "rejected", "revoked"); err != nil {
+	if sm.Packages, err = count("packages", "quarantined", "approved", "rejected", "revoked", "purged"); err != nil {
 		return sm, err
 	}
 	if sm.Bundles, err = count("bundles", "received", "validated", "rejected"); err != nil {

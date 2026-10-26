@@ -232,6 +232,7 @@ func (s *Server) Handler() http.Handler {
 	admin(viewer, "GET /api/packages/{id}", s.getPackage)
 	admin(user, "POST /api/packages/{id}/{action}", s.packageAction) // approve | reject
 	admin(adm, "POST /api/packages/{id}/revoke", s.packageAction)
+	admin(user, "POST /api/packages/{id}/purge", s.purgePackage)
 	admin(viewer, "GET /api/endpoints", s.listEndpoints)
 	admin(viewer, "GET /api/endpoints/{id}", s.getEndpoint)
 	admin(viewer, "GET /api/endpoints/{id}/available", s.availableFor)
@@ -258,6 +259,7 @@ func (s *Server) Handler() http.Handler {
 	admin(user, "GET /api/acquisition-requests", s.listAcqRequests)
 	admin(user, "PATCH /api/endpoints/{id}", s.patchEndpoint)
 	admin(user, "POST /api/endpoints/{id}/retire", s.retireEndpoint)
+	admin(user, "POST /api/endpoints/{id}/reboot", s.rebootEndpoint)
 	admin(user, "POST /api/enrollment-tokens", s.createEnrollmentToken)
 	admin(viewer, "GET /api/agent-setup", s.agentSetup)
 	admin(viewer, "GET /api/agent-setup/files/{name}", s.agentSetupFile)
@@ -569,6 +571,35 @@ func (s *Server) packageAction(w http.ResponseWriter, r *http.Request) {
 	publish := func(p store.Package) error { return s.repo.Publish(p.QuarantinePath, p.SHA256, p.Size) }
 	v, err := s.store.SetPackageState(r.Context(), actor(r), r.PathValue("id"), action, body.Reason, publish)
 	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, 200, v)
+}
+
+// purgePackage deletes a quarantined/rejected catalog entry's file to free
+// disk space. Approved and revoked (ever-published) content is refused: the
+// repository stays immutable (docs/02-architecture.md). Agent versions are
+// the vendor's, like every other lifecycle action on them.
+func (s *Server) purgePackage(w http.ResponseWriter, r *http.Request) {
+	var body reasonBody
+	if !decode(w, r, &body) {
+		return
+	}
+	if !s.agentAllowed(w, r, r.PathValue("id"), superAdminOnly, agentVendorOnly, store.RoleSuperAdmin) {
+		return
+	}
+	v, err := s.store.PurgePackage(r.Context(), actor(r), r.PathValue("id"), body.Reason)
+	if err != nil {
+		if v.PackageID != "" {
+			// The catalog state already committed to "purged"; only freeing
+			// the disk space failed. Say so, but don't report the request as
+			// failed — the client needs to see the real (purged) state, and
+			// a retry through this same state guard can never succeed.
+			s.log.Warn("purge: file removal failed after the state change committed", "package_id", v.PackageID, "err", err)
+			writeJSON(w, 200, v)
+			return
+		}
 		s.fail(w, err)
 		return
 	}
@@ -1029,6 +1060,21 @@ func (s *Server) retireEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	e, err := s.store.RetireEndpoint(r.Context(), actor(r), r.PathValue("id"), body.Reason)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, 200, e)
+}
+
+// rebootEndpoint overrides reboot policy for one endpoint: "Restart now" in
+// the console. It applies at the endpoint's next check-in, not immediately.
+func (s *Server) rebootEndpoint(w http.ResponseWriter, r *http.Request) {
+	var body reasonBody
+	if !decode(w, r, &body) {
+		return
+	}
+	e, err := s.store.RequestReboot(r.Context(), actor(r), r.PathValue("id"), body.Reason)
 	if err != nil {
 		s.fail(w, err)
 		return

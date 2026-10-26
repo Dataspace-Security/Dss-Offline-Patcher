@@ -49,6 +49,12 @@ export default function DeploymentDetailPage() {
   const pkg = useLoad(() => (d ? api.get<Package>(`/api/packages/${enc(d.package_id)}`) : Promise.resolve(null)), [d?.package_id]);
   // Last contact per endpoint (check-ins); live heartbeats are newer when present.
   const eps = useLoad(() => (isLiveDeployment(d) ? api.get<Endpoint[]>("/api/endpoints") : Promise.resolve(null)), [live, !!d], SLOW_POLL_MS);
+  // How long a silent agent gets before "confirming by inventory" turns into
+  // a staleness warning: a multiple of the site's own configured check-in
+  // interval (not a flat guess), so a longer-than-default interval doesn't
+  // read as every install's verification being stuck.
+  const sysCfg = useLoad(() => api.get<{ agents: { checkin_interval_seconds: number } }>("/api/system"), [], SLOW_POLL_MS);
+  const staleAfterSec = Math.max(180, (sysCfg.data?.agents.checkin_interval_seconds ?? 60) * 3);
   const [action, setAction] = useState<Action | null>(null);
   const [ringFilter, setRingFilter] = useState<string>("");
   const [stateFilter, setStateFilter] = useState<string>("");
@@ -320,7 +326,7 @@ export default function DeploymentDetailPage() {
                   <tr key={t.endpoint_id} className={bad ? "row-bad" : ""}>
                     <td><Link to={`/endpoints/${enc(t.endpoint_id)}`}>{t.hostname || t.endpoint_id}</Link></td>
                     <td className="nowrap">{ringName(t.ring)}</td>
-                    <td><LiveTargetProgress t={t} currentRing={d.current_ring} deploymentLive={d.state === "active"} /></td>
+                    <td><LiveTargetProgress t={t} currentRing={d.current_ring} deploymentLive={d.state === "active"} lastContact={contact} staleAfterSec={staleAfterSec} /></td>
                     <td className="nowrap">{contact ? <span title={contact}><ClockRel value={contact} /></span> : <span className="muted">—</span>}</td>
                     <td className="num">{t.state === "not_applicable" || t.state === "exception"
                       ? <span className="muted">—</span>
@@ -376,7 +382,7 @@ function ClockRel({ value }: { value: string | undefined }) {
   return <>{relTime(value, useClock())}</>;
 }
 
-function LiveTargetProgress(props: { t: Target; currentRing: number; deploymentLive: boolean }) {
+function LiveTargetProgress(props: { t: Target; currentRing: number; deploymentLive: boolean; lastContact?: string; staleAfterSec?: number }) {
   return <TargetProgress {...props} now={useClock()} />;
 }
 

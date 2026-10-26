@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -209,6 +211,107 @@ func TestRebootWithoutWindowDetail(t *testing.T) {
 	}
 }
 
+// Manual "restart now": an admin override bypasses a "never" reboot policy
+// at the next check-in, is audited under the real actor, and a stale
+// override (nothing pending any more) is dropped instead of firing later.
+func TestRequestReboot(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+	addPackage(t, s, Package{PackageID: "Acme-3.0", Kind: "msi", Version: "3.0.0", PackageName: "Acme App", ProductCode: "{A}"})
+	addEndpoint(t, s, "e-1", []string{"pilot"}, acmeOld)
+
+	if _, err := s.RequestReboot(ctx, "user:admin", "e-1", "urgent"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("no deployment yet: %v", err)
+	}
+
+	d, err := createApproved(s, ctx, "user:otto", NewDeployment{PackageID: "Acme-3.0", Name: "acme", Rings: []Ring{{Name: "all", Groups: []string{"all"}}},
+		MaxFailurePct: 50, RebootPolicy: "never"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report(t, s, d.DeploymentID, "e-1", "Acme-3.0", "installing", "started", 0)
+	report(t, s, d.DeploymentID, "e-1", "Acme-3.0", "pending_reboot", "installed; reboot required", 3010)
+
+	if _, err := s.RequestReboot(ctx, "user:admin", "e-1", ""); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty reason: %v", err)
+	}
+	if res := checkin(t, s, "e-1", acmeOld, true); res.RebootNow {
+		t.Fatal("never policy: no automatic reboot")
+	}
+
+	if _, err := s.RequestReboot(ctx, "user:admin", "e-1", "urgent fix window closed tonight"); err != nil {
+		t.Fatal(err)
+	}
+	e, err := s.GetEndpoint(ctx, "e-1", DefaultThresholds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.RebootOverrideDeploymentID != d.DeploymentID || e.RebootOverrideBy != "user:admin" {
+		t.Fatalf("override not recorded: %+v", e.Endpoint)
+	}
+
+	if res := checkin(t, s, "e-1", acmeOld, true); !res.RebootNow {
+		t.Fatal("override must bypass the never policy")
+	}
+	ev := hasAudit(auditActions(t, s, "e-1"), "endpoint.reboot_override_applied|user:admin|")
+	if ev == "" {
+		t.Error("override audited under the real actor")
+	}
+	e, err = s.GetEndpoint(ctx, "e-1", DefaultThresholds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.RebootOverrideDeploymentID != "" || e.RebootOverrideBy != "" {
+		t.Errorf("override not cleared after use: %+v", e.Endpoint)
+	}
+
+	// A fresh override with nothing left pending for its deployment (reboot
+	// already happened) is dropped at the next check-in rather than firing
+	// again by surprise.
+	if _, err := s.db.Exec(`UPDATE targets SET state='verified' WHERE deployment_id=? AND endpoint_id='e-1'`, d.DeploymentID); err != nil {
+		t.Fatal(err)
+	}
+	s.db.Exec(`UPDATE endpoints SET reboot_override_deployment_id=?, reboot_override_by=? WHERE endpoint_id='e-1'`, d.DeploymentID, "user:admin")
+	if res := checkin(t, s, "e-1", acmeCurrent, false); res.RebootNow {
+		t.Fatal("stale override must not fire")
+	}
+	e, err = s.GetEndpoint(ctx, "e-1", DefaultThresholds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.RebootOverrideDeploymentID != "" {
+		t.Error("stale override must be cleared")
+	}
+
+	// The override is scoped to the deployment it was requested for: it must
+	// not be silently consumed by a different deployment's pending reboot,
+	// even though both are for the same endpoint.
+	addPackage(t, s, Package{PackageID: "Acme-4.0", Kind: "msi", Version: "4.0.0", PackageName: "Acme App", ProductCode: "{B}"})
+	d2, err := createApproved(s, ctx, "user:otto", NewDeployment{PackageID: "Acme-4.0", Name: "acme2", Rings: []Ring{{Name: "all", Groups: []string{"all"}}},
+		MaxFailurePct: 50, RebootPolicy: "never"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report(t, s, d2.DeploymentID, "e-1", "Acme-4.0", "installing", "started", 0)
+	report(t, s, d2.DeploymentID, "e-1", "Acme-4.0", "pending_reboot", "installed; reboot required", 3010)
+	s.db.Exec(`UPDATE endpoints SET reboot_override_deployment_id=?, reboot_override_by=? WHERE endpoint_id='e-1'`, d.DeploymentID, "user:admin")
+	if res := checkin(t, s, "e-1", acmeOld, true); res.RebootNow {
+		t.Fatal("override scoped to a different (resolved) deployment must not apply to d2's pending reboot")
+	}
+	e, err = s.GetEndpoint(ctx, "e-1", DefaultThresholds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.RebootOverrideBy != "" {
+		t.Error("override scoped to a different deployment must be dropped as stale, not carried over to d2")
+	}
+	var st string
+	s.db.QueryRow(`SELECT state FROM targets WHERE deployment_id=? AND endpoint_id='e-1'`, d2.DeploymentID).Scan(&st)
+	if st != "pending_reboot" {
+		t.Errorf("d2 target untouched: %s", st)
+	}
+}
+
 // Item 3: per-item results of status reports become item status + reason;
 // the newest report wins and fulfilled wins over everything.
 func TestAcqItemResults(t *testing.T) {
@@ -369,6 +472,88 @@ func TestReimportRejectedPackage(t *testing.T) {
 	bad, err := s.IngestBundle(ctx, Intake{Bundle: Bundle{BundleID: "b-6", FileSHA256: "x6", Checks: []Check{}}, Manifest: m, ManifestBytes: []byte("{}"), QuarantineDir: t.TempDir()})
 	if err != nil || bad.State != "rejected" || !strings.Contains(bad.Error, "catalog_conflict") {
 		t.Errorf("approved conflict: %v %s %s", err, bad.State, bad.Error)
+	}
+}
+
+// Purge: frees disk space for a quarantined or rejected package (deletes its
+// file, keeps the catalog row as "purged" for history); approved and revoked
+// content is refused (the repository stays immutable). A purged package
+// delivered again behaves like a rejected one: back to quarantined, fresh
+// review.
+func TestPurgePackage(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+	ingest(t, s, 1, intakePkg("a"))
+
+	p, err := s.GetPackage(ctx, "Acme-3.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.QuarantinePath == "" {
+		t.Fatal("quarantine path not recorded")
+	}
+	if err := os.MkdirAll(filepath.Dir(p.QuarantinePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.QuarantinePath, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.PurgePackage(ctx, "user:alice", "Acme-3.0", ""); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty reason: %v", err)
+	}
+	out, err := s.PurgePackage(ctx, "user:alice", "Acme-3.0", "outdated, re-downloading the current version")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.State != "purged" {
+		t.Fatalf("state: %s", out.State)
+	}
+	if _, err := os.Stat(p.QuarantinePath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("file not removed: %v", err)
+	}
+	ev := hasAudit(auditActions(t, s, "Acme-3.0"), "package.purged|user:alice|")
+	if ev == "" || !strings.Contains(ev, `"from":"quarantined"`) {
+		t.Errorf("audit: %q", ev)
+	}
+	// A second purge (already purged, file already gone) is a clean no-op on the file.
+	if out, err = s.PurgePackage(ctx, "user:alice", "Acme-3.0", "again"); err == nil {
+		t.Fatalf("already purged must be refused: %+v", out)
+	}
+
+	// Approved content can never be purged directly, even once revoked:
+	// the repository stays immutable once something is published.
+	ingest(t, s, 2, intakePkg("b"))
+	if _, err := s.SetPackageState(ctx, "user:alice", "Acme-3.0", "approve", "ok", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PurgePackage(ctx, "user:alice", "Acme-3.0", "free space"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("approved must be refused: %v", err)
+	}
+	if _, err := s.SetPackageState(ctx, "user:alice", "Acme-3.0", "revoke", "bad build", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PurgePackage(ctx, "user:alice", "Acme-3.0", "free space"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("revoked must also be refused: %v", err)
+	}
+
+	// Purged (never-published) content, re-delivered, reviews from scratch —
+	// the same path a rejected package takes.
+	s.db.Exec(`DELETE FROM packages WHERE package_id='Acme-3.0'`) // isolate from the approved/revoked row above
+	ingest(t, s, 3, intakePkg("c"))
+	if _, err := s.SetPackageState(ctx, "user:bob", "Acme-3.0", "reject", "wrong build", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PurgePackage(ctx, "user:bob", "Acme-3.0", "free space"); err != nil {
+		t.Fatal(err)
+	}
+	ingest(t, s, 4, intakePkg("c"))
+	if p, err = s.GetPackage(ctx, "Acme-3.0"); err != nil || p.State != "quarantined" || len(p.Approvals) != 0 {
+		t.Fatalf("re-imported after purge: state=%s approvals=%d err=%v", p.State, len(p.Approvals), err)
+	}
+	ev = hasAudit(auditActions(t, s, "Acme-3.0"), "package.reimported|system:intake|")
+	if ev == "" || !strings.Contains(ev, `"from":"purged"`) {
+		t.Errorf("reimport audit: %q", ev)
 	}
 }
 

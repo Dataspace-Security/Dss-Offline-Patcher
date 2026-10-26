@@ -12,7 +12,7 @@ import type { Package, PackageFleet, PackageKind, PackageState } from "../types"
 import { fmtBytes, shortHash, useLoad } from "../util";
 import "../patch.css";
 
-const STATES: PackageState[] = ["quarantined", "approved", "rejected", "revoked"];
+const STATES: PackageState[] = ["quarantined", "approved", "rejected", "revoked", "purged"];
 
 /** Kind filter: Windows updates (.msu) or applications. Agent packages live in Settings → Agent versions. */
 type KindFilter = "" | "windows" | "apps";
@@ -183,7 +183,8 @@ export function Severity({ s }: { s: string }) {
   return <span className={`sev sev-${s}`}>{s || "—"}</span>;
 }
 
-type Action = "approve" | "reject" | "revoke";
+type Action = "approve" | "reject" | "revoke" | "purge";
+const ACTION_LABEL: Record<Action, string> = { approve: "Approve", reject: "Reject", revoke: "Revoke", purge: "Delete" };
 
 function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => void; onChanged: () => void }) {
   const { data: p, error, setData } = useLoad(() => api.get<Package>(`/api/packages/${enc(id)}`), [id]);
@@ -244,6 +245,12 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
                 </button>
                 <button className="btn btn-danger" onClick={() => setAction("reject")}>Reject…</button>
               </>
+            )}
+            {(p.state === "quarantined" || p.state === "rejected") && canApprove && (
+              <button className="btn btn-danger-ghost" onClick={() => setAction("purge")}
+                      title={p.state === "quarantined" ? "Not wanted: delete the downloaded file to free disk space" : "Delete the downloaded file to free disk space"}>
+                Delete…
+              </button>
             )}
             {p.state === "approved" && canDeploy && need && (need.needed ?? 0) === 0 && !need.active_deployment_id && (
               <span className="muted small" title="No machine needs this package: up to date, app not installed or not applicable everywhere">nothing to install</span>
@@ -376,7 +383,7 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
       )}
       {action && p && (
         <ReasonModal
-          title={`${action[0].toUpperCase()}${action.slice(1)} package`}
+          title={`${ACTION_LABEL[action]} package`}
           description={
             <>
               <b>{p.title || p.package_id}</b>
@@ -386,10 +393,11 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
                   : "Copies the content into the immutable repository and makes it deployable.")}
                 {action === "reject" && "Rejects the package. It will never become deployable."}
                 {action === "revoke" && "Stops new assignments. Active deployments of this package are cancelled automatically."}
+                {action === "purge" && "Deletes the downloaded file to free disk space. The catalog entry is kept (marked Purged) for history and audit — to get this package again, re-acquire it; it goes through approval again."}
               </div>
             </>
           }
-          confirmLabel={action[0].toUpperCase() + action.slice(1)}
+          confirmLabel={ACTION_LABEL[action]}
           danger={action !== "approve"}
           onClose={() => setAction(null)}
           onSubmit={(r) => run(action, r)}

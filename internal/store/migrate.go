@@ -73,6 +73,12 @@ var columnMigrations = []struct{ table, column, ddl string }{
 	// App formats (archive, portable, msix): the manifest's blocks as JSON
 	// ("" = none).
 	{"packages", "formats", "TEXT NOT NULL DEFAULT ''"},
+	// Manual "restart now": an admin override that bypasses one deployment's
+	// reboot policy at the endpoint's next check-in ("" = no override
+	// pending). Scoped by deployment so a stale override can't later apply
+	// to a different deployment's pending reboot.
+	{"endpoints", "reboot_override_deployment_id", "TEXT NOT NULL DEFAULT ''"},
+	{"endpoints", "reboot_override_by", "TEXT NOT NULL DEFAULT ''"},
 }
 
 func hasColumn(db *sql.DB, table, column string) (bool, error) {

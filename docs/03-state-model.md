@@ -13,11 +13,13 @@ received ──validate ok──► validated
 
 ```
 quarantined ──approve (R, user)──► approved ──revoke (R, admin)──► revoked
-     └────────reject (R, user)───► rejected
+     │        └────reject (R, user)───► rejected ──purge (R, user)──► purged
+     └──────────────────────purge (R, user)─────────────────────────► purged
 ```
 - `quarantined`: in the catalog and visible, but not in the repository and not deployable.
 - `approved`: copied to the immutable repository and deployable.
 - `revoked`: no new assignments are issued. Active **install** deployments of it are cancelled automatically; rollback deployments keep running (removing a bad package is often why it was revoked), and a rollback may be created for a revoked package.
+- `purged`: terminal, like `rejected` — never published, so only `quarantined` or `rejected` packages are eligible (never `approved` or `revoked`: the repository stays immutable once content is published). Deletes the quarantined file to free disk space; the catalog row, its history and the audit trail stay. Behaves like `rejected` for a fresh import: the same `package_id` delivered again goes back to `quarantined` for a new review.
 - **Import again** (`rejected ──delivered again in a validated bundle (intake)──► quarantined`): a rejected package whose `package_id` arrives in a new validated bundle goes back to `quarantined` for a new review, audited as `package.reimported` (actor `system:intake`; details: old and new bundle and SHA-256, `content_changed`, `approvals_cleared`). Every field, the quarantined file and the signed manifest come from the new bundle; if the content changed, the new content replaces the old (safe: a rejected package was never published or deployed, and it is reviewed again from scratch — earlier partial approvals are cleared). A `revoked` package is **never** re-imported (a security decision): it is listed as a skipped duplicate ("revoked; not imported again") whatever its content, and stays revoked. For `quarantined` and `approved` packages the old rules apply: identical content is a skipped duplicate, different content is a `catalog_conflict` that rejects the bundle.
 
 ## Deployment

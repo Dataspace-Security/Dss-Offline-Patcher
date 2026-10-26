@@ -9,3 +9,4 @@ agent-state/
 /pmctl
 /pmagent
 *.exe
+web/tsconfig.tsbuildinfo

@@ -6,7 +6,7 @@ import { normalizeRole, ROLE_HELP, roleLabel } from "../auth";
 const GREEN = ["verified", "compliant", "approved", "validated", "completed", "success", "active-ok"];
 const AMBER = ["pending_approval", "pending_reboot", "paused", "quarantined", "noncompliant", "pending", "received", "deferred", "updates_available"];
 const RED = ["failed", "rejected", "revoked", "offline", "cancelled", "failure", "expired", "lost_after_install", "out_of_support"];
-const MUTED = ["stale", "exception", "not_applicable", "rolled_back"];
+const MUTED = ["stale", "exception", "not_applicable", "rolled_back", "purged"];
 // Work in progress is blue: green only once confirmed, red only for real failures.
 const BLUE = ["active", "downloading", "downloaded", "installing", "installed"];
 
@@ -26,6 +26,7 @@ const STATE_LABELS: Record<string, string> = {
   out_of_support: "Windows no longer updated",
   awaiting_checkin: "Waiting for first check-in",
   pending_approval: "Waiting for approval",
+  purged: "Purged (file removed)",
 };
 
 /** Help text (tooltips) for endpoint statuses. */
