@@ -373,6 +373,28 @@ func TestExeInventoryMatching(t *testing.T) {
 	}
 }
 
+// Regression: an exe package with detect.display_name empty (but
+// package_name set) used to make exeAppMatch match nothing at all — the
+// agent could never recognise the app as already installed, no matter what
+// was really there. exeDetect falls back to package_name here exactly as it
+// already does when the whole exe: block is missing, matching the server's
+// internal/store/exe.go exeDetect.
+func TestExeAppMatchFallsBackToPackageName(t *testing.T) {
+	p := manifest.Package{PackageID: "GHDesktop", Kind: manifest.KindExe, Version: "3.6.9", PackageName: "GitHub Desktop",
+		Exe: &manifest.ExeInstall{InstallerType: "msi", Detect: manifest.ExeDetect{DisplayVersion: "3.6.9"}}} // no display_name
+	it := store.InventoryItem{Kind: "product", ID: "{random-product-code}", Name: "GitHub Desktop", Version: "3.6.7"}
+	if !exeAppMatch(p, it) {
+		t.Fatal("exeAppMatch must fall back to package_name when detect.display_name is empty")
+	}
+	if exeUpToDate(p, it) {
+		t.Fatal("an older installed version must not be reported up to date")
+	}
+	it.Version = "3.6.9"
+	if !exeUpToDate(p, it) {
+		t.Fatal("the current version must be recognised once display_name falls back to package_name")
+	}
+}
+
 func TestChooseARPEntry(t *testing.T) {
 	p := exePkg(manifest.ExeTypeInno)
 	entries := []arpEntry{

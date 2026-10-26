@@ -100,6 +100,33 @@ func TestExeMatching(t *testing.T) {
 	}
 }
 
+// Regression: an exe package's detect.display_name empty (but package_name
+// set) used to make exeDetect return an all-empty detection block, so
+// exeAppMatch could never match any inventory item — the package counted as
+// never installed, never needed, never verified, no matter what was really
+// on the endpoint. exeDetect must fall back to package_name here exactly as
+// it already does when the whole exe: block is missing.
+func TestExeDetectFallsBackToPackageName(t *testing.T) {
+	p := Package{PackageID: "GHDesktop", Kind: manifest.KindExe, Version: "3.6.9", PackageName: "GitHub Desktop",
+		Applicability: manifest.Applicability{OS: "windows", Arch: "x64"},
+		Exe:           &manifest.ExeInstall{InstallerType: "msi", Detect: manifest.ExeDetect{DisplayVersion: "3.6.9"}}} // no display_name
+	old := InventoryItem{Kind: "product", ID: "{random-product-code}", Name: "GitHub Desktop", Version: "3.6.7"}
+	if !exeAppMatch(p, old) {
+		t.Fatal("exeAppMatch must fall back to package_name when detect.display_name is empty")
+	}
+	if ok, _, _ := presentOn([]InventoryItem{old}, OSFacts{}, p, nil); ok {
+		t.Fatal("an older installed version must not verify")
+	}
+	if !appInstalled([]InventoryItem{old}, p) {
+		t.Fatal("appInstalled must see the older copy (so it counts as needed, not not-installed)")
+	}
+	current := old
+	current.Version = "3.6.9"
+	if ok, _, _ := presentOn([]InventoryItem{current}, OSFacts{}, p, nil); !ok {
+		t.Fatal("the current version must verify once display_name falls back to package_name")
+	}
+}
+
 func TestAgentSupportsExe(t *testing.T) {
 	for v, want := range map[string]bool{"0.9.0": true, "0.9.1": true, "1.0": true, "v0.10.0": true, "0.8.9": false, "0.6.5": false, "": false, "dev": false} {
 		if got := AgentSupportsExe(v); got != want {
