@@ -393,7 +393,16 @@ function PackagePanel({ id, onClose, onChanged }: { id: string; onClose: () => v
                   : "Copies the content into the immutable repository and makes it deployable.")}
                 {action === "reject" && "Rejects the package. It will never become deployable."}
                 {action === "revoke" && "Stops new assignments. Active deployments of this package are cancelled automatically."}
-                {action === "purge" && "Deletes the downloaded file to free disk space. The catalog entry is kept (marked Purged) for history and audit — to get this package again, re-acquire it; it goes through approval again."}
+                {action === "purge" && (
+                  <>
+                    Deletes the downloaded file to free disk space. The catalog entry is kept (marked Purged) for history and audit — to get this package again, re-acquire it; it goes through approval again.
+                    {need && need.needed > 0 && (
+                      <div className="banner banner-warn" style={{ marginTop: "0.5em" }}>
+                        <b>{need.needed}</b> endpoint{need.needed === 1 ? "" : "s"} currently need{need.needed === 1 ? "s" : ""} this package. Purging it removes it from every "needed" count and report — it will look like nothing is missing until it's re-acquired.
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             </>
           }

@@ -193,6 +193,7 @@ export function NewDeploymentPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
+  const [showIdle, setShowIdle] = useState(false);
   const [summary, setSummary] = useState<TargetSummary | null>(null);
   // 409 "already running" from the server, for the package + operation it was refused for.
   const [refused, setRefused] = useState<{ key: string; deploymentId: string } | null>(null);
@@ -217,6 +218,7 @@ export function NewDeploymentPage() {
   const runningId = (!rollback && selected ? fleet.data?.[selected.package_id]?.active_deployment_id : "")
     || (refused?.key === refusedKey ? refused.deploymentId : "");
   const nobodyNeedsIt = !rollback && !!selected && !!fleet.data && neededOf(selected) === 0;
+  const idleVisible = showIdle || nobodyNeedsIt;
   const dlPolicy = rollback ? null : policyDeadline(selected, policy.data);
   const ringNames = rings.map((r) => r.name.trim()).filter(Boolean).join(" → ");
 
@@ -345,7 +347,7 @@ export function NewDeploymentPage() {
               {byNeed ? (
                 <>
                   {byNeed.needed.map((p) => <PackageOption key={p.package_id} p={p} needed={neededOf(p)} rollback={false} />)}
-                  {byNeed.idle.length > 0 && (
+                  {byNeed.idle.length > 0 && idleVisible && (
                     <optgroup label="Nobody needs these right now">
                       {byNeed.idle.map((p) => <PackageOption key={p.package_id} p={p} needed={0} rollback={false} />)}
                     </optgroup>
@@ -356,6 +358,12 @@ export function NewDeploymentPage() {
                 <option value={packageId} disabled>{packageId} (not approved)</option>
               )}
             </select>
+            {byNeed && byNeed.idle.length > 0 && (
+              <label className="check small" title='Hidden here because nothing needs it right now — or because its "needs it" count is wrong.'>
+                <input type="checkbox" checked={idleVisible} disabled={nobodyNeedsIt} onChange={(e) => setShowIdle(e.target.checked)} />
+                {" "}show {byNeed.idle.length} package{byNeed.idle.length === 1 ? "" : "s"} nobody currently needs
+              </label>
+            )}
           </label>
           <label className="field span-2">
             <span>Name</span>

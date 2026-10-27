@@ -24,6 +24,9 @@ function RestartNeeded({ e }: { e: EndpointDetail }) {
 export default function EndpointDetailPage() {
   const { id = "" } = useParams();
   const canEdit = useCan("user");
+  // Restart now bypasses maintenance-window policy (RequestReboot), so the
+  // server requires admin — same minimum as revoke/exceptions.
+  const canRestart = useCan("admin");
   const { data: e, error, reload } = useLoad(() => api.get<EndpointDetail>(`/api/endpoints/${enc(id)}`), [id], 15000);
   const [invFilter, setInvFilter] = useState("");
   const [retiring, setRetiring] = useState(false);
@@ -60,7 +63,7 @@ export default function EndpointDetailPage() {
     <>
       <PageHeader title={<>{e.hostname} <Pill state={e.status} /></>}
                   sub={<><Link to="/endpoints">← Endpoints</Link> · <Mono>{e.endpoint_id}</Mono></>}>
-        {canEdit && !retired && pendingRestart && (
+        {canRestart && !retired && pendingRestart && (
           <button className="btn" disabled={restartOverridden} onClick={() => setRestarting(true)}>
             {restartOverridden ? "Restart requested…" : "Restart now…"}
           </button>

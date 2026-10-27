@@ -232,7 +232,7 @@ func (s *Server) Handler() http.Handler {
 	admin(viewer, "GET /api/packages/{id}", s.getPackage)
 	admin(user, "POST /api/packages/{id}/{action}", s.packageAction) // approve | reject
 	admin(adm, "POST /api/packages/{id}/revoke", s.packageAction)
-	admin(user, "POST /api/packages/{id}/purge", s.purgePackage)
+	admin(user, "POST /api/packages/{id}/purge", s.purgePackage) // "user" is right for ordinary packages; the handler's agentAllowed escalates to RoleSuperAdmin only for agent-kind ones
 	admin(viewer, "GET /api/endpoints", s.listEndpoints)
 	admin(viewer, "GET /api/endpoints/{id}", s.getEndpoint)
 	admin(viewer, "GET /api/endpoints/{id}/available", s.availableFor)
@@ -259,7 +259,7 @@ func (s *Server) Handler() http.Handler {
 	admin(user, "GET /api/acquisition-requests", s.listAcqRequests)
 	admin(user, "PATCH /api/endpoints/{id}", s.patchEndpoint)
 	admin(user, "POST /api/endpoints/{id}/retire", s.retireEndpoint)
-	admin(user, "POST /api/endpoints/{id}/reboot", s.rebootEndpoint)
+	admin(adm, "POST /api/endpoints/{id}/reboot", s.rebootEndpoint) // bypasses maintenance-window policy — same blast radius as revoke/exceptions
 	admin(user, "POST /api/enrollment-tokens", s.createEnrollmentToken)
 	admin(viewer, "GET /api/agent-setup", s.agentSetup)
 	admin(viewer, "GET /api/agent-setup/files/{name}", s.agentSetupFile)

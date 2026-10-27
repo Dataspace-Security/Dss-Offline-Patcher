@@ -243,6 +243,14 @@ func (pk *Pack) limitations(res pairsResult) []string {
 	if res.excluded > 0 {
 		out = append(out, fmt.Sprintf("%d rejected, revoked or purged catalog packages are not required and are excluded from the timeliness calculation.", res.excluded))
 	}
+	if res.zeroCoverage > 0 {
+		examples := strings.Join(res.zeroCoverageTitles, "; ")
+		if res.zeroCoverage > len(res.zeroCoverageTitles) {
+			examples += fmt.Sprintf(" (+%d more)", res.zeroCoverage-len(res.zeroCoverageTitles))
+		}
+		out = append(out, fmt.Sprintf("%s matched no endpoint in this period (no target, need or exception) and were not evaluated against any endpoint — confirm whether that's because none currently applies, or because its detection data needs reviewing, before treating affected endpoints as compliant for it: %s.",
+			plural(res.zeroCoverage, "approved/quarantined catalog package", "approved/quarantined catalog packages"), examples))
+	}
 	missingIntel := 0
 	for _, e := range in.Endpoints {
 		if e.RetiredAt == "" && e.Missing != nil && e.Missing.OS+e.Missing.Apps > 0 {

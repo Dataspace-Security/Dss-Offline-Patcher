@@ -455,6 +455,26 @@ func TestLargeFleet(t *testing.T) {
 // A single-server deployment (downloader on the management server) is
 // disclosed in the scope limitations and the PM-04 rationale; other modes
 // say nothing about it.
+// TestZeroCoveragePackageDisclosed: an approved package that matches no
+// endpoint anywhere (no target, need or exception — the symptom of bad
+// acquisition-time detection data) silently makes every endpoint compliant
+// for it unless disclosed; this confirms the disclosure fires.
+func TestZeroCoveragePackageDisclosed(t *testing.T) {
+	in := fixture()
+	lim := strings.Join(build(t, in).ScopeLimitations.Auto, "\n")
+	if strings.Contains(lim, "matched no endpoint in this period") {
+		t.Fatalf("fixture() unexpectedly already has a zero-coverage package: %s", lim)
+	}
+
+	orphan := pkg("KB9", "important", "2026-10-03")
+	in.Packages = append(in.Packages, orphan)
+	pk := build(t, in)
+	lim = strings.Join(pk.ScopeLimitations.Auto, "\n")
+	if !strings.Contains(lim, "1 approved/quarantined catalog package matched no endpoint") || !strings.Contains(lim, "Update KB9") {
+		t.Fatalf("zero-coverage package not disclosed: %s", lim)
+	}
+}
+
 func TestSingleServerDeploymentDisclosed(t *testing.T) {
 	for _, mode := range []string{"", "two-machine", "single-server"} {
 		in := fixture()

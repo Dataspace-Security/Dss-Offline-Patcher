@@ -173,6 +173,7 @@ func TestPermissionTable(t *testing.T) {
 		{"POST", "/api/acquisition-requests", "user"},
 		{"PATCH", "/api/endpoints/e-1", "user"},
 		{"POST", "/api/endpoints/e-1/retire", "user"},
+		{"POST", "/api/endpoints/e-1/reboot", "admin"},
 		{"POST", "/api/enrollment-tokens", "user"},
 		{"POST", "/api/deployments", "user"},
 		{"POST", "/api/deployments/d-1/pause", "user"},

@@ -37,6 +37,15 @@ type pairsResult struct {
 	excluded    int             // packages revoked / rejected (not required)
 	noClock     int             // pairs without a deadline (clock start unknown)
 	emergencyPk map[int32]bool  // packages handled as emergency
+	// zeroCoverage: in-scope (approved/quarantined) packages that produced no
+	// pair for any endpoint in this period — no deployment target, no
+	// "needed", no exception. A package whose detection never matches any
+	// installed copy (bad product code or display name from acquisition —
+	// see the package match-data admin view) lands here: every endpoint
+	// silently counts as compliant for it instead of anything being flagged,
+	// so this is disclosed rather than hidden.
+	zeroCoverage       int
+	zeroCoverageTitles []string
 }
 
 func parseTS(s string) time.Time {
@@ -149,6 +158,29 @@ func buildPairs(in *Input, asOf time.Time) pairsResult {
 			}
 		}
 	}
+	covered := map[int32]bool{}
+	for k := range keys {
+		covered[k.pkg] = true
+	}
+	var zeroCov []int32
+	for _, pi := range pkIdx {
+		if !covered[pi] {
+			zeroCov = append(zeroCov, pi)
+		}
+	}
+	sort.Slice(zeroCov, func(i, j int) bool { return in.Packages[zeroCov[i]].PackageID < in.Packages[zeroCov[j]].PackageID })
+	res.zeroCoverage = len(zeroCov)
+	for _, pi := range zeroCov {
+		if len(res.zeroCoverageTitles) >= 10 {
+			break
+		}
+		title := in.Packages[pi].Title
+		if title == "" {
+			title = in.Packages[pi].PackageID
+		}
+		res.zeroCoverageTitles = append(res.zeroCoverageTitles, title)
+	}
+
 	ordered := make([]key, 0, len(keys))
 	for k := range keys {
 		ordered = append(ordered, k)
