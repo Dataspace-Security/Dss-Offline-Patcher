@@ -137,6 +137,28 @@ step() { printf '\n%s==> %s%s\n' "$c_blue" "$*" "$c_off"; }
 ok()   { printf '%s  ✔ %s%s\n' "$c_green" "$*" "$c_off"; }
 warn() { printf '%s  ! %s%s\n' "$c_yellow" "$*" "$c_off"; }
 die()  { printf '%s  ✘ %s%s\n' "$c_red" "$*" "$c_off" >&2; exit 1; }
+curl_retry() { # curl, retried on a transient network failure (e.g. a reset TLS connection — curl's own
+  # --retry does not cover a mid-transfer recv/SSL error, only timeouts and HTTP 408/429/5xx) before
+  # giving up; a permanent failure (bad URL, HTTP 4xx) is not retried. Buffers each attempt's own
+  # stdout and only emits the successful one, so a caller piping our stdout (e.g. `curl_retry ... |
+  # tr ...`) never sees a failed attempt's partial output concatenated ahead of a later retry's.
+  local tries=5 n out rc
+  for n in $(seq 1 $tries); do
+    if out=$(curl "$@"); then
+      printf '%s' "$out"
+      return 0
+    else
+      rc=$?
+    fi
+    case $rc in
+      6 | 7 | 18 | 28 | 35 | 52 | 55 | 56) ;; # transient network error: retry
+      *) return "$rc" ;;                      # permanent failure: retrying wastes time and misdiagnoses it
+    esac
+    [ "$n" = "$tries" ] && return "$rc"
+    warn "network request failed (attempt $n/$tries), retrying in $((n * 2))s …"
+    sleep $((n * 2))
+  done
+}
 banner() { # loud multi-line warning
   printf '\n%s' "$c_red"
   printf '  ************************************************************************\n'
@@ -1514,12 +1536,12 @@ else
     tgz="go${GO_VERSION}.linux-${GOARCH}.tar.gz"
     echo "  downloading $tgz from go.dev …"
     # The JSON is pretty-printed: flatten it, then split per file object.
-    sha=$(curl -fsSL "https://go.dev/dl/?mode=json&include=all" | tr -d '\n ' | tr '{' '\n' | grep "\"filename\":\"$tgz\"" | grep -o '"sha256":"[0-9a-f]*"' | cut -d'"' -f4 | head -1 || true)
-    [ -n "$sha" ] || die "could not find the published checksum for $tgz"
+    sha=$(curl_retry -fsSL "https://go.dev/dl/?mode=json&include=all" | tr -d '\n ' | tr '{' '\n' | grep "\"filename\":\"$tgz\"" | grep -o '"sha256":"[0-9a-f]*"' | cut -d'"' -f4 | head -1 || true)
+    [ -n "$sha" ] || die "could not find the published checksum for $tgz (go.dev unreachable after retries — check this machine's outbound network/DNS, or build offline: 'make dist' on a connected machine, carry the tarball over, and install from its bin/linux-$GOARCH/ instead)"
     # A build-only toolchain in a temporary directory (removed at exit): /usr/local/go, which other
     # projects on a shared host may use, is never touched (M-12).
     GO_TMP=$(mktemp -d)
-    curl -fsSL -o "$GO_TMP/$tgz" "https://go.dev/dl/$tgz"
+    curl_retry -fsSL -o "$GO_TMP/$tgz" "https://go.dev/dl/$tgz" || die "could not download $tgz from go.dev after retries — check this machine's outbound network/DNS, or build offline (see above)"
     echo "$sha  $GO_TMP/$tgz" | sha256sum -c --quiet - || die "Go download failed its SHA-256 check"
     tar -C "$GO_TMP" -xzf "$GO_TMP/$tgz" && rm -f "$GO_TMP/$tgz"
     GO=$GO_TMP/go/bin/go
