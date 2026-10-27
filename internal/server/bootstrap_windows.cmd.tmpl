@@ -274,14 +274,20 @@ rem curl, retried up to 5 times with a linear backoff on a transient failure, mi
 rem curl_retry() in install-ubuntu.sh (curl's own --retry does not cover a mid-transfer
 rem reset/SSL error, only timeouts and HTTP 408/429/5xx). Pins the server's CA via --cacert
 rem when one is configured, exactly like the per-request pinning curl already gives install-ubuntu.sh;
-rem no system trust-store change is made.
+rem no system trust-store change is made. --ssl-no-revoke is needed in that case too: Windows'
+rem bundled curl.exe uses the Schannel TLS backend, which (unlike curl's usual OpenSSL backend)
+rem always attempts an online CRL/OCSP revocation check for a pinned chain by default and treats
+rem "revocation status unknown" as a hard failure -- fatal on an air-gapped network with no
+rem revocation endpoint ever reachable, for a self-signed CA that was never going to have one
+rem anyway. windows.ps1's callback already tolerates exactly this (RevocationStatusUnknown is an
+rem explicitly accepted X509ChainStatus there); this is curl's equivalent concession.
 :CurlRetry
 setlocal EnableDelayedExpansion
 set "URL=%~1"
 set "OUT=%~2"
 for /l %%n in (1,1,5) do (
   if defined CAFILE (
-    curl -fsS --cacert "%CAFILE%" -H "X-Enrollment-Token: %TOKEN%" "%URL%" -o "%OUT%"
+    curl -fsS --ssl-no-revoke --cacert "%CAFILE%" -H "X-Enrollment-Token: %TOKEN%" "%URL%" -o "%OUT%"
   ) else (
     curl -fsS -H "X-Enrollment-Token: %TOKEN%" "%URL%" -o "%OUT%"
   )

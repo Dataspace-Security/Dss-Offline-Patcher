@@ -87,6 +87,12 @@ export function windowsOneLiner(agentURL: string, token: string, caSha256: strin
  * the one that fetches windows.cmd itself. windows.cmd pins its own download of pmagent.exe the
  * same way once it is running (see the server template), so the file written here is only ever
  * needed for this first fetch, and is deleted right after.
+ *
+ * --ssl-no-revoke: Windows' bundled curl.exe uses the Schannel TLS backend, which always
+ * attempts an online CRL/OCSP revocation check by default and fails closed when one isn't
+ * reachable -- guaranteed on an air-gapped network, for a self-signed CA that never had a
+ * revocation endpoint to begin with. windowsOneLiner's PowerShell callback already tolerates
+ * exactly this (RevocationStatusUnknown is an explicitly accepted X509ChainStatus there).
  */
 export function windowsOneLinerCmd(agentURL: string, token: string, caPem: string): string {
   const caFile = "%TEMP%\\offpatch-ca.pem";
@@ -98,7 +104,7 @@ export function windowsOneLinerCmd(agentURL: string, token: string, caPem: strin
   return [
     `set OFFPATCH_TOKEN=${token}`,
     ...caLines,
-    `curl -fsS --cacert "${caFile}" -H "X-Enrollment-Token: %OFFPATCH_TOKEN%" "${agentURL}/api/agent-setup/bootstrap/windows.cmd" -o "${bootFile}" && call "${bootFile}"`,
+    `curl -fsS --ssl-no-revoke --cacert "${caFile}" -H "X-Enrollment-Token: %OFFPATCH_TOKEN%" "${agentURL}/api/agent-setup/bootstrap/windows.cmd" -o "${bootFile}" && call "${bootFile}"`,
     `del /f /q "${caFile}" "${bootFile}" >nul 2>&1`,
   ].join("\n");
 }
@@ -130,6 +136,65 @@ if ($msi) {
 }
 if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
 'Agent removed.'`;
+
+/**
+ * cmd.exe equivalent of REMOVE_AGENT_PS, for endpoints where PowerShell itself is blocked.
+ * pmagent.exe's own "service uninstall" just calls the Windows service manager's Delete() --
+ * exactly what `sc delete` does too -- so there's no need to locate the exe on disk at all, only
+ * to decide whether an MSI uninstall (which also removes its own service registration) applies
+ * instead. Every install path shown in this console uses the compiled-in default state
+ * directory, so this assumes %ProgramData%\offpatch rather than parsing -state-dir out of the
+ * service's registered path the way windows.ps1 does; it warns instead of guessing if the
+ * registered path doesn't actually match that default.
+ *
+ * Deliberately goto-gated rather than wrapped in `if (...)`/`for (...) do (...)` blocks wherever
+ * a pipe or redirect needs to reach a nested command literally (the reg query | findstr calls):
+ * cmd.exe's parser consumes one layer of ^-escaping when it pre-scans a parenthesized block, so a
+ * singly-escaped pipe/redirect that would be correct standalone breaks once nested a level deeper.
+ * A flat, label-based sequence never nests, so it never needs that second layer of escaping.
+ */
+const REMOVE_AGENT_CMD = String.raw`:: Run in an elevated Command Prompt
+set "SERVICE=offpatch-agent"
+set "DIR=%ProgramData%\offpatch"
+set "SVCFOUND=0"
+sc query "%SERVICE%" >nul 2>&1
+if not errorlevel 1 set "SVCFOUND=1"
+
+rem Broad candidate search first (substring match over all Uninstall value data, not just
+rem DisplayName), then verify below by querying just that one candidate's own DisplayName --
+rem narrower than a single /s /f /d sweep could ever be on its own, and avoids a pipe nested in a
+rem FOR loop's own do-block, which would hit the same escaping trap as above.
+set "MSIGUID="
+for /f "delims=" %%K in ('reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" /s /f "offpatch Endpoint Agent" /d 2^>nul ^| findstr /B /C:"HKEY_LOCAL_MACHINE"') do (
+  for %%A in ("%%K") do set "MSIGUID=%%~nxA"
+)
+if not defined MSIGUID goto :msiverified
+reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\%MSIGUID%" /v DisplayName 2>nul | findstr /L /C:"offpatch Endpoint Agent" >nul 2>nul
+if errorlevel 1 set "MSIGUID="
+:msiverified
+
+if "%SVCFOUND%"=="0" if not defined MSIGUID (
+  echo The agent is not installed on this PC.
+  goto :eof
+)
+
+echo Data: %DIR%
+if not "%SVCFOUND%"=="1" goto :afterinfo
+for /f "tokens=2,*" %%P in ('reg query "HKLM\SYSTEM\CurrentControlSet\Services\%SERVICE%" /v ImagePath 2^>nul ^| findstr /I "ImagePath"') do set "BINPATH=%%Q"
+echo Agent: %BINPATH%
+echo %BINPATH% | findstr /I /C:"%DIR%" >nul 2>&1
+if errorlevel 1 echo   ! this service was registered with a different -state-dir than %DIR%; its real data folder was not removed -- check with: sc qc %SERVICE%
+net stop "%SERVICE%" >nul 2>&1
+:afterinfo
+
+if defined MSIGUID (
+  msiexec /x "%MSIGUID%" /qn
+) else if "%SVCFOUND%"=="1" (
+  sc delete "%SERVICE%" >nul
+)
+
+if exist "%DIR%" rd /s /q "%DIR%"
+echo Agent removed.`;
 
 /**
  * Step-by-step agent installation, with the server URL, pinned signing
@@ -195,6 +260,7 @@ Get-Service offpatch-agent`,
 net start offpatch-agent
 sc query offpatch-agent`,
       remove: REMOVE_AGENT_PS,
+      removeCmd: REMOVE_AGENT_CMD,
       msi: `msiexec /i offpatch-agent.msi SERVER=${url} TOKEN=${tok} /qn`,
     };
   }, [keys.length, pinCA, useRoot, url, tok, agentExe?.sha256]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -434,6 +500,8 @@ sc query offpatch-agent`,
         <details className="setup-more">
           <summary>Remove the agent</summary>
           <CodeBlock lang="PowerShell" code={winCmds.remove} />
+          <div className="hint">PowerShell blocked? <Mono>cmd.exe</Mono> equivalent:</div>
+          <CodeBlock lang="cmd.exe" code={winCmds.removeCmd} />
         </details>
       )}
     </div>
