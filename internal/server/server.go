@@ -293,6 +293,7 @@ func (s *Server) Handler() http.Handler {
 	admin(store.RoleSuperAdmin, "POST /api/auth/mfa/disable", s.mfaDisable)
 
 	mux.HandleFunc("GET /api/agent-setup/bootstrap/windows.ps1", s.bootstrapWindows)
+	mux.HandleFunc("GET /api/agent-setup/bootstrap/windows.cmd", s.bootstrapWindowsCmd)
 	mux.HandleFunc("GET /api/agent-setup/bootstrap/files/{name}", s.bootstrapFile)
 	mux.HandleFunc("POST /api/agent/enroll", s.agentEnroll)
 	mux.Handle("POST /api/agent/checkin", s.requireAgent(s.agentCheckin))

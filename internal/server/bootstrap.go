@@ -26,6 +26,40 @@ var windowsBootstrapSrc string
 
 var windowsBootstrap = template.Must(template.New("windows.ps1").Parse(windowsBootstrapSrc))
 
+// A second, cmd.exe-only installer for endpoints where PowerShell itself is
+// blocked by policy (AppLocker/SRP, not just a cautious admin). Same contract
+// as windows.ps1 — same enrollment token header, same staged pmagent.exe, same
+// pinned keys/CA — rendered as batch instead. It requires curl.exe (bundled
+// since Windows 10 1803 / Server 2019); see the template for why there is no
+// scripted fallback for older images.
+//
+//go:embed bootstrap_windows.cmd.tmpl
+var windowsBootstrapCmdSrc string
+
+var windowsBootstrapCmd = template.Must(template.New("windows.cmd").Parse(windowsBootstrapCmdSrc))
+
+// pemLines splits a PEM block (or any multi-line text) into the lines a batch
+// script writes one at a time with `echo` — cmd has no heredoc. nil for an
+// empty/blank input so `{{if .Field}}` in the cmd template works the same way
+// as the plain-string `{{if .Field}}` in the PowerShell one. A blank line is
+// dropped rather than written out: valid PEM never has one, and `echo` with
+// nothing after it prints "ECHO is on."/"ECHO is off." instead of a blank
+// line, which would otherwise corrupt the file it's appended to.
+func pemLines(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	var lines []string
+	for _, l := range strings.Split(s, "\n") {
+		l = strings.TrimRight(l, "\r")
+		if l != "" {
+			lines = append(lines, l)
+		}
+	}
+	return lines
+}
+
 // Host header values we are willing to template into a script.
 var hostRe = regexp.MustCompile(`^[A-Za-z0-9.\-]+(:[0-9]{1,5})?$|^\[[0-9A-Fa-f:.]+\](:[0-9]{1,5})?$`)
 
@@ -69,24 +103,37 @@ func (s *Server) serverURL(r *http.Request) (string, bool) {
 	return scheme + "://" + r.Host, true
 }
 
-func (s *Server) bootstrapWindows(w http.ResponseWriter, r *http.Request) {
-	if !s.bootstrapAllowed(w, r) {
-		return
-	}
-	url, ok := s.serverURL(r)
-	if !ok {
+// windowsBootstrapData gathers what both Windows installer templates need
+// (server URL, pmagent.exe's staged hash, pinned keys/root key) and writes
+// the appropriate error response itself on failure. ok is false when it has
+// already written that response and the caller should return without
+// rendering a template.
+func (s *Server) windowsBootstrapData(w http.ResponseWriter, r *http.Request) (url, exeSHA string, keys []setupKey, rootPEM string, ok bool) {
+	url, hostOK := s.serverURL(r)
+	if !hostOK {
 		writeErr(w, http.StatusBadRequest, "invalid Host header")
-		return
+		return "", "", nil, "", false
 	}
 	_, exeSHA, err := manifest.HashFile(filepath.Join(s.distDir(), bootstrapExe))
 	if err != nil {
 		s.log.Warn("windows bootstrap requested but pmagent.exe is not staged", "dir", s.distDir())
 		writeErr(w, http.StatusNotFound, "pmagent.exe is not staged on the server")
-		return
+		return "", "", nil, "", false
 	}
-	keys, rootPEM, err := s.setupKeys(r)
+	keys, rootPEM, err = s.setupKeys(r)
 	if err != nil {
 		s.fail(w, err)
+		return "", "", nil, "", false
+	}
+	return url, exeSHA, keys, rootPEM, true
+}
+
+func (s *Server) bootstrapWindows(w http.ResponseWriter, r *http.Request) {
+	if !s.bootstrapAllowed(w, r) {
+		return
+	}
+	url, exeSHA, keys, rootPEM, ok := s.windowsBootstrapData(w, r)
+	if !ok {
 		return
 	}
 	pems := make([]string, 0, len(keys))
@@ -100,6 +147,34 @@ func (s *Server) bootstrapWindows(w http.ResponseWriter, r *http.Request) {
 		"Keys":      pems,
 		"Root":      strings.TrimSpace(rootPEM),
 		"CA":        strings.TrimSpace(caPEM(s)),
+	}); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Write(buf.Bytes())
+}
+
+func (s *Server) bootstrapWindowsCmd(w http.ResponseWriter, r *http.Request) {
+	if !s.bootstrapAllowed(w, r) {
+		return
+	}
+	url, exeSHA, keys, rootPEM, ok := s.windowsBootstrapData(w, r)
+	if !ok {
+		return
+	}
+	keyLines := make([][]string, 0, len(keys))
+	for _, k := range keys {
+		keyLines = append(keyLines, pemLines(k.PublicKey))
+	}
+	var buf bytes.Buffer
+	if err := windowsBootstrapCmd.Execute(&buf, map[string]any{
+		"Server":    url,
+		"ExeSHA256": exeSHA,
+		"Keys":      keyLines,
+		"Root":      pemLines(rootPEM),
+		"CA":        pemLines(caPEM(s)),
 	}); err != nil {
 		s.fail(w, err)
 		return

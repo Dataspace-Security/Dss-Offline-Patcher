@@ -117,3 +117,85 @@ func TestWindowsBootstrap(t *testing.T) {
 		t.Fatalf("agent-setup: %+v", setup)
 	}
 }
+
+// The cmd.exe installer (for endpoints where PowerShell itself is blocked) is the same contract
+// as windows.ps1: same token gate, same staged pmagent.exe, same pinned keys/CA, just rendered as
+// batch instead of PowerShell.
+func TestWindowsBootstrapCmd(t *testing.T) {
+	e := newEnvOpts(t, true, "")
+	get := func(path, tok string) (int, []byte) {
+		t.Helper()
+		req, _ := http.NewRequest("GET", e.srv.URL+path, nil)
+		if tok != "" {
+			req.Header.Set("X-Enrollment-Token", tok)
+		}
+		resp, err := e.hc.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, b
+	}
+	const script = "/api/agent-setup/bootstrap/windows.cmd"
+
+	var tok struct{ Token string }
+	if c := e.api("POST", "/api/enrollment-tokens", tokOperator, map[string]any{"groups": []string{"windows"}, "site": "hq", "expires_in_hours": 1}, &tok); c != 201 {
+		t.Fatalf("create token: %d", c)
+	}
+
+	for name, tk := range map[string]string{"no token": "", "bogus token": "enr_bogus", "admin token": tokOperator} {
+		if c, _ := get(script, tk); c != 401 {
+			t.Fatalf("%s: %d, want 401", name, c)
+		}
+	}
+	if c, _ := get(script, tok.Token); c != 404 {
+		t.Fatalf("no pmagent.exe staged: %d, want 404", c)
+	}
+
+	dist := filepath.Join(e.cfg.DataDir, "agent-dist")
+	os.MkdirAll(dist, 0o750)
+	bin := []byte("MZ fake agent")
+	os.WriteFile(filepath.Join(dist, "pmagent.exe"), bin, 0o644)
+
+	c, body := get(script, tok.Token)
+	if c != 200 {
+		t.Fatalf("script: %d %s", c, body)
+	}
+	sum := sha256.Sum256(bin)
+	cmd := string(body)
+	for _, want := range []string{
+		"set \"SERVER=" + e.srv.URL + "\"",
+		"set \"EXESHA256=" + hex.EncodeToString(sum[:]) + "\"",
+		"BEGIN CERTIFICATE",
+		"curl -fsS",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("script lacks %q", want)
+		}
+	}
+	// cmd has no heredoc: the PEM is written one line at a time with `echo`, not reproduced
+	// verbatim like in windows.ps1's single-quoted block.
+	for _, line := range strings.Split(strings.TrimSpace(e.pubPEM), "\n") {
+		if !strings.Contains(cmd, "echo "+line) {
+			t.Fatalf("script does not write pubkey line %q", line)
+		}
+	}
+	// It may mention windows.ps1/PowerShell in its own comments (pointing at the other
+	// installer or explaining a design choice); it must never actually invoke it.
+	if strings.Contains(cmd, "powershell.exe") || strings.Contains(cmd, "powershell ") || strings.Contains(cmd, "powershell.") {
+		t.Fatalf("the cmd.exe installer must not shell out to powershell.exe:\n%s", cmd)
+	}
+
+	// The bootstrap does not consume the token: it still enrolls a device.
+	sim := agent.SimConfig{Hostname: "pc-boot-02"}
+	dir := filepath.Join(e.dir, "agents", "pc-boot-02")
+	p, _ := agent.PlatformFor(&agent.State{Platform: "sim", Sim: &sim}, dir)
+	os.MkdirAll(dir, 0o700)
+	if _, err := agent.Enroll(e.srv.URL, tok.Token, e.caFile, dir, []string{e.pubPEM}, e.rootPEM, p, "sim", &sim); err != nil {
+		t.Fatalf("token unusable after bootstrap downloads: %v", err)
+	}
+	if c, _ := get(script, tok.Token); c != 401 {
+		t.Fatalf("used token: %d, want 401", c)
+	}
+}

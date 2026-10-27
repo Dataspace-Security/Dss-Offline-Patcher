@@ -33,12 +33,12 @@ export function CodeBlock({ code, lang }: { code: string; lang?: string }) {
   );
 }
 
-/** Shows the step-by-step guide directly, or folded away when a quicker path exists. */
-function ManualWrap({ collapsed, children }: { collapsed: boolean; children: ReactNode }) {
+/** Shows content directly, or folded away behind a native disclosure when a quicker path exists. */
+function ManualWrap({ collapsed, summary = "Manual install (step by step)", children }: { collapsed: boolean; summary?: string; children: ReactNode }) {
   if (!collapsed) return <>{children}</>;
   return (
     <details className="setup-more">
-      <summary>Manual install (step by step)</summary>
+      <summary>{summary}</summary>
       {children}
     </details>
   );
@@ -77,6 +77,30 @@ export function windowsOneLiner(agentURL: string, token: string, caSha256: strin
     `$t='${token}'; Add-Type -TypeDefinition '${PIN_CSHARP}'; [OffpatchPin2]::Install('${caSha256.toUpperCase()}', $${opts.web ? "true" : "false"}); ` +
     `iex (irm '${agentURL}/api/agent-setup/bootstrap/windows.ps1' -Headers @{'X-Enrollment-Token'=$t})`
   );
+}
+
+/**
+ * cmd.exe equivalent of windowsOneLiner, for endpoints where PowerShell itself is blocked by
+ * policy (AppLocker/SRP, not just a cautious admin). PowerShell's trick of pinning the whole
+ * process before `irm`/`iex` runs doesn't carry over: curl.exe is a new process per call, so the
+ * CA has to be written to a file first and pinned with `--cacert` on every call, starting with
+ * the one that fetches windows.cmd itself. windows.cmd pins its own download of pmagent.exe the
+ * same way once it is running (see the server template), so the file written here is only ever
+ * needed for this first fetch, and is deleted right after.
+ */
+export function windowsOneLinerCmd(agentURL: string, token: string, caPem: string): string {
+  const caFile = "%TEMP%\\offpatch-ca.pem";
+  const bootFile = "%TEMP%\\offpatch-boot.cmd";
+  const caLines = caPem
+    .trim()
+    .split(/\r?\n/)
+    .map((line, i) => `${i === 0 ? ">" : ">>"} "${caFile}" echo ${line}`);
+  return [
+    `set OFFPATCH_TOKEN=${token}`,
+    ...caLines,
+    `curl -fsS --cacert "${caFile}" -H "X-Enrollment-Token: %OFFPATCH_TOKEN%" "${agentURL}/api/agent-setup/bootstrap/windows.cmd" -o "${bootFile}" && call "${bootFile}"`,
+    `del /f /q "${caFile}" "${bootFile}" >nul 2>&1`,
+  ].join("\n");
 }
 
 /**
@@ -158,11 +182,18 @@ export function AgentSetupGuide({ token, groups, site }: { token?: string; group
 New-Item -ItemType Directory -Force C:\\offpatch | Out-Null
 # Copy pmagent.exe and ${keys.length > 1 ? "the .pub files" : "bundle.pub"}${extra.length ? ` and ${extra.join(" and ")}` : ""} into C:\\offpatch, then:
 Get-FileHash C:\\offpatch\\pmagent.exe -Algorithm SHA256${agentExe ? `   # expect ${agentExe.sha256}` : ""}`,
+      prepCmd: `:: Run in an elevated Command Prompt (PowerShell blocked? this needs none)
+mkdir C:\\offpatch 2>nul
+:: Copy pmagent.exe and ${keys.length > 1 ? "the .pub files" : "bundle.pub"}${extra.length ? ` and ${extra.join(" and ")}` : ""} into C:\\offpatch (the console's download buttons above work in any browser), then:
+certutil -hashfile C:\\offpatch\\pmagent.exe SHA256${agentExe ? `   :: expect ${agentExe.sha256}` : ""}`,
       enroll: `C:\\offpatch\\pmagent.exe enroll -server ${url} -token ${tok} -pubkey ${pub}${ca}${root}
 C:\\offpatch\\pmagent.exe run -once`,
       service: `C:\\offpatch\\pmagent.exe service install
 Start-Service offpatch-agent
 Get-Service offpatch-agent`,
+      serviceCmd: `C:\\offpatch\\pmagent.exe service install
+net start offpatch-agent
+sc query offpatch-agent`,
       remove: REMOVE_AGENT_PS,
       msi: `msiexec /i offpatch-agent.msi SERVER=${url} TOKEN=${tok} /qn`,
     };
@@ -268,6 +299,15 @@ Get-Service offpatch-agent`,
             </div>
           )}
           <div className="hint">CA SHA-256 <Mono>{data?.ca_sha256}</Mono></div>
+          <ManualWrap collapsed summary="PowerShell blocked?">
+            <div className="hint">
+              For endpoints where PowerShell itself is blocked by policy (not just avoided). Paste this into an{" "}
+              <b>elevated Command Prompt</b> instead — same checks, same result. It needs <Mono>curl.exe</Mono>, which
+              ships with Windows 10 1803+ and Server 2019+; older images without it should use the manual,
+              cmd.exe-only install steps below instead.
+            </div>
+            {token && <CodeBlock lang="cmd.exe (Administrator)" code={windowsOneLinerCmd(url, tok, caPem)} />}
+          </ManualWrap>
         </div>
       )}
       {platform === "windows" && hasCA && urlValid && !hostInCert && (
@@ -332,18 +372,23 @@ Get-Service offpatch-agent`,
             <li>
               <h3>Prepare the endpoint</h3>
               <CodeBlock lang="PowerShell" code={winCmds.prep} />
+              <div className="hint">PowerShell blocked? <Mono>cmd.exe</Mono> equivalent:</div>
+              <CodeBlock lang="cmd.exe" code={winCmds.prepCmd} />
             </li>
             <li>
               <h3>Enroll and run one check-in</h3>
-              <CodeBlock lang="PowerShell" code={winCmds.enroll} />
+              <CodeBlock lang="PowerShell / cmd.exe" code={winCmds.enroll} />
               <div className="hint">
                 Enrollment stores the device identity in <Mono>C:\ProgramData\offpatch</Mono>. Each enrollment uses up one use of the token.
                 {hasCA && <> The agent generates its own private key (it never leaves the endpoint) and receives a <b>client certificate</b> signed by this server's CA; it authenticates with it (mTLS) and <b>renews it automatically</b> before it expires.</>}
+                {" "}These two lines are plain <Mono>pmagent.exe</Mono> invocations and work the same in cmd.exe.
               </div>
             </li>
             <li>
               <h3>Install as a Windows service</h3>
               <CodeBlock lang="PowerShell" code={winCmds.service} />
+              <div className="hint">PowerShell blocked? <Mono>cmd.exe</Mono> equivalent:</div>
+              <CodeBlock lang="cmd.exe" code={winCmds.serviceCmd} />
               <div className="hint">
                 The service starts automatically at boot, checks in every {data?.checkin_interval_seconds ?? 60}s and logs to{" "}
                 <Mono>C:\ProgramData\offpatch\agent.log</Mono>. It reboots only when a deployment's reboot policy allows it (inside a maintenance window or at the deadline); otherwise the machine shows <i>Restart needed</i>.
