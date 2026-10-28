@@ -1924,9 +1924,9 @@ if [ $IS_SERVER = 1 ]; then
     sans=$(openssl x509 -in "$ETC/pki/server.pem" -noout -ext subjectAltName 2>/dev/null | tail -n +2 | tr ',' '\n' \
            | sed -n 's/^[[:space:]]*DNS://p; s/^[[:space:]]*IP Address://p' | tr -d ' ' || true)
     need=""
-    for h in "$SERVER_NAME" ${IP:+"$IP"}; do printf '%s\n' "$sans" | grep -qixF "$h" || need="$need $h"; done
+    for h in "$SERVER_NAME" localhost 127.0.0.1 ${IP:+"$IP"}; do printf '%s\n' "$sans" | grep -qixF "$h" || need="$need $h"; done
     if [ -n "$need" ]; then
-      keep=$(printf '%s\n' "$SERVER_NAME" $sans "$IP" "$(printf '%s' "$EXTRA_HOSTS" | tr ',' '\n')" | awk 'NF && !seen[tolower($0)]++' | paste -sd, -)
+      keep=$(printf '%s\n' "$SERVER_NAME" localhost 127.0.0.1 $sans "$IP" "$(printf '%s' "$EXTRA_HOSTS" | tr ',' '\n')" | awk 'NF && !seen[tolower($0)]++' | paste -sd, -)
       if as_user "$SVC_USER" "$PREFIX/bin/pmserver" reissue-server-cert -dir "$ETC/pki" -hosts "$keep" >/dev/null; then
         ok "server certificate reissued for: $keep (added:$need; agents keep working: they pin the CA)"
       else
@@ -2167,10 +2167,10 @@ PY
   rm -f "$ETC/pmserver.json.pre-upgrade"
   [ $INSECURE = 0 ] && CURL_CA=(--cacert "$ETC/pki/ca.pem")
   for _ in $(seq 1 30); do
-    curl -fs -o /dev/null ${CURL_CA[@]+"${CURL_CA[@]}"} "$URL_LOCAL/" && break
+    curl -fs -k -o /dev/null "$URL_LOCAL/" && break
     sleep 1
   done
-  curl -fs -o /dev/null ${CURL_CA[@]+"${CURL_CA[@]}"} "$URL_LOCAL/" || die "server did not start; check: journalctl -u offpatch-server (or $SRV_DATA/pmserver.log)$(
+  curl -fs -k -o /dev/null "$URL_LOCAL/" || die "server did not start; check: journalctl -u offpatch-server (or $SRV_DATA/pmserver.log)$(
     [ $SERVER_CONFIGURED = 0 ] || [ ! -d "$PREFIX/bin.prev" ] || printf '%s' "
      Upgrade: previous binaries are in $PREFIX/bin.prev and the pre-upgrade backup in $BACKUP_DIR/pre-upgrade-*
      (roll back: runbook 05, restore that backup with the previous pmserver, then start offpatch-server)")"
