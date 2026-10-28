@@ -477,18 +477,33 @@ func initPKI(args []string) error {
 	dir := fs.String("dir", "pki", "output directory (keep ca.key offline-backed-up and readable only by pmserver)")
 	hosts := fs.String("hosts", "", "comma-separated DNS names / IPs endpoints use to reach this server")
 	fs.Parse(args)
-	if *hosts == "" {
+	hostList := []string{}
+	if *hosts != "" {
+		for _, h := range strings.Split(*hosts, ",") {
+			if h = strings.TrimSpace(h); h != "" {
+				hostList = append(hostList, h)
+			}
+		}
+	}
+	// Auto-include local machine hostname and IPs so agents connecting by IP or hostname
+	// never encounter TLS cert mismatch (curl error 60).
+	for _, h := range pki.HostIPs() {
+		if !slices.Contains(hostList, h) {
+			hostList = append(hostList, h)
+		}
+	}
+	if len(hostList) == 0 {
 		return fmt.Errorf("-hosts is required, e.g. -hosts pm.corp.internal,10.20.0.5")
 	}
-	if err := pki.Init(*dir, strings.Split(*hosts, ",")); err != nil {
+	if err := pki.Init(*dir, hostList); err != nil {
 		return err
 	}
 	ca, err := pki.Load(*dir)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("CA:          %s (fingerprint %s)\nserver cert: %s\nSet \"pki_dir\": %q in pmserver.json and give ca.pem to endpoints (-ca).\n",
-		filepath.Join(*dir, pki.CAFile), pki.Fingerprint(ca.Cert)[:32], filepath.Join(*dir, pki.ServerCert), *dir)
+	fmt.Printf("CA:          %s (fingerprint %s)\nserver cert: %s (hosts: %s)\nSet \"pki_dir\": %q in pmserver.json and give ca.pem to endpoints (-ca).\n",
+		filepath.Join(*dir, pki.CAFile), pki.Fingerprint(ca.Cert)[:32], filepath.Join(*dir, pki.ServerCert), strings.Join(hostList, ", "), *dir)
 	return nil
 }
 
@@ -590,6 +605,13 @@ func reissueCert(args []string) error {
 			return fmt.Errorf("-hosts is required: existing certificate has no SANs to reuse")
 		}
 		fmt.Printf("reusing existing certificate SANs: %s\n", strings.Join(hostList, ", "))
+	}
+
+	// Auto-include local machine hostname and IPs so any unconfigured local addresses are covered.
+	for _, h := range pki.HostIPs() {
+		if !slices.Contains(hostList, h) {
+			hostList = append(hostList, h)
+		}
 	}
 
 	for _, f := range []string{pki.ServerCert, pki.ServerKey} {

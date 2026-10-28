@@ -18,6 +18,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -93,6 +94,28 @@ func LoadServerCert(dir string) (*x509.Certificate, error) {
 		return nil, fmt.Errorf("read %s: %w", ServerCert, err)
 	}
 	return ParseCertPEM(b)
+}
+
+// HostIPs returns all non-loopback IPv4 addresses and hostname for the local machine
+// so server certificates can automatically cover them (preventing curl error 60).
+func HostIPs() []string {
+	var out []string
+	if h, err := os.Hostname(); err == nil && h != "" {
+		out = append(out, h)
+	}
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok {
+				if v4 := n.IP.To4(); v4 != nil && !v4.IsLoopback() {
+					s := v4.String()
+					if !slices.Contains(out, s) {
+						out = append(out, s)
+					}
+				}
+			}
+		}
+	}
+	return out
 }
 
 // Init creates a CA and a server certificate for hosts (DNS names or IPs).

@@ -14,8 +14,11 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -150,6 +153,7 @@ func (s *Server) internalTLSConfig() *tls.Config {
 	if s.cfg.TLSCert == "" {
 		return cfg
 	}
+	s.autoHealServerCert()
 	pair, err := tls.LoadX509KeyPair(s.cfg.TLSCert, s.cfg.TLSKey)
 	if err != nil {
 		s.log.Warn("could not load server certificate to add the CA to the chain", "err", err)
@@ -173,6 +177,92 @@ func (s *Server) internalTLSConfig() *tls.Config {
 	}
 	cfg.Certificates = []tls.Certificate{pair}
 	return cfg
+}
+
+// autoHealServerCert checks whether the internal server certificate covers
+// server_name, the agent_url hostname/IP, and the machine's local IPs. If any are
+// missing and the internal CA key is present, it automatically reissues server.pem
+// so agents never fail TLS verification (curl error 60 / hostname mismatch).
+func (s *Server) autoHealServerCert() {
+	if s.ca == nil || s.cfg.PKIDir == "" || s.cfg.TLSCert == "" {
+		return
+	}
+	// Only auto-heal if TLSCert is inside PKIDir (the internal server certificate, not an external custom cert)
+	if filepath.Dir(filepath.Clean(s.cfg.TLSCert)) != filepath.Clean(s.cfg.PKIDir) {
+		return
+	}
+
+	existing, err := pki.LoadServerCert(s.cfg.PKIDir)
+	var currentHosts []string
+	if err == nil {
+		currentHosts = append(currentHosts, existing.DNSNames...)
+		for _, ip := range existing.IPAddresses {
+			currentHosts = append(currentHosts, ip.String())
+		}
+	}
+
+	covers := func(host string) bool {
+		h := strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
+		if ip := net.ParseIP(h); ip != nil {
+			for _, ch := range currentHosts {
+				if cip := net.ParseIP(ch); cip != nil && cip.Equal(ip) {
+					return true
+				}
+			}
+			return false
+		}
+		for _, ch := range currentHosts {
+			if strings.EqualFold(ch, h) {
+				return true
+			}
+		}
+		return false
+	}
+
+	var candidates []string
+	if s.cfg.ServerName != "" {
+		candidates = append(candidates, s.cfg.ServerName)
+	}
+	if u, err := url.Parse(s.agentURL()); err == nil && u.Hostname() != "" {
+		candidates = append(candidates, u.Hostname())
+	}
+	candidates = append(candidates, pki.HostIPs()...)
+
+	var missing []string
+	for _, cand := range candidates {
+		cand = strings.TrimSpace(cand)
+		if cand != "" && !covers(cand) && !slices.Contains(missing, cand) {
+			missing = append(missing, cand)
+		}
+	}
+
+	if len(missing) == 0 {
+		return
+	}
+
+	newHosts := append([]string{}, currentHosts...)
+	for _, m := range missing {
+		if !slices.Contains(newHosts, m) {
+			newHosts = append(newHosts, m)
+		}
+	}
+
+	s.log.Info("auto-healing server TLS certificate to include missing host(s)",
+		"added", missing,
+		"hosts", strings.Join(newHosts, ","),
+	)
+
+	// Backup old server cert/key if present
+	for _, f := range []string{pki.ServerCert, pki.ServerKey} {
+		p := filepath.Join(s.cfg.PKIDir, f)
+		if _, err := os.Stat(p); err == nil {
+			_ = os.Rename(p, p+".old")
+		}
+	}
+
+	if err := s.ca.IssueServer(s.cfg.PKIDir, newHosts); err != nil {
+		s.log.Error("could not auto-heal server TLS certificate", "err", err)
+	}
 }
 
 // principal is who is calling: User is the name (the email for local
