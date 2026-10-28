@@ -1192,7 +1192,10 @@ Notes:
 - 1638: the installed version of the product blocks this MSI. The vendor's upgrade package, or
   removing the old version first, is needed. Grant an exception meanwhile if required.
 - For any other code, look up the Windows / MSI error code, then read `CBS.log` (msu) or the MSI
-  verbose log in `C:\ProgramData\offpatch\logs\` (msi).
+  verbose log in `C:\ProgramData\offpatch\logs\` (msi). A failed wusa run now appends the cause
+  lines of the servicing log (`C:\Windows\Logs\CBS\CBS.log`) to the detail, so the console shows
+  e.g. `… Error: 0x800f0068` under the exit code; `CBS.log` is still the authoritative source when
+  that excerpt is not conclusive (older agents show only the bare exit code).
 
 ### 8.5 Other failures
 
