@@ -362,7 +362,14 @@ func (w *Windows) install(ctx context.Context, p manifest.Package, file string) 
 	}
 	switch p.Kind {
 	case "msu":
+		// A wusa failure says why only in the servicing log: append its tail
+		// to the detail, like the msiexec verbose log is appended below.
+		cbs := cbsLogPathFor()
 		code, res = runInstaller(ctx, filepath.Join(sys, "wusa.exe"), file, "/quiet", "/norestart")
+		if res != nil {
+			return withCBSLog(*res, cbs)
+		}
+		return withCBSLog(classifyInstall("msu", code), cbs)
 	case manifest.KindExe:
 		return w.installExe(ctx, p, file)
 	case "msi":
@@ -402,7 +409,12 @@ func (w *Windows) uninstall(ctx context.Context, p manifest.Package) Result {
 		if kb == "" || strings.Trim(kb, "0123456789") != "" {
 			return Result{State: "failed", ExitCode: -1, Detail: "invalid KB " + p.KB}
 		}
+		cbs := cbsLogPathFor()
 		code, res = runInstaller(ctx, filepath.Join(sys, "wusa.exe"), "/uninstall", "/kb:"+kb, "/quiet", "/norestart")
+		if res != nil {
+			return withCBSLog(*res, cbs)
+		}
+		return withCBSLog(classifyUninstall("msu", code), cbs)
 	case "msi":
 		if !msiGUID.MatchString(p.ProductCode) {
 			return Result{State: "failed", ExitCode: -1, Detail: "invalid product code " + p.ProductCode}

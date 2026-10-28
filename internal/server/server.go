@@ -129,9 +129,16 @@ func New(cfg *Config, st *store.Store, rp *repo.Repo, ui fs.FS, log *slog.Logger
 // certificate and no client-certificate request instead (publictls.go).
 func (s *Server) TLSConfig() *tls.Config {
 	cfg := s.withPublicTLS(s.internalTLSConfig())
-	s.checkAgentURLCert()
+	// checkAgentURLCert logs ERROR and returns a descriptive error when the
+	// agent IP is not in the server certificate SANs (causes curl error 60 on
+	// agent install). The error is already logged at ERROR level; we surface it
+	// here as well so any caller that wraps startup can surface it.
+	if err := s.checkAgentURLCert(); err != nil {
+		s.log.Error("agent install will fail until the certificate is reissued", "err", err)
+	}
 	return cfg
 }
+
 
 func (s *Server) internalTLSConfig() *tls.Config {
 	pool := x509.NewCertPool()

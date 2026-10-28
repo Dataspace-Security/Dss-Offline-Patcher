@@ -481,11 +481,14 @@ func (s *Server) certCovers(host string) bool {
 	return false
 }
 
-// checkAgentURLCert warns when server_name or the agent URL's host is not
-// covered by the internal server certificate (agents would refuse it).
-func (s *Server) checkAgentURLCert() {
+// checkAgentURLCert logs an ERROR and returns a non-nil error when server_name
+// or the agent URL's host is not covered by the internal server certificate.
+// Agents will refuse the TLS connection (curl error 60 / x509 hostname mismatch)
+// until the certificate is reissued with the correct hosts.
+// Fix: pmserver reissue-server-cert -hosts <ip-or-hostname>
+func (s *Server) checkAgentURLCert() error {
 	if len(s.certHosts) == 0 {
-		return
+		return nil
 	}
 	check := [][2]string{}
 	if s.cfg.ServerName != "" {
@@ -494,12 +497,21 @@ func (s *Server) checkAgentURLCert() {
 	if u, err := url.Parse(s.agentURL()); err == nil && u.Hostname() != "" {
 		check = append(check, [2]string{"agent_url", u.Hostname()})
 	}
+	var errs []string
 	for _, c := range check {
 		if !s.certCovers(c[1]) {
-			s.log.Warn(c[0]+" is not covered by the internal server certificate: agents will refuse it; reissue it with pmserver reissue-server-cert -hosts ...",
-				c[0], c[1], "certificate_hosts", strings.Join(s.certHosts, ","))
+			msg := fmt.Sprintf("%s %q is not in the internal server certificate (hosts: %s): "+
+				"agents will get a TLS hostname mismatch error (curl: 60). "+
+				"Fix: pmserver reissue-server-cert -hosts %s",
+				c[0], c[1], strings.Join(s.certHosts, ","), c[1])
+			s.log.Error(msg, c[0], c[1], "certificate_hosts", strings.Join(s.certHosts, ","))
+			errs = append(errs, msg)
 		}
 	}
+	if len(errs) > 0 {
+		return fmt.Errorf("server certificate mismatch: %s", strings.Join(errs, "; "))
+	}
+	return nil
 }
 
 // checkPublicCert raises public_cert_expiring (warning under 14 days,
