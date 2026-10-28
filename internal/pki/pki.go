@@ -96,17 +96,19 @@ func LoadServerCert(dir string) (*x509.Certificate, error) {
 	return ParseCertPEM(b)
 }
 
-// HostIPs returns all non-loopback IPv4 addresses and hostname for the local machine
-// so server certificates can automatically cover them (preventing curl error 60).
+// HostIPs returns all IPv4 addresses (including loopback and all active network interfaces)
+// and hostname for the local machine so server certificates automatically cover all of them dynamically.
 func HostIPs() []string {
-	var out []string
+	out := []string{"127.0.0.1", "localhost"}
 	if h, err := os.Hostname(); err == nil && h != "" {
-		out = append(out, h)
+		if !slices.Contains(out, h) {
+			out = append(out, h)
+		}
 	}
 	if addrs, err := net.InterfaceAddrs(); err == nil {
 		for _, a := range addrs {
 			if n, ok := a.(*net.IPNet); ok {
-				if v4 := n.IP.To4(); v4 != nil && !v4.IsLoopback() {
+				if v4 := n.IP.To4(); v4 != nil {
 					s := v4.String()
 					if !slices.Contains(out, s) {
 						out = append(out, s)

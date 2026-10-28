@@ -1598,7 +1598,7 @@ else
 fi
 
 SCHEME=https; [ $INSECURE = 1 ] && SCHEME=http
-HOSTS=$(printf '%s\n' "$SERVER_NAME" "$(hostname)" localhost 127.0.0.1 "$IP" "$EXTRA_HOSTS" | tr ',' '\n' | awk 'NF && !seen[$0]++' | paste -sd, -)
+HOSTS=$(printf '%s\n' "$SERVER_NAME" "$(hostname)" localhost 127.0.0.1 $(local_ips) "$IP" "$EXTRA_HOSTS" | tr ',' '\n' | awk 'NF && !seen[$0]++' | paste -sd, -)
 case "$LISTEN_HOST" in ""|0.0.0.0|"::"|"[::]") LOCAL_HOST=127.0.0.1 ;; *) LOCAL_HOST=$LISTEN_HOST ;; esac
 URL_LOCAL="$SCHEME://$LOCAL_HOST:$PORT"
 URL_PUBLIC="$SCHEME://${SERVER_NAME:-${IP:-$(hostname)}}:$PORT"   # the console (browsers)
@@ -1924,9 +1924,9 @@ if [ $IS_SERVER = 1 ]; then
     sans=$(openssl x509 -in "$ETC/pki/server.pem" -noout -ext subjectAltName 2>/dev/null | tail -n +2 | tr ',' '\n' \
            | sed -n 's/^[[:space:]]*DNS://p; s/^[[:space:]]*IP Address://p' | tr -d ' ' || true)
     need=""
-    for h in "$SERVER_NAME" localhost 127.0.0.1 ${IP:+"$IP"}; do printf '%s\n' "$sans" | grep -qixF "$h" || need="$need $h"; done
+    for h in "$SERVER_NAME" "$(hostname)" localhost 127.0.0.1 $(local_ips); do printf '%s\n' "$sans" | grep -qixF "$h" || need="$need $h"; done
     if [ -n "$need" ]; then
-      keep=$(printf '%s\n' "$SERVER_NAME" localhost 127.0.0.1 $sans "$IP" "$(printf '%s' "$EXTRA_HOSTS" | tr ',' '\n')" | awk 'NF && !seen[tolower($0)]++' | paste -sd, -)
+      keep=$(printf '%s\n' "$SERVER_NAME" "$(hostname)" localhost 127.0.0.1 $(local_ips) $sans "$IP" "$(printf '%s' "$EXTRA_HOSTS" | tr ',' '\n')" | awk 'NF && !seen[tolower($0)]++' | paste -sd, -)
       if as_user "$SVC_USER" "$PREFIX/bin/pmserver" reissue-server-cert -dir "$ETC/pki" -hosts "$keep" >/dev/null; then
         ok "server certificate reissued for: $keep (added:$need; agents keep working: they pin the CA)"
       else
