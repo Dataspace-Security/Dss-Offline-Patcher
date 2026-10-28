@@ -7,6 +7,7 @@ $ProgressPreference = 'SilentlyContinue'
 # Windows PowerShell 5.1 on older .NET still offers only SSL3/TLS 1.0; the server requires TLS 1.2+.
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $token = $t
+{{if .Token}}if (-not $token) { $token = '{{.Token}}' }{{end}}
 if (-not $token) { throw 'Set $t to the enrollment token first (copy the full command from the console).' }
 $me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {

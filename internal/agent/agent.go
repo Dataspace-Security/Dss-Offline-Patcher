@@ -141,6 +141,26 @@ func httpClient(caFile, certFile, keyFile string) (*http.Client, error) {
 			return nil, errors.New("ca_file contains no certificates")
 		}
 		tr.TLSClientConfig.RootCAs = pool
+		tr.TLSClientConfig.InsecureSkipVerify = true
+		tr.TLSClientConfig.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return errors.New("no server certificate presented")
+			}
+			cert, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return err
+			}
+			opts := x509.VerifyOptions{
+				Roots:       pool,
+				CurrentTime: time.Now(),
+			}
+			if _, err := cert.Verify(opts); err == nil {
+				return nil
+			}
+			opts.DNSName = ""
+			_, err = cert.Verify(opts)
+			return err
+		}
 	}
 	if certFile != "" {
 		pair, err := tls.LoadX509KeyPair(certFile, keyFile)

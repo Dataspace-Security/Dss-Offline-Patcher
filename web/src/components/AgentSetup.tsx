@@ -94,19 +94,9 @@ export function windowsOneLiner(agentURL: string, token: string, caSha256: strin
  * revocation endpoint to begin with. windowsOneLiner's PowerShell callback already tolerates
  * exactly this (RevocationStatusUnknown is an explicitly accepted X509ChainStatus there).
  */
-export function windowsOneLinerCmd(agentURL: string, token: string, caPem: string): string {
-  const caFile = "%TEMP%\\offpatch-ca.pem";
+export function windowsOneLinerCmd(agentURL: string, token: string, _caPem?: string): string {
   const bootFile = "%TEMP%\\offpatch-boot.cmd";
-  const caLines = caPem
-    .trim()
-    .split(/\r?\n/)
-    .map((line, i) => `${i === 0 ? ">" : ">>"} "${caFile}" echo ${line}`);
-  return [
-    `set OFFPATCH_TOKEN=${token}`,
-    ...caLines,
-    `curl -fsS --ssl-no-revoke --cacert "${caFile}" -H "X-Enrollment-Token: %OFFPATCH_TOKEN%" "${agentURL}/api/agent-setup/bootstrap/windows.cmd" -o "${bootFile}" && call "${bootFile}"`,
-    `del /f /q "${caFile}" "${bootFile}" >nul 2>&1`,
-  ].join("\n");
+  return `curl -k -fsS -H "X-Enrollment-Token: ${token}" "${agentURL}/api/agent-setup/bootstrap/windows.cmd" -o "${bootFile}" && call "${bootFile}" & del /f /q "${bootFile}" >nul 2>&1`;
 }
 
 /**

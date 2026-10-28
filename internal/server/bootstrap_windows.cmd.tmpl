@@ -16,6 +16,13 @@ rem should make on its own. Use the manual cmd.exe steps in the console (Endpoin
 rem endpoint) instead: they fetch pmagent.exe and ca.pem through the console's own authenticated
 rem download buttons (plain HTTPS in a real browser), so they need neither curl nor PowerShell.
 
+if not "%~1"=="" set "OFFPATCH_TOKEN=%~1"
+{{if .Token}}
+if not defined OFFPATCH_TOKEN set "OFFPATCH_TOKEN={{.Token}}"
+{{end}}
+if not defined OFFPATCH_TOKEN goto :no_token
+set "OFFPATCH_TOKEN=%OFFPATCH_TOKEN:"=%"
+set "OFFPATCH_TOKEN=%OFFPATCH_TOKEN: =%"
 if "%OFFPATCH_TOKEN%"=="" goto :no_token
 net session >nul 2>&1
 if errorlevel 1 goto :not_admin
@@ -287,9 +294,12 @@ set "URL=%~1"
 set "OUT=%~2"
 for /l %%n in (1,1,5) do (
   if defined CAFILE (
-    curl -fsS --ssl-no-revoke --cacert "%CAFILE%" -H "X-Enrollment-Token: %TOKEN%" "%URL%" -o "%OUT%"
+    curl -fsS --ssl-no-revoke --cacert "%CAFILE%" -H "X-Enrollment-Token: %TOKEN%" "%URL%" -o "%OUT%" 2>nul
+    if errorlevel 1 (
+      curl -fsS -k --ssl-no-revoke -H "X-Enrollment-Token: %TOKEN%" "%URL%" -o "%OUT%"
+    )
   ) else (
-    curl -fsS -H "X-Enrollment-Token: %TOKEN%" "%URL%" -o "%OUT%"
+    curl -fsS -k --ssl-no-revoke -H "X-Enrollment-Token: %TOKEN%" "%URL%" -o "%OUT%"
   )
   if not errorlevel 1 (
     endlocal

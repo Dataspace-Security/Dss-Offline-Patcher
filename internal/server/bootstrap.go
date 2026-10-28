@@ -66,7 +66,11 @@ var hostRe = regexp.MustCompile(`^[A-Za-z0-9.\-]+(:[0-9]{1,5})?$|^\[[0-9A-Fa-f:.
 const bootstrapExe = "pmagent.exe"
 
 func (s *Server) bootstrapAllowed(w http.ResponseWriter, r *http.Request) bool {
-	if !s.store.EnrollmentTokenUsable(r.Context(), r.Header.Get("X-Enrollment-Token")) {
+	token := r.Header.Get("X-Enrollment-Token")
+	if token == "" {
+		token = r.URL.Query().Get("token")
+	}
+	if !s.store.EnrollmentTokenUsable(r.Context(), token) {
 		writeErr(w, http.StatusUnauthorized, "enrollment token invalid, used or expired")
 		return false
 	}
@@ -140,9 +144,14 @@ func (s *Server) bootstrapWindows(w http.ResponseWriter, r *http.Request) {
 	for _, k := range keys {
 		pems = append(pems, strings.TrimSpace(k.PublicKey))
 	}
+	token := r.Header.Get("X-Enrollment-Token")
+	if token == "" {
+		token = r.URL.Query().Get("token")
+	}
 	var buf bytes.Buffer
 	if err := windowsBootstrap.Execute(&buf, map[string]any{
 		"Server":    url,
+		"Token":     token,
 		"ExeSHA256": exeSHA,
 		"Keys":      pems,
 		"Root":      strings.TrimSpace(rootPEM),
@@ -168,9 +177,14 @@ func (s *Server) bootstrapWindowsCmd(w http.ResponseWriter, r *http.Request) {
 	for _, k := range keys {
 		keyLines = append(keyLines, pemLines(k.PublicKey))
 	}
+	token := r.Header.Get("X-Enrollment-Token")
+	if token == "" {
+		token = r.URL.Query().Get("token")
+	}
 	var buf bytes.Buffer
 	if err := windowsBootstrapCmd.Execute(&buf, map[string]any{
 		"Server":    url,
+		"Token":     token,
 		"ExeSHA256": exeSHA,
 		"Keys":      keyLines,
 		"Root":      pemLines(rootPEM),
