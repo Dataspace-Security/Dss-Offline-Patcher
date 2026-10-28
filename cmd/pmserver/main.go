@@ -556,18 +556,42 @@ func verifyReport(args []string) error {
 
 // reissueCert replaces server.pem/server.key (e.g. before the 2-year expiry
 // or when host names change) using the existing CA; agents keep trusting it.
+// When -hosts is omitted the existing certificate's SANs are reused, so
+// `pmserver reissue-server-cert` works without any extra arguments.
 func reissueCert(args []string) error {
 	fs := flag.NewFlagSet("reissue-server-cert", flag.ExitOnError)
 	dir := fs.String("dir", "pki", "PKI directory containing ca.pem and ca.key")
-	hosts := fs.String("hosts", "", "comma-separated DNS names / IPs")
+	hosts := fs.String("hosts", "", "comma-separated DNS names / IPs (omit to reuse the existing certificate's SANs)")
 	fs.Parse(args)
-	if *hosts == "" {
-		return fmt.Errorf("-hosts is required")
-	}
 	ca, err := pki.Load(*dir)
 	if err != nil {
 		return err
 	}
+
+	hostList := []string{}
+	if *hosts != "" {
+		// Trim spaces so "10.0.0.1, myhost" works the same as "10.0.0.1,myhost".
+		for _, h := range strings.Split(*hosts, ",") {
+			if h = strings.TrimSpace(h); h != "" {
+				hostList = append(hostList, h)
+			}
+		}
+	} else {
+		// Auto-detect from the existing server certificate's SANs.
+		existing, err := pki.LoadServerCert(*dir)
+		if err != nil {
+			return fmt.Errorf("-hosts is required (could not read existing cert to auto-detect: %w)", err)
+		}
+		hostList = append(hostList, existing.DNSNames...)
+		for _, ip := range existing.IPAddresses {
+			hostList = append(hostList, ip.String())
+		}
+		if len(hostList) == 0 {
+			return fmt.Errorf("-hosts is required: existing certificate has no SANs to reuse")
+		}
+		fmt.Printf("reusing existing certificate SANs: %s\n", strings.Join(hostList, ", "))
+	}
+
 	for _, f := range []string{pki.ServerCert, pki.ServerKey} {
 		p := filepath.Join(*dir, f)
 		if _, err := os.Stat(p); err == nil {
@@ -576,9 +600,11 @@ func reissueCert(args []string) error {
 			}
 		}
 	}
-	if err := ca.IssueServer(*dir, strings.Split(*hosts, ",")); err != nil {
+	if err := ca.IssueServer(*dir, hostList); err != nil {
 		return err
 	}
-	fmt.Printf("new server certificate written to %s (previous kept as *.old); restart pmserver to use it\n", filepath.Join(*dir, pki.ServerCert))
+	fmt.Printf("new server certificate written to %s (hosts: %s; previous kept as *.old); restart pmserver to use it\n",
+		filepath.Join(*dir, pki.ServerCert), strings.Join(hostList, ", "))
 	return nil
 }
+

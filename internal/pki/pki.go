@@ -85,6 +85,16 @@ func ParseCertPEM(b []byte) (*x509.Certificate, error) {
 	return x509.ParseCertificate(blk.Bytes)
 }
 
+// LoadServerCert reads and parses the server certificate from dir so callers
+// can inspect its SANs (e.g. to reuse them when reissuing).
+func LoadServerCert(dir string) (*x509.Certificate, error) {
+	b, err := os.ReadFile(filepath.Join(dir, ServerCert))
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", ServerCert, err)
+	}
+	return ParseCertPEM(b)
+}
+
 // Init creates a CA and a server certificate for hosts (DNS names or IPs).
 // It refuses to overwrite an existing CA.
 func Init(dir string, hosts []string) error {
