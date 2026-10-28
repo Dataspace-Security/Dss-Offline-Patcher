@@ -203,6 +203,7 @@ export function AgentSetupGuide({ token, groups, site }: { token?: string; group
   }, [data?.agent_url, urlEdited]);
   const [useCA, setUseCA] = useState(false);
   const [useRoot, setUseRoot] = useState(false);
+  const [winShell, setWinShell] = useState<"cmd" | "powershell">("cmd");
   const [simHost, setSimHost] = useState("pc-lab-01");
   const [dlError, setDlError] = useState<string | null>(null);
 
@@ -341,13 +342,32 @@ sc query offpatch-agent`,
         <div className="setup-quick">
           <h3>One-command install</h3>
           <div className="hint">
-            On the endpoint, open <b>Windows PowerShell as Administrator</b> (not PowerShell 7) and paste this line. It
-            checks the server against this CA fingerprint, downloads and verifies <Mono>pmagent.exe</Mono>, enrolls the
-            computer and starts the <Mono>offpatch-agent</Mono> service. To repair or reinstall later, run it again with a new
-            token; the existing enrollment is kept. Routine agent upgrades go through signed agent packages.
+            On the endpoint, open <b>Command Prompt as Administrator</b> (or <b>PowerShell as Administrator</b>) and paste this line. It
+            downloads and verifies <Mono>pmagent.exe</Mono>, enrolls the
+            computer and starts the <Mono>offpatch-agent</Mono> service automatically.
+          </div>
+          <div className="tabs" style={{ margin: "0.5rem 0 1rem 0" }}>
+            <button
+              type="button"
+              className={`tab ${winShell === "cmd" ? "tab-on" : ""}`}
+              onClick={() => setWinShell("cmd")}
+            >
+              Command Prompt (cmd.exe)
+            </button>
+            <button
+              type="button"
+              className={`tab ${winShell === "powershell" ? "tab-on" : ""}`}
+              onClick={() => setWinShell("powershell")}
+            >
+              PowerShell (Administrator)
+            </button>
           </div>
           {token ? (
-            <CodeBlock lang="PowerShell (Administrator)" code={windowsOneLiner(url, tok, data?.ca_sha256 ?? "", { web: hostIsPublic })} />
+            winShell === "cmd" ? (
+              <CodeBlock lang="cmd.exe (Administrator)" code={windowsOneLinerCmd(url, tok, caPem)} />
+            ) : (
+              <CodeBlock lang="PowerShell (Administrator)" code={windowsOneLiner(url, tok, data?.ca_sha256 ?? "", { web: hostIsPublic })} />
+            )
           ) : (
             <div className="banner banner-info">
               The command contains an enrollment token. <Link to="/endpoints">Endpoints → Create enrollment token</Link> shows
@@ -355,15 +375,6 @@ sc query offpatch-agent`,
             </div>
           )}
           <div className="hint">CA SHA-256 <Mono>{data?.ca_sha256}</Mono></div>
-          <ManualWrap collapsed summary="PowerShell blocked?">
-            <div className="hint">
-              For endpoints where PowerShell itself is blocked by policy (not just avoided). Paste this into an{" "}
-              <b>elevated Command Prompt</b> instead — same checks, same result. It needs <Mono>curl.exe</Mono>, which
-              ships with Windows 10 1803+ and Server 2019+; older images without it should use the manual,
-              cmd.exe-only install steps below instead.
-            </div>
-            {token && <CodeBlock lang="cmd.exe (Administrator)" code={windowsOneLinerCmd(url, tok, caPem)} />}
-          </ManualWrap>
         </div>
       )}
       {platform === "windows" && hasCA && urlValid && !hostInCert && (
