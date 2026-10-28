@@ -16,10 +16,13 @@ rem should make on its own. Use the manual cmd.exe steps in the console (Endpoin
 rem endpoint) instead: they fetch pmagent.exe and ca.pem through the console's own authenticated
 rem download buttons (plain HTTPS in a real browser), so they need neither curl nor PowerShell.
 
-if not "%~1"=="" set "OFFPATCH_TOKEN=%~1"
+if not "%~1"=="" (
+  set "OFFPATCH_TOKEN=%~1"
+) else (
 {{if .Token}}
-if not defined OFFPATCH_TOKEN set "OFFPATCH_TOKEN={{.Token}}"
+  set "OFFPATCH_TOKEN={{.Token}}"
 {{end}}
+)
 if not defined OFFPATCH_TOKEN goto :no_token
 set "OFFPATCH_TOKEN=%OFFPATCH_TOKEN:"=%"
 set "OFFPATCH_TOKEN=%OFFPATCH_TOKEN: =%"

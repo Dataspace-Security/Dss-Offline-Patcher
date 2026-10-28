@@ -96,7 +96,7 @@ export function windowsOneLiner(agentURL: string, token: string, caSha256: strin
  */
 export function windowsOneLinerCmd(agentURL: string, token: string, _caPem?: string): string {
   const bootFile = "%TEMP%\\offpatch-boot.cmd";
-  return `curl -k -fsS -H "X-Enrollment-Token: ${token}" "${agentURL}/api/agent-setup/bootstrap/windows.cmd" -o "${bootFile}" && call "${bootFile}" & del /f /q "${bootFile}" >nul 2>&1`;
+  return `curl -k -fsS -H "X-Enrollment-Token: ${token}" "${agentURL}/api/agent-setup/bootstrap/windows.cmd" -o "${bootFile}" && call "${bootFile}" "${token}" & del /f /q "${bootFile}" >nul 2>&1`;
 }
 
 /**

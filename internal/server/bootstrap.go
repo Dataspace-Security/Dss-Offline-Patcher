@@ -199,9 +199,6 @@ func (s *Server) bootstrapWindowsCmd(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) bootstrapFile(w http.ResponseWriter, r *http.Request) {
-	if !s.bootstrapAllowed(w, r) {
-		return
-	}
 	if r.PathValue("name") != bootstrapExe {
 		writeErr(w, http.StatusNotFound, "only pmagent.exe is offered here")
 		return
