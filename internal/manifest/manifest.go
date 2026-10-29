@@ -168,7 +168,13 @@ func (m *Manifest) ValidateSchema(now time.Time) error {
 		add("packages count %d out of range 1..%d", n, MaxPackages)
 	}
 	seenID := map[string]bool{}
-	seenFile := map[string]bool{}
+	// seenFile remembers the first package that named a payload file: a
+	// later package may reference the same file only when it carries its
+	// identical content (same size and SHA-256) — one physical payload the
+	// bundle ships once, several packages pointing at it (a shared
+	// cumulative update delivered under two product lines, e.g.
+	// "Windows 11 24H2" and "Windows Server 2025").
+	seenFile := map[string]FileRef{}
 	for i, p := range m.Packages {
 		pfx := fmt.Sprintf("packages[%d]", i)
 		if !idRe.MatchString(p.PackageID) {
@@ -279,10 +285,10 @@ func (m *Manifest) ValidateSchema(now time.Time) error {
 		}
 		if !strings.HasPrefix(p.File.Name, "payload/") || !validBase(strings.TrimPrefix(p.File.Name, "payload/")) {
 			add("%s.file.name must be payload/<basename>", pfx)
-		} else if seenFile[p.File.Name] {
-			add("%s.file.name duplicated", pfx)
+		} else if prev, seen := seenFile[p.File.Name]; seen && (prev.Size != p.File.Size || prev.SHA256 != p.File.SHA256) {
+			add("%s.file.name %q duplicated with different content (size or sha256)", pfx, p.File.Name)
 		}
-		seenFile[p.File.Name] = true
+		seenFile[p.File.Name] = p.File
 		if p.File.Size <= 0 {
 			add("%s.file.size must be > 0", pfx)
 		}

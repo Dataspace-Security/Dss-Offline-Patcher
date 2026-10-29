@@ -61,7 +61,7 @@ Any other entry is rejected. That includes directories other than `payload/`, sy
 | `prerequisites` | optional list of KBs (`KB1234567`) or package names that must already be in the endpoint inventory before install |
 | `supersedes` | optional list of KBs |
 | `severity` | `critical` \| `important` \| `moderate` \| `low` |
-| `file.name` | `payload/<basename>`, basename `[A-Za-z0-9._-]+`, not `.`/`..`, no trailing dot, not a Windows device name (`CON`, `NUL`, `COM1`, …) |
+| `file.name` | `payload/<basename>`, basename `[A-Za-z0-9._-]+`, not `.`/`..`, no trailing dot, not a Windows device name (`CON`, `NUL`, `COM1`, …). Two packages may reference the same file when it carries identical content (same `file.size` and `file.sha256`): one physical payload the bundle ships once, several packages pointing at it — e.g. a shared cumulative update delivered under two product lines. The same name with different content is rejected. |
 | `file.sha256` | lowercase hex; must match the payload |
 | `vendor_signature.status` | `valid` \| `invalid` \| `not_checked`. `invalid` is rejected at intake. |
 

@@ -50,6 +50,26 @@ func TestSchema(t *testing.T) {
 	}
 }
 
+func TestSharedPayloadFile(t *testing.T) {
+	m := validManifest(t)
+	// One physical payload referenced by two packages with different ids
+	// (a shared cumulative update delivered under two product lines): the
+	// bundle ships the file once, both packages point at it.
+	pkg2 := m.Packages[0]
+	pkg2.PackageID = "KB5000001-x64-server"
+	m.Packages = append(m.Packages, pkg2)
+	if err := m.ValidateSchema(time.Now()); err != nil {
+		t.Fatalf("shared identical payload rejected: %v", err)
+	}
+	// The same name with different content is still a collision.
+	dup := *m
+	dup.Packages = []Package{m.Packages[0], m.Packages[1]}
+	dup.Packages[1].File.SHA256 = strings.Repeat("b", 64)
+	if err := dup.ValidateSchema(time.Now()); err == nil || !strings.Contains(err.Error(), "duplicated with different content") {
+		t.Fatalf("same name, different content: %v", err)
+	}
+}
+
 func TestSignVerify(t *testing.T) {
 	pub, priv, _ := GenerateKey()
 	msg := []byte(`{"a":1}`)
