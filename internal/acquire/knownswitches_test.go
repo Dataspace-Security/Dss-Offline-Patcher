@@ -26,4 +26,18 @@ func TestKnownSwitches(t *testing.T) {
 	if keep.Installers[0].Switches.Silent != "/S" || keep.Installers[0].Scope != "machine" {
 		t.Fatal("manifest's own switch/scope overridden")
 	}
+
+	// Chrome's standalone setup documents two silent modes: /silent per
+	// user, /system-level /silent machine-wide; the scope picks the mode.
+	ch := &WingetManifest{ID: "Google.Chrome.EXE", Installers: []WingetInstaller{
+		{Architecture: "x86", InstallerType: "exe"},
+		{Architecture: "x86", InstallerType: "exe", Scope: "machine"},
+	}}
+	applyKnownSwitches(ch)
+	if in := ch.Installers[0]; in.Switches.Silent != "/silent" || in.Scope != "user" {
+		t.Fatalf("chrome user exe: %+v", in)
+	}
+	if in := ch.Installers[1]; in.Switches.Silent != "/system-level /silent" || in.Scope != "machine" {
+		t.Fatalf("chrome machine exe: %+v", in)
+	}
 }

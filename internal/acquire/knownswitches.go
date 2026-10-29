@@ -6,11 +6,14 @@ import "strings"
 // without InstallerSwitches.Silent, although the vendor's installer has a
 // documented silent mode. Kept short and vetted by hand: a wrong switch
 // would show a setup window on users' PCs. Squirrel installers (Discord,
-// GitHub Desktop, Postman) install silently with --silent, per user.
-var knownSilent = map[string]struct{ silent, scope string }{
-	"discord.discord":      {"--silent", "user"},
-	"github.githubdesktop": {"--silent", "user"},
-	"postman.postman":      {"--silent", "user"},
+// GitHub Desktop, Postman) install silently with --silent, per user. The
+// Google Chrome standalone setup documents /silent (per user) and
+// /system-level /silent (machine-wide); per-machine entries take the latter.
+var knownSilent = map[string]struct{ silentMachine, silentUser, scope string }{
+	"discord.discord":      {"--silent", "--silent", "user"},
+	"github.githubdesktop": {"--silent", "--silent", "user"},
+	"postman.postman":      {"--silent", "--silent", "user"},
+	"google.chrome.exe":    {"/system-level /silent", "/silent", "user"},
 }
 
 // applyKnownSwitches fills in the silent switch (and scope, when the
@@ -25,7 +28,11 @@ func applyKnownSwitches(m *WingetManifest) {
 		if in.InstallerType != "exe" || in.Switches.Silent != "" {
 			continue
 		}
-		in.Switches.Silent = k.silent
+		if strings.ToLower(in.Scope) == "machine" {
+			in.Switches.Silent = k.silentMachine
+		} else {
+			in.Switches.Silent = k.silentUser
+		}
 		if in.Scope == "" {
 			in.Scope = k.scope
 		}
